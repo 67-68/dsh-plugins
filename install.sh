@@ -13,8 +13,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WEB_DIR="$DSH_HOME/profiles/web"
 PRESET_DIR="$DSH_HOME/.agent-presets"
+DOC_DIR="$DSH_HOME/DOCUMENT"
 
-mkdir -p "$WEB_DIR" "$PRESET_DIR"
+mkdir -p "$WEB_DIR" "$PRESET_DIR" "$DOC_DIR"
 
 echo "==> Deploying dsh-plugins -> $DSH_HOME"
 
@@ -40,6 +41,14 @@ for dir in "$HERE"/presets/*/; do
   rm -rf "$PRESET_DIR/$name"
   ln -s "$dir" "$PRESET_DIR/$name"
   echo "    preset   $name"
+done
+
+# 4) Experience docs (*.md) into DSH_HOME/DOCUMENT.
+for src in "$HERE"/document/*.md; do
+  [ -e "$src" ] || continue
+  name="$(basename "$src")"
+  ln -sfn "$src" "$DOC_DIR/$name"
+  echo "    doc      $name"
 done
 
 echo "==> Done. Restart 'dsh web' to apply changes."

@@ -13,6 +13,9 @@ dsh-plugins/
 │   └── g-chat/
 ├── profile/
 │   └── cordis.patch.yml      # web profile 的 user patch 层，引用 ../plugins/*.mjs
+├── document/                 # 经验文档（GENERAL.md 全模式 + {mode}.md 按模式）
+│   ├── GENERAL.md
+│   └── cordis.md
 ├── install.sh                # 一键把上面内容 symlink 进 ~/.dsh
 └── README.md
 ```
@@ -24,11 +27,12 @@ dsh-plugins/
 ./install.sh /path      # 部署到指定 DSH home
 ```
 
-`install.sh` 会做三件事（全部用 symlink，改仓库 = 改运行时）：
+`install.sh` 会做四件事（全部用 symlink，改仓库 = 改运行时）：
 
 1. `plugins/*.mjs` → `~/.dsh/profiles/web/*.mjs`
 2. `profile/cordis.patch.yml` → `~/.dsh/profiles/web/cordis.patch.yml`
 3. `presets/*/` → `~/.dsh/.agent-presets/*/`
+4. `document/*.md` → `~/.dsh/DOCUMENT/*.md`
 
 **改完插件后必须重启 `dsh web` 才生效**（web 的 HMR 是关闭的）。
 
@@ -37,6 +41,7 @@ dsh-plugins/
 - **不要直接 `git init` 在 `~/.dsh/` 里**：那里混着 `sessions/`、`storages/`、`.anonymous-user-id`、`node_modules/` 等敏感/无关内容。
 - **不要改部署自带的 preset**：`/Users/a67_68/.npm/_npx/*/config/agent-presets/` 下的 `cordis` 等 preset 属于部署本身，升级会被覆盖。要改就 copy 一份到这里再改。
 - `profile/cordis.yml` 是 profile loader 自动生成的空根，不要手动编辑，也不要入库（已 gitignore）。
+- `DOCUMENT/` 里的 `.mode-experience.log` 是插件运行日志，不入库（已 gitignore）。
 - 如果 `dsh web` 在启动时重新生成了某个文件覆盖了 symlink，重跑一次 `./install.sh` 即可。
 
 ## 连远程仓库（备份 + 版本管理）
