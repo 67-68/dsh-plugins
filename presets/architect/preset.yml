@@ -1,0 +1,2 @@
+name: 架构师模式
+description: 以 archetect.md 为核心人设的架构设计模式，提供只读检索与规划工具，严禁写业务代码。

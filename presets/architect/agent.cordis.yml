@@ -1,0 +1,35 @@
+# `architect` preset — 架构设计模式。
+# persona 原文从 persona.md 读取（cp 自 archetect.md + diff 工具名映射）。
+# 只读检索 + 规划工具；严禁写业务代码（persona 内约束禁用 write/edit）。
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: !!js "process.getBuiltinModule('node:fs').readFileSync(process.getBuiltinModule('node:url').fileURLToPath(new URL('persona.md', baseUrl)), 'utf8')"
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    search: true
+    fetch: false

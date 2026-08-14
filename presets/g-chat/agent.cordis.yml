@@ -1,0 +1,17 @@
+# `g-chat` preset — 纯对话模式。
+# persona 原文从 persona.md 读取（cp 自 g.md），零内联誊写。
+# 工具仅保留对话辅助：web_search（仅检索）与 ask_user_question。
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: !!js "process.getBuiltinModule('node:fs').readFileSync(process.getBuiltinModule('node:url').fileURLToPath(new URL('persona.md', baseUrl)), 'utf8')"
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    search: true
+    fetch: false
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
