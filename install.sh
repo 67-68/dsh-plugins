@@ -34,21 +34,27 @@ if [ -f "$HERE/profile/cordis.patch.yml" ]; then
 fi
 
 # 3) Agent presets (one dir each) into .agent-presets.
+# Presets must be REAL directories, not symlinks: agent-presets discovery does
+# readdir(..., { withFileTypes: true }) and skips any child where
+# child.isDirectory() is false — and a symlink reports isDirectory() === false.
+# So unlike the plugins/docs above, a symlinked preset is silently never seen.
 for dir in "$HERE"/presets/*/; do
   [ -d "$dir" ] || continue
   name="$(basename "$dir")"
-  # Replace an existing real dir or stale symlink with a fresh symlink.
+  # Replace an existing real dir or stale symlink with a fresh copy.
   rm -rf "$PRESET_DIR/$name"
-  ln -s "$dir" "$PRESET_DIR/$name"
-  echo "    preset   $name"
+  cp -R "$dir" "$PRESET_DIR/$name"
+  echo "    preset   $name (copied)"
 done
 
-# 4) Experience docs (*.md) into DSH_HOME/DOCUMENT.
-for src in "$HERE"/document/*.md; do
-  [ -e "$src" ] || continue
-  name="$(basename "$src")"
-  ln -sfn "$src" "$DOC_DIR/$name"
-  echo "    doc      $name"
-done
+# 4) Docs (*.md, recursive) into DSH_HOME/DOCUMENT, preserving subdirs
+#    (e.g. feature_intent/ module docs).
+while IFS= read -r src; do
+  rel="${src#"$HERE"/document/}"
+  dest="$DOC_DIR/$rel"
+  mkdir -p "$(dirname "$dest")"
+  ln -sfn "$src" "$dest"
+  echo "    doc      $rel"
+done < <(find "$HERE"/document -name '*.md' -type f)
 
 echo "==> Done. Restart 'dsh web' to apply changes."

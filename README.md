@@ -27,12 +27,16 @@ dsh-plugins/
 ./install.sh /path      # 部署到指定 DSH home
 ```
 
-`install.sh` 会做四件事（全部用 symlink，改仓库 = 改运行时）：
+`install.sh` 会做四件事（plugins / profile / document 用 symlink，改仓库 = 改运行时；**presets 必须用真实目录拷贝**）：
 
 1. `plugins/*.mjs` → `~/.dsh/profiles/web/*.mjs`
 2. `profile/cordis.patch.yml` → `~/.dsh/profiles/web/cordis.patch.yml`
-3. `presets/*/` → `~/.dsh/.agent-presets/*/`
+3. `presets/*/` → `~/.dsh/.agent-presets/*/`（**拷贝，不是 symlink**）
 4. `document/*.md` → `~/.dsh/DOCUMENT/*.md`
+
+> 为什么 presets 不能 symlink：agent-presets 发现逻辑用 `readdir(..., { withFileTypes: true })`，
+> 只认 `child.isDirectory() === true` 的目录；symlink 的 `isDirectory()` 恒为 `false`，
+> 会被静默跳过 —— 所以你在仓库里能看到 preset，`dsh` 的模式选择器里却看不到。
 
 **改完插件后必须重启 `dsh web` 才生效**（web 的 HMR 是关闭的）。
 
