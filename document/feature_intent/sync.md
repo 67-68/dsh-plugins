@@ -9,7 +9,7 @@
 | 内容 | 源 → 目标 | 方式 | 生效时机 |
 | --- | --- | --- | --- |
 | 纯 host 插件 | `plugins/*.mjs` → `profiles/web/*.mjs` | symlink | 重启 `dsh web` |
-| 双面包插件 | `packages/*/` → `profiles/node_modules/<name>` | symlink | 重启 `dsh web` |
+| 双面包插件 | `packages/*/` → `profiles/node_modules/<name>` | **copy（真实目录）** | 重启 `dsh web` |
 | 补丁 | `profile/cordis.patch.yml` → `profiles/web/cordis.patch.yml` | symlink | 重启 `dsh web` |
 | 预设 | `presets/*/` → `.agent-presets/*/` | **copy（真实目录）** | **立即**（刷新浏览器） |
 | 文档 | `document/*.md` → `DOCUMENT/*.md` | symlink | 重启 `dsh web` |
@@ -20,8 +20,9 @@
 - 仓库是真理源、`~/.dsh` 是投影：所有可编辑内容留在仓库里，可 git 管理。
 - **自己写的**（plugins / packages / presets / document）用 symlink 或 copy，真理源在仓库，「改仓库即改运行时」。
 - **外部第三方**（requirements.txt 声明的）用 `dsh plugin add`（= pnpm）安装，真理源在 npm / github，仓库里只声明「装哪个、锁什么版本」，不维护外部源码。
-- 能用 symlink 就用 symlink：plugins / packages / profile / document 的加载路径会跟随 symlink。
+- 能用 symlink 就用 symlink：plugins / profile / document 的加载路径会跟随 symlink。
 - preset 例外，必须 copy：agent-presets 发现只认真实目录（见下）。
+- package 例外，必须 copy：Node 会 realpath symlink，导致包内裸 peer 依赖（`@deepseek-ai/*`）从仓库目录解析失败（`ERR_MODULE_NOT_FOUND`），真实拷贝让模块物理落在 `profiles/node_modules` 下（见下）。
 
 ## 外部插件（requirements.txt）
 
@@ -42,5 +43,6 @@
 
 - preset 目录必须是真实目录：发现用 `readdir(..., { withFileTypes: true })`，只收 `child.isDirectory() === true` 的条目；symlink 的 `isDirectory()` 恒为 `false`，会被静默跳过。
 - preset 每次 install 都是 `rm -rf` + `cp -R` 覆盖，所以改完 `presets/` 要重跑 `./install.sh`。
-- `packages/` 的双面包插件要能被 `dsh-client-modules` 解析到（hoisted 到 `profiles/node_modules` 而非 `profiles/web/node_modules`），link 路径以实施时 `node --check` 验证为准。
+- `packages/` 的双面包插件要能被 `dsh-client-modules` 解析到（hoisted 到 `profiles/node_modules` 而非 `profiles/web/node_modules`）。
+- package 目录必须是真实目录：Node 加载模块时 realpath symlink，包内部的裸 peer 依赖（`@deepseek-ai/dsh-typert-protocol` 等）会从仓库目录向上找 `node_modules`（仓库无此目录，已 gitignore），报 `ERR_MODULE_NOT_FOUND`。因此 package 与 preset 一样 `rm -rf` + `cp -R` 覆盖，改完 `packages/` 要重跑 `./install.sh`。
 - `document/` 里非 `GENERAL` 的 `.md` 会被 mode-experience 当作「按 preset 名注入的经验文件」缓存；`feature_intent/*.md` 只作模块文档，不会被注入。

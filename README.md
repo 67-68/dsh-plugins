@@ -30,18 +30,23 @@ dsh-plugins/
 ./install.sh /path      # 部署到指定 DSH home
 ```
 
-`install.sh` 会做六类同步（plugins / profile / packages / document 用 symlink，改仓库 = 改运行时；**presets 必须用真实目录拷贝**；外部插件用 pnpm 安装）：
+`install.sh` 会做六类同步（plugins / profile / document 用 symlink，改仓库 = 改运行时；**presets 和 packages 必须用真实目录拷贝**；外部插件用 pnpm 安装）：
 
 1. `plugins/*.mjs` → `~/.dsh/profiles/web/*.mjs`
 2. `profile/cordis.patch.yml` → `~/.dsh/profiles/web/cordis.patch.yml`
 3. `presets/*/` → `~/.dsh/.agent-presets/*/`（**拷贝，不是 symlink**）
 4. `document/*.md` → `~/.dsh/DOCUMENT/*.md`
-5. `packages/*/` → `~/.dsh/profiles/node_modules/<包名>`（本地双面包插件 link）
+5. `packages/*/` → `~/.dsh/profiles/node_modules/<包名>`（本地双面包插件 **拷贝**）
 6. `plugins/requirements.txt` → `dsh plugin --profile web add`（外部插件安装，pnpm 前向器）
 
 > 为什么 presets 不能 symlink：agent-presets 发现逻辑用 `readdir(..., { withFileTypes: true })`，
 > 只认 `child.isDirectory() === true` 的目录；symlink 的 `isDirectory()` 恒为 `false`，
 > 会被静默跳过 —— 所以你在仓库里能看到 preset，`dsh` 的模式选择器里却看不到。
+>
+> 为什么 packages 不能 symlink：Node 加载模块时会 realpath 符号链接，随后从仓库目录
+> 向上解析包内部的裸 peer 依赖（如 `@deepseek-ai/dsh-typert-protocol`），而仓库没有
+> `node_modules/`（已 gitignore），导致 `ERR_MODULE_NOT_FOUND`。真实拷贝让模块物理落在
+> `profiles/node_modules` 下，peer 依赖自然解析。
 
 **改完插件后必须重启 `dsh web` 才生效**（web 的 HMR 是关闭的）。
 

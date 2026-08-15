@@ -58,15 +58,21 @@ while IFS= read -r src; do
   echo "    doc      $rel"
 done < <(find "$HERE"/document -name '*.md' -type f)
 
-# 5) Local dual-face packages (packages/*/ one dir each) linked into the
+# 5) Local dual-face packages (packages/*/ one dir each) copied into the
 #    profile's hoisted node_modules. pnpm hoists the profile's node_modules up
 #    to $DSH_HOME/profiles/node_modules (not profiles/web/node_modules), so the
-#    link must live there for the package to resolve.
+#    package must live there for the profile to resolve it.
+#    Symlinks do NOT work here: Node realpaths the module and then resolves the
+#    package's bare peer imports (e.g. @deepseek-ai/dsh-typert-protocol) from
+#    the repo dir, which has no node_modules. A real copy keeps the module
+#    physically under profiles/node_modules so its peers resolve.
 for dir in "$HERE"/packages/*/; do
   [ -d "$dir" ] || continue
   name="$(basename "$dir")"
-  ln -sfn "$dir" "$NODE_MODULES_DIR/$name"
-  echo "    package  $name"
+  # Replace an existing real dir or stale symlink with a fresh copy.
+  rm -rf "$NODE_MODULES_DIR/$name"
+  cp -R "$dir" "$NODE_MODULES_DIR/$name"
+  echo "    package  $name (copied)"
 done
 
 # 6) External plugins declared in plugins/requirements.txt: one `source@version`
@@ -83,7 +89,7 @@ if [ -f "$REQ_FILE" ]; then
       ''|'#'*) continue ;;
     esac
     echo "    ext      $line"
-    dsh plugin --profile web add "$line"
+    npx --yes @deepseek-ai/dsh plugin --profile web add "$line"
   done < "$REQ_FILE"
 else
   echo "    ext      plugins/requirements.txt not found (skipped)"
