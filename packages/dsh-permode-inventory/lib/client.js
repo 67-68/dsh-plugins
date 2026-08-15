@@ -92,8 +92,14 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => {
 				let current = true;
 				Promise.resolve().then(() => list()).then(
-					(snapshot) => { if (current) setState({ status: "ready", snapshot }); },
-					() => { if (current) setState({ status: "error" }); }
+					(snapshot) => {
+						console.log("[permode-inventory] list OK, presets:", snapshot && snapshot.length);
+						if (current) setState({ status: "ready", snapshot });
+					},
+					(err) => {
+						console.error("[permode-inventory] load FAILED:", err);
+						if (current) setState({ status: "error" });
+					}
 				);
 				return () => { current = false; };
 			}, [list, request]);
@@ -155,7 +161,9 @@ window.__ModuleLoader__.load({
 		];
 		/** Contribute the lazy per-mode inventory tab to the Plugins settings section. */
 		async function apply(ctx) {
+			console.log("[permode-inventory] apply start, mounting remote face");
 			const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
+			console.log("[permode-inventory] remote face mounted, namespace=permodeInventory");
 			ctx.effect(() => () => disposeRemote(), "permode-inventory: remote face");
 			ctx.effect(() => ctx.locale.register(NS, {
 				zh,
@@ -163,8 +171,22 @@ window.__ModuleLoader__.load({
 			}), "permode-inventory: dictionaries");
 			const t = ctx.locale.bind(NS);
 			const list = async () => {
-				const result = await ctx.remote.permodeInventory.list();
-				if (!result.ok) throw new Error(`permodeInventory.list failed: ${result.error.code}: ${result.error.message}`);
+				console.log("[permode-inventory] calling list() via ctx.get");
+				// Dot access `ctx.remote.permodeInventory` is blocked by the Cordis
+				// guard (it would require inject "remote.permodeInventory", which
+				// deadlocks before $mount). Use ctx.get() instead: it resolves the
+				// mounted namespace service without an inject declaration.
+				const permodeInventory = ctx.get("remote.permodeInventory");
+				if (permodeInventory === undefined) {
+					console.error("[permode-inventory] remote.permodeInventory service NOT found via ctx.get");
+					throw new Error("remote.permodeInventory service is not mounted");
+				}
+				const result = await permodeInventory.list();
+				if (!result.ok) {
+					console.error("[permode-inventory] remote list FAILED:", result.error);
+					throw new Error(`permodeInventory.list failed: ${result.error.code}: ${result.error.message}`);
+				}
+				console.log("[permode-inventory] remote list raw value:", result.value);
 				return result.value;
 			};
 			const injected = () => ({ list });

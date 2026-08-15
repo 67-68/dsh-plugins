@@ -150,6 +150,13 @@ Host Cordis inspect provider "Service" is already registered
   - `dsh-api-remotes/lib/client.js` `apply()`（静态 5 个 contribution 的 `$mount`）
   - `cordis/lib/index.js` `_execute()`（async apply + thenable 返回值合法，返回 disposer 会被 collect）
 
+### 坑 5：`$mount` 后访问服务要用 `ctx.get()`，点号访问会被 Guard 拦（坑 4 的补完）
+
+- **症状**：坑 4 修完、entry 不再 pending 后，modes tab 仍报「无法读取」，console 显示 `cannot get property "remote.permodeInventory" without inject`（list() 里 `ctx.remote.permodeInventory.list()` 触发）。
+- **根因**：Cordis 的 ctx 是 Proxy（`cordis/lib/index.js` 的 `ReflectService.handler.get`），`ctx.remote.permodeInventory` 这种**点号链**会被解析成服务名 `remote.permodeInventory` 并要求 `inject` 声明；而手写插件一旦 inject 它就死锁（inject 等 apply，apply 等 `$mount`）。官方 plugin-inventory 能点号访问，是因为 api-remotes 启动时就 `$mount` 了静态 contribution、inject 能解析；手写插件没这个前提。
+- **修法**：`$mount` 之后**不要点号访问**，用 `ctx.get("remote.<namespace>")` 取服务（`ctx.get` 不要求 inject，绕开死锁），取到后直接 `service.list()`。记得处理 `undefined`（服务没挂上时）。
+- **教训**：坑 4 只解决了「pending 死锁」，没解决「$mount 后怎么访问」——两者是同一个根因（inject 死锁）的两半，合起来才是完整修法：inject 只声明 `remote` → `$mount` 手动挂载 → `ctx.get("remote.<ns>")` 取服务。**自建 dual-face 包 + Typert Remote，这三步缺一不可。**
+
 ### 顺带：端口占用
 
 - `dsh web` 验证时后台起的进程会占住 3080 端口，下次再 `npx @deepseek-ai/dsh web` 会 `EADDRINUSE`。查：`lsof -nP -iTCP:3080 -sTCP:LISTEN`，杀对应 PID 即可。
