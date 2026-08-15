@@ -93,3 +93,23 @@
 - 全部服务：`cordis_inspect_query` platform=host provider=`Service` method=`listService`（能看到 `subagents` 及 `start`/`startContinuable`/`followup`/`interrupt`/`listChildren` 等方法）
 - 动态插件 host 可用 Builtin：`Builtin.listBuiltins`（只有 `ctx`/`harness`/`console`/`btoa`/`atob`/`TextEncoder`/`TextDecoder`，**无 `process`/`fs`**）
 - 当前 agent 可见工具：`Tool.listTools`
+
+## 踩坑：本模式（从 cordis 复制而来）会因 tool-cordis 全局 provider 冲突而回退（本次排查）
+
+**症状**：本模式（cordis-architect）在 UI 选中后开始会话，会回退到 standard 或 cordis，而不是它自己。
+
+**根因（不是 uuid）**：本 preset 原样保留了 cordis 的 `tool-cordis`（`@deepseek-ai/dsh-tool-cordis`）行。该包 `apply()` 里会 `ctx.cordisInspect.register(provider)` 注册一组**进程级全局** inspect provider（`Service`/`Event`/`Builtin`/`Tool`），注册表是全局单例，每个 id 只能注册一次（源码 `dsh-tool-cordis/lib/index.js` 的 apply，`inject` 含 `cordisInspect`）。报错形如：
+
+```
+preset "cordis-architect" failed to mount: failed to apply loader entry tool-cordis:
+Host Cordis inspect provider "Service" is already registered
+```
+
+**结论**：同一进程内，所有带 `tool-cordis` 的 preset（cordis / cordis-architect）互斥——先挂载的占住全局 provider，后挂的必失败。且挂载是 **standing mount，常驻到进程退出**，与会话关不关无关：重启后「第一个、且一直只开」本模式才能用；一旦先开过 cordis，本模式就失效，得再重启。
+
+**验证方法**：写临时插件 `inject: ['agentPresets']`，逐个调 `await ctx.agentPresets.standingKeyFor(id)` 做 mount-validate；成功返回 OK，失败抛错。当前进程里 `standingKeyFor('cordis')`=OK、`standingKeyFor('cordis-architect')`=FAIL 即复现。
+
+**修复三选一**：
+1. 重启 `dsh web` 后同进程只用 cordis 或 cordis-architect 其中一个（保留 tool-cordis，二者互斥）。
+2. 从本 preset 删掉 `tool-cordis` 行：保留「写 preset 文件 + editing-cordis-compositions skill + 人设 + 委派」，失去 cordis_define/run/inspect 动态插件，可与 cordis 共存。
+3. 把 `tool-cordis` 挪到 host composition 全局层（一劳永逸，但改动最大）。
