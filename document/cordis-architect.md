@@ -113,3 +113,43 @@ Host Cordis inspect provider "Service" is already registered
 1. 重启 `dsh web` 后同进程只用 cordis 或 cordis-architect 其中一个（保留 tool-cordis，二者互斥）。
 2. 从本 preset 删掉 `tool-cordis` 行：保留「写 preset 文件 + editing-cordis-compositions skill + 人设 + 委派」，失去 cordis_define/run/inspect 动态插件，可与 cordis 共存。
 3. 把 `tool-cordis` 挪到 host composition 全局层（一劳永逸，但改动最大）。
+
+## 双面包插件（permode-inventory）上线的四个坑（本次全程排查）
+
+一个本地双面包插件（node 面 + browser 面）从写好到 `dsh web` 正常跑起来，踩了四个连环坑，按报错出现的顺序记：
+
+### 坑 1：目录名 ≠ 包名 → `Cannot find package 'dsh-permode-inventory'`
+
+- **症状**：`dsh web` 启动报 `Cannot find package 'dsh-permode-inventory' imported from ~/.dsh/profiles/web/`。
+- **根因**：`packages/` 下目录名是 `permode-inventory`，但 `package.json` 的 `name` 是 `dsh-permode-inventory`；install.sh 第 5 步用 `basename` 当部署名，symlink 建成了 `node_modules/permode-inventory`，而 `cordis.patch.yml` 引用的是 `dsh-permode-inventory`，Node 永远解析不到。
+- **修法**：目录名重命名为包名。仓库约定就是「basename = 包名」，改目录不是改脚本。
+
+### 坑 2：`dsh` 命令不在 PATH → install.sh 提前退出
+
+- **症状**：`./install.sh: line 86: dsh: command not found`，且 `set -euo pipefail` 让脚本中断。
+- **根因**：平时用 `npx @deepseek-ai/dsh`，`dsh` 不在 PATH。
+- **修法**：install.sh 里 `dsh plugin add` 改成 `npx --yes @deepseek-ai/dsh plugin add`，与日常启动命令同源。
+
+### 坑 3：symlink 部署的包，Node realpath 后 peer 依赖解析失败
+
+- **症状**：包名修对后，报错变成 `Cannot find package '@deepseek-ai/dsh-typert-protocol' imported from <仓库目录>/packages/dsh-permode-inventory/lib/index.js`。
+- **根因**：dsh 运行时加载插件用的是默认 realpath（grep 过 dsh/cordis-plugin-loader 源码，**无 `--preserve-symlinks`**）。包是 symlink，Node 把模块真实路径解析回仓库目录，包内 `import "@deepseek-ai/dsh-typert-protocol"` 从仓库向上找 `node_modules`（仓库没有，已 gitignore），失败。而 `~/.dsh/profiles/node_modules/@deepseek-ai/` 下 peer 依赖全都在，只是 realpath 后找不到。
+- **为什么 mode-experience.mjs 用 symlink 一直没事**：它只 import `node:fs`/`node:path` 内置模块，从不 import 裸包名。这是第一个 import 裸 peer 依赖的 symlink 包，才掉坑。
+- **修法**：install.sh 第 5 步从 symlink 改成 `rm -rf + cp -R` 真实拷贝（与 presets 一致）。**双面包包必须真实拷贝，不能 symlink**，和 presets 是同一个物理边界。
+
+### 坑 4：客户端 `remote.<namespace>` 服务必须自己 mount，不能只 inject
+
+- **症状**：包修好能 boot 后，浏览器控制台报 `1 entry did not activate dsh-permode-inventory: pending (waiting for service: remote.permodeInventory)`。
+- **根因链（找了很久）**：
+  - host 侧 `TypertRemoteService` + `@Remote("list")` 是够的：`dsh-api-gateway` node 面有 **SRC 回退**（`resolveSrcDescriptor`），只要服务注册了 `typertRemote` 绑定 + Remote marker，host 就能反射出 descriptor 并 dispatch，**不需要生成 `./typert` 面文件**。
+  - 但浏览器端 `remote.<namespace>` 服务由 `dsh-api-remotes` 的 client.js 在启动时 `$mount` 静态编译进去的 5 个 TYPERT_REMOTE contribution 提供（commands/goal/host-runner/message-feedback/plugin-inventory）。手写插件没有对应的 remote-client 面被编译进去，所以 `remote.permodeInventory` 服务永远不存在，`inject: ["remote.permodeInventory"]` 永远 pending。
+- **修法**：client.js 不要 inject `remote.permodeInventory`，改成 `inject: ["remote"]`，在 `apply` 里自己 `await ctx.remote.$mount(手写的 TYPERT_REMOTE contribution)`。客户端要求 strict codec（`requireStrictDescriptor`），只需 `schema` 提供 `parse()` 方法即可，host 侧自己的 `assertJsonValue` 已保证 JSON-safe 输出。
+- **关键源码位置**：
+  - `dsh-api-gateway/lib/index.js` node 面 `resolveSrcDescriptor()`（SRC 回退，host 无需 typert 面文件）
+  - `dsh-api-gateway/lib/client.js` `ClientRemoteService.$mount()` / `remoteServiceKey()`（`remote.` 前缀 → Cordis 服务名映射）
+  - `dsh-api-remotes/lib/client.js` `apply()`（静态 5 个 contribution 的 `$mount`）
+  - `cordis/lib/index.js` `_execute()`（async apply + thenable 返回值合法，返回 disposer 会被 collect）
+
+### 顺带：端口占用
+
+- `dsh web` 验证时后台起的进程会占住 3080 端口，下次再 `npx @deepseek-ai/dsh web` 会 `EADDRINUSE`。查：`lsof -nP -iTCP:3080 -sTCP:LISTEN`，杀对应 PID 即可。

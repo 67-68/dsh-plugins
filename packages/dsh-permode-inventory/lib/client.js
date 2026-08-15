@@ -116,6 +116,35 @@ window.__ModuleLoader__.load({
 		}
 
 		// ── registration ────────────────────────────────────────────────────────
+		/**
+		 * Hand-written Typert Remote face for the Host `permodeInventory/list`
+		 * service. The Host dispatches this endpoint through the SRC fallback in
+		 * `dsh-api-gateway` (no generated `./typert` artifact is needed on the
+		 * Host side); the Client only needs a strict codec with a `parse()`
+		 * method. No field-level validation is performed here — the Host's own
+		 * `assertJsonValue` already guarantees JSON-safe output.
+		 */
+		const listResultSchema = {
+			parse(value) {
+				return value;
+			}
+		};
+		const TYPERT_REMOTE = {
+			package: "dsh-permode-inventory",
+			descriptors: [{
+				id: "dsh-permode-inventory#permodeInventory/list",
+				service: "permodeInventory",
+				namespace: "permodeInventory",
+				method: "list",
+				invocation: { kind: "direct" },
+				parameters: [],
+				result: {
+					mode: "strict",
+					typeSymbol: "dsh-permode-inventory/types#PermodeInventorySnapshot",
+					schema: listResultSchema
+				}
+			}]
+		};
 		/** Dictionary namespace owned by this plugin. */
 		const NS = "settings.permodeInventory";
 		/** Services required by the Settings registration and generated Remote face. */
@@ -123,10 +152,11 @@ window.__ModuleLoader__.load({
 			"slots",
 			"locale",
 			"remote",
-			"remote.permodeInventory",
 		];
 		/** Contribute the lazy per-mode inventory tab to the Plugins settings section. */
-		function apply(ctx) {
+		async function apply(ctx) {
+			const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
+			ctx.effect(() => () => disposeRemote(), "permode-inventory: remote face");
 			ctx.effect(() => ctx.locale.register(NS, {
 				zh,
 				en
