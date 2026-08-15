@@ -14,8 +14,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$DSH_HOME/profiles/web"
 PRESET_DIR="$DSH_HOME/.agent-presets"
 DOC_DIR="$DSH_HOME/DOCUMENT"
+NODE_MODULES_DIR="$DSH_HOME/profiles/node_modules"
 
-mkdir -p "$WEB_DIR" "$PRESET_DIR" "$DOC_DIR"
+mkdir -p "$WEB_DIR" "$PRESET_DIR" "$DOC_DIR" "$NODE_MODULES_DIR"
 
 echo "==> Deploying dsh-plugins -> $DSH_HOME"
 
@@ -56,5 +57,36 @@ while IFS= read -r src; do
   ln -sfn "$src" "$dest"
   echo "    doc      $rel"
 done < <(find "$HERE"/document -name '*.md' -type f)
+
+# 5) Local dual-face packages (packages/*/ one dir each) linked into the
+#    profile's hoisted node_modules. pnpm hoists the profile's node_modules up
+#    to $DSH_HOME/profiles/node_modules (not profiles/web/node_modules), so the
+#    link must live there for the package to resolve.
+for dir in "$HERE"/packages/*/; do
+  [ -d "$dir" ] || continue
+  name="$(basename "$dir")"
+  ln -sfn "$dir" "$NODE_MODULES_DIR/$name"
+  echo "    package  $name"
+done
+
+# 6) External plugins declared in plugins/requirements.txt: one `source@version`
+#    per line, `#` comments, versions pinned (no @latest). `dsh plugin add` is a
+#    pnpm forwarder that installs into the profile and reconciles bundles; adding
+#    an already-installed version is a no-op, so re-running stays idempotent.
+REQ_FILE="$HERE/plugins/requirements.txt"
+if [ -f "$REQ_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    echo "    ext      $line"
+    dsh plugin --profile web add "$line"
+  done < "$REQ_FILE"
+else
+  echo "    ext      plugins/requirements.txt not found (skipped)"
+fi
 
 echo "==> Done. Restart 'dsh web' to apply changes."

@@ -6,8 +6,11 @@
 
 ```
 dsh-plugins/
-├── plugins/                  # host-plane 永久插件（*.mjs，真实 Node 模块）
-│   └── mode-experience.mjs   #   按 preset 名注入 DOCUMENT/{preset}.md 到 system prompt
+├── plugins/                  # host-plane 插件 + 外部插件声明
+│   ├── mode-experience.mjs   #   按 preset 名注入 DOCUMENT/{preset}.md 到 system prompt
+│   └── requirements.txt      #   外部插件声明（source@version，# 注释，版本锁死）
+├── packages/                 # 本地双面包插件（每包一个目录，basename = 包名）
+│   └── .gitkeep
 ├── presets/                  # 自建 agent preset（每 preset 一个目录）
 │   ├── architect/
 │   └── g-chat/
@@ -16,7 +19,7 @@ dsh-plugins/
 ├── document/                 # 经验文档（GENERAL.md 全模式 + {mode}.md 按模式）
 │   ├── GENERAL.md
 │   └── cordis.md
-├── install.sh                # 一键把上面内容 symlink 进 ~/.dsh
+├── install.sh                # 一键把上面内容 symlink/安装 进 ~/.dsh
 └── README.md
 ```
 
@@ -27,12 +30,14 @@ dsh-plugins/
 ./install.sh /path      # 部署到指定 DSH home
 ```
 
-`install.sh` 会做四件事（plugins / profile / document 用 symlink，改仓库 = 改运行时；**presets 必须用真实目录拷贝**）：
+`install.sh` 会做六类同步（plugins / profile / packages / document 用 symlink，改仓库 = 改运行时；**presets 必须用真实目录拷贝**；外部插件用 pnpm 安装）：
 
 1. `plugins/*.mjs` → `~/.dsh/profiles/web/*.mjs`
 2. `profile/cordis.patch.yml` → `~/.dsh/profiles/web/cordis.patch.yml`
 3. `presets/*/` → `~/.dsh/.agent-presets/*/`（**拷贝，不是 symlink**）
 4. `document/*.md` → `~/.dsh/DOCUMENT/*.md`
+5. `packages/*/` → `~/.dsh/profiles/node_modules/<包名>`（本地双面包插件 link）
+6. `plugins/requirements.txt` → `dsh plugin --profile web add`（外部插件安装，pnpm 前向器）
 
 > 为什么 presets 不能 symlink：agent-presets 发现逻辑用 `readdir(..., { withFileTypes: true })`，
 > 只认 `child.isDirectory() === true` 的目录；symlink 的 `isDirectory()` 恒为 `false`，

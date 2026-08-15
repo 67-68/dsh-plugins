@@ -8,3 +8,15 @@
       name: './mode-experience.mjs'
       config:
         docDir: !!js dshHomePath('DOCUMENT')
+
+    # Per-mode plugin inventory (dual-face package `dsh-permode-inventory`).
+    # The node half (lib/index.js) reads each whitelisted preset's
+    # agent.cordis.yml and exposes its plugin rows through the `permodeInventory`
+    # Remote service; the browser half (lib/client.js, declared by the package's
+    # `dsh.client`) renders them into the Plugins settings "modes" tab. One row
+    # serves both halves: the host loader mounts the node half, and
+    # dsh-client-modules scans the same row for the `dsh.client` bundle.
+    - id: permode-inventory
+      name: 'dsh-permode-inventory'
+      config:
+        presetIds: ['architect', 'g-chat', 'cordis-architect', 'code']
