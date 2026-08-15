@@ -1,4 +1,4 @@
-# cordis 模式经验
+# cordis-architect 模式经验（继承自 cordis 模式）
 
 ## 关于「模式 / preset」相关能力的查找备忘
 

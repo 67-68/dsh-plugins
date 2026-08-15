@@ -33,3 +33,27 @@
   config:
     search: true
     fetch: false
+
+# ── delegation ──────────────────────────────────────────────────────────────
+# `subagents` registry + spawn/fork backends 在 host composition（base bundle）已启用；
+# 这里注册面向模型的委派工具，它们解析 host 的 registry（不提供 service，无需 isolate realm）。
+# persona 的「AI Offloading & Delegation Protocol」要求使用 `subagent` 委派体力活。
+- id: tool-subagent-control
+  name: '@deepseek-ai/dsh-tool-subagent-control'
+
+- id: tool-subagent-list-agents
+  name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+- id: tool-subagent
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: continuable
+
+- id: tool-subagent-fork
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: continuable
