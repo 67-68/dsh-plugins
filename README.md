@@ -2,6 +2,34 @@
 
 我在 DeepSeek Harness (DSH) 上自建的插件与 agent preset 仓库。这里是「真理源」；运行时位置是 `~/.dsh/`。
 
+> **定位**：把整套 DSH 配置（preset + 插件 + 经验文档 + profile patch）当成一个 **git 仓库**来管理——可 review、可回滚、可协作，用一条 `./install.sh` 幂等同步到 `~/.dsh`。这是 DSH 的「dotfiles 范式」，不是又一个插件。
+
+## 为什么（Why）
+
+DSH 生态里装插件的主流方式是 marketplace「浏览 + 一键装」。这适合**发现新插件**，但不适合**复现你自己的整套配置**。本仓库解决后一个问题：
+
+| 诉求 | marketplace 一键装 | 本仓库（dotfiles 范式） |
+| --- | --- | --- |
+| 发现新插件 | ✅ 强 | ❌ 不管 |
+| 复现整套配置 | ❌ 手动拼 | ✅ `git clone` + `./install.sh` |
+| 版本可审计 | 部分（`@latest` 漂移） | ✅ `requirements.txt` 锁版本 |
+| 变更可 review / 回滚 | ❌ | ✅ git PR / revert |
+| 团队共享 | 难 | ✅ 一个仓库 |
+
+## 和 dshp 的区别
+
+[`dshp`](https://github.com/asdf17128/dshp) 也做「分享整套 DSH 配置」，但它和本仓库是**两种不同的范式**：
+
+| | dshp | 本仓库 |
+| --- | --- | --- |
+| 形态 | 把 profile 导出成一个 `.dshp` 快照文件 | git 仓库常驻，是「真理源」 |
+| 同步 | `export` → 手动 `import` 快照 | `./install.sh` 幂等持续同步 |
+| 外部插件 | 记录在快照里 | `requirements.txt` 显式锁版本清单 |
+| 变更 | 快照间 `diff` | git 原生 PR / 历史 / revert |
+| 适用 | 打包一份配置分发给别人 | 长期维护「我的/团队的」整套配置 |
+
+一句话：**dshp 是「导出快照分发」，本仓库是「配置即代码，git 常驻 + 幂等同步」**。二者互补，不互斥。
+
 ## 目录结构
 
 ```
@@ -53,7 +81,7 @@ dsh-plugins/
 ## 注意事项
 
 - **不要直接 `git init` 在 `~/.dsh/` 里**：那里混着 `sessions/`、`storages/`、`.anonymous-user-id`、`node_modules/` 等敏感/无关内容。
-- **不要改部署自带的 preset**：`/Users/a67_68/.npm/_npx/*/config/agent-presets/` 下的 `cordis` 等 preset 属于部署本身，升级会被覆盖。要改就 copy 一份到这里再改。
+- **不要改部署自带的 preset**：`dsh` 安装位置旁的 `config/agent-presets/`（通常是某次 `npx` 缓存里的 `node_modules/@deepseek-ai/dsh/config/agent-presets/`）下的 `cordis` 等 preset 属于部署本身，升级会被覆盖。要改就 copy 一份到这里再改。
 - `profile/cordis.yml` 是 profile loader 自动生成的空根，不要手动编辑，也不要入库（已 gitignore）。
 - `DOCUMENT/` 里的 `.mode-experience.log` 是插件运行日志，不入库（已 gitignore）。
 - 如果 `dsh web` 在启动时重新生成了某个文件覆盖了 symlink，重跑一次 `./install.sh` 即可。

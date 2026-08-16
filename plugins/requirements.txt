@@ -4,3 +4,7 @@ dsh-web-plugin-manager@0.3.10
 # 升级 = 手动改版本号 + 重跑 ./install.sh（pnpm 对已装版本是 no-op，幂等）。
 dsh-music-alert@0.1.0
 dsh-message-edit@0.2.1
+# @ 文件下拉选择（Codex 风格 @ 引用）：输入 @ 搜工作区文件/目录并引用路径。
+# 用 GitHub tarball（v0.6.0）：npm 的 @freespace8/dsh-at-file 停在 0.2.3（发送时内联内容、有大小限制）；
+# 0.6.0 起只插 <workspace-reference> 路径标记、agent 自己 read，版本锁死在 URL tag 上（不适用 source@version）。
+https://github.com/omdsh-dev/dsh-at-file/archive/refs/tags/v0.6.0.tar.gz
