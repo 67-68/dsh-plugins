@@ -20,3 +20,14 @@
       name: 'dsh-permode-inventory'
       config:
         presetIds: ['architect', 'g-chat', 'cordis-architect', 'code']
+
+    # Music alert (dual-face package `dsh-music-alert`): auto-plays the default
+    # sound on turn completion, exposes `play_music` + the `play-music` skill,
+    # and renders an upload/list/play/delete settings tab. One row serves both
+    # halves: the host loader mounts the node half (lib/index.js), and
+    # dsh-client-modules scans the same row for the `dsh.client` bundle.
+    - id: music-alert
+      name: 'dsh-music-alert'
+      config:
+        musicDir: !!js dshHomePath('music')
+        enabled: true
