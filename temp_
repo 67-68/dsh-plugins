@@ -1,0 +1,49 @@
+client.js?rev=977ab8da3fb1:291 [dsh-music-alert] apply start, mounting remote face
+client.js?rev=977ab8da3fb1:293 [dsh-music-alert] remote face mounted, namespace=musicAlert
+client.js?rev=f4f1428d8b21:164 [permode-inventory] apply start, mounting remote face
+client.js?rev=f4f1428d8b21:166 [permode-inventory] remote face mounted, namespace=permodeInventory
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #1
+loop @ client.js?rev=bc3c3fa9d26b:116
+:3080/plugins/events:1  Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING
+:3080/api/host.describe:1  Failed to load resource: net::ERR_CONNECTION_REFUSED
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.host' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+client.js?rev=bc3c3fa9d26b:10021 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED
+readWebSocket @ client.js?rev=bc3c3fa9d26b:10021
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #2
+loop @ client.js?rev=bc3c3fa9d26b:116
+client.js?rev=bc3c3fa9d26b:10021 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED
+readWebSocket @ client.js?rev=bc3c3fa9d26b:10021
+:3080/api/host.describe:1  Failed to load resource: net::ERR_CONNECTION_REFUSED
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.host' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #3
+loop @ client.js?rev=bc3c3fa9d26b:116
+:3080/plugins/events:1  Failed to load resource: net::ERR_CONNECTION_REFUSED
+client.js?rev=bc3c3fa9d26b:10021 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED
+readWebSocket @ client.js?rev=bc3c3fa9d26b:10021
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.host' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+:3080/api/host.describe:1  Failed to load resource: net::ERR_CONNECTION_REFUSED
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #4
+loop @ client.js?rev=bc3c3fa9d26b:116
+:3080/api/host.describe:1  Failed to load resource: net::ERR_CONNECTION_REFUSED
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+client.js?rev=bc3c3fa9d26b:10056 WebSocket connection to 'ws://127.0.0.1:3080/api/events.host' failed: WebSocket is closed before the connection is established.
+handleAbort @ client.js?rev=bc3c3fa9d26b:10056
+client.js?rev=bc3c3fa9d26b:10021 WebSocket connection to 'ws://127.0.0.1:3080/api/events.mux' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED
+readWebSocket @ client.js?rev=bc3c3fa9d26b:10021
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #5
+loop @ client.js?rev=bc3c3fa9d26b:116
+:3080/plugins/events:1  Failed to load resource: net::ERR_CONNECTION_REFUSED
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #1
+loop @ client.js?rev=bc3c3fa9d26b:116
+:3080/plugins/events:1  Failed to load resource: net::ERR_NETWORK_IO_SUSPENDED
+client.js?rev=bc3c3fa9d26b:116 [web-runtime] connection lost, retry #1
+loop @ client.js?rev=bc3c3fa9d26b:116
+:3080/plugins/events:1  Failed to load resource: net::ERR_NETWORK_IO_SUSPENDED

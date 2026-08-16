@@ -2,3 +2,4 @@ dsh-web-plugin-manager@0.3.10
 # 外部插件声明清单：每行一个 source@version（版本锁死，不用 @latest）。
 # `#` 开头为注释；空行会被 install.sh 跳过。
 # 升级 = 手动改版本号 + 重跑 ./install.sh（pnpm 对已装版本是 no-op，幂等）。
+dsh-music-alert@0.1.0
