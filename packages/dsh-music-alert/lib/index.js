@@ -261,9 +261,12 @@ export default {
       name: "play_music",
       description: "播放 ~/.dsh/music 下的一首音乐/提示音，用于长任务完成时提醒用户；file 省略则播默认音。",
       parameters: {
-        file: {
-          type: "string",
-          description: "文件名（可选）",
+        type: "object",
+        properties: {
+          file: {
+            type: "string",
+            description: "文件名（可选）",
+          },
         },
       },
       output: {

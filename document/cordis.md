@@ -160,6 +160,7 @@ Host Cordis inspect provider "Service" is already registered
 - **根因**：`dsh-tools` 新版强制每个工具声明 `output`（[`register()`](.../dsh-tools/lib/index.js:2758) 校验：`output` 必须是对象，且 `render` 必须是函数，`schema` 必须通过 `assertSupportedJsonSchema`）。旧写法只有 `name`/`description`/`parameters`/`execute` 已不合规。
 - **修法**：工具定义加 `output: { schema, render }`。`schema` 是 JSON Schema（子集，见 `assertSupportedJsonSchema`）；`render(_args, value)` 返回 `[{ type: "text", text }]` 数组。可参考 `dsh-tools` 内置 `run_code` 工具的写法（[`createRunCodeTool`](.../dsh-tools/lib/index.js:1083)）。
 - **注意**：`execute` 的返回值会被当作 `output` 的 `value` 传给 `render`，所以 schema 的 `properties` 要和 `execute` 返回的字段对齐（如 `{ ok, name, player, error }`）。
+- **另一个坑（同类）**：`ctx.tools.register()` **不编译** `parameters` 和 `output.schema`，要求调用者传**已经编译好的标准 JSON Schema**（根节点必须是 `type: "object"`）。直接用便捷 DSL `{ file: { type: "string" } }` 会报 `Invalid schema for function ...: got 'type: null'`（provider 拿到根节点没有 type 的 schema）。官方工具（如 [`dsh-tool-bash`](.../dsh-tool-bash/lib/index.js:259)）用的是 `register(defineTool({...}))`——`defineTool` 负责把 DSL 编译成 JSON Schema。自建插件不想引 `defineTool` 的话，就手动把 `parameters` 写成 `{ type: "object", properties: {...} }`。
 
 ## 坑 6：Remote 方法名不能撞 `RemoteNamespaceService` 原型方法
 
