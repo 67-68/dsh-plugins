@@ -20,3 +20,26 @@
       name: 'dsh-permode-inventory'
       config:
         presetIds: ['architect', 'g-chat', 'cordis-architect', 'code']
+
+    # Browser error surfacing + diagnostics (dual-face package
+    # `dsh-error-surfacer`). The node half (lib/index.js) keeps a ring buffer of
+    # browser errors, exposes the `errorSurfacer` Remote service (report/clear),
+    # registers the `browser_errors` tool and the `browser-error-diagnostics`
+    # skill; the browser half (lib/client.js, declared by the package's
+    # `dsh.client`) captures window errors/unhandled rejections and renders a
+    # floating "报错 N" panel in the shell.overlay slot.
+    - id: error-surfacer
+      name: 'dsh-error-surfacer'
+
+    # Music alert (dual-face package `dsh-music-alert`). The node half
+    # (lib/index.js) plays the default sound when an agent turn goes idle,
+    # registers the `play_music` tool and the `play-music` skill, and exposes
+    # list/save/remove/play/setDefault/setEnabled through the `musicAlert`
+    # Remote service; the browser half (lib/client.js, declared by the
+    # package's `dsh.client`) renders an upload/play/delete/default/auto-play
+    # settings panel into the Plugins settings "music" tab.
+    - id: music-alert
+      name: 'dsh-music-alert'
+      config:
+        musicDir: !!js dshHomePath('music')
+        enabled: true
