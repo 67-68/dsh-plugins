@@ -160,3 +160,17 @@ Host Cordis inspect provider "Service" is already registered
 ### 顺带：端口占用
 
 - `dsh web` 验证时后台起的进程会占住 3080 端口，下次再 `npx @deepseek-ai/dsh web` 会 `EADDRINUSE`。查：`lsof -nP -iTCP:3080 -sTCP:LISTEN`，杀对应 PID 即可。
+
+## 坑 6：`ctx.tools.register()` 必须声明 `output`（dsh-music-alert 上线）
+
+- **症状**：`dsh web` 报 `tool "play_music" must declare output { schema, render, presentationMeta? }`。
+- **根因**：`dsh-tools` 新版强制每个工具声明 `output`（[`register()`](.../dsh-tools/lib/index.js:2758) 校验：`output` 必须是对象，且 `render` 必须是函数，`schema` 必须通过 `assertSupportedJsonSchema`）。旧写法只有 `name`/`description`/`parameters`/`execute` 已不合规。
+- **修法**：工具定义加 `output: { schema, render }`。`schema` 是 JSON Schema（子集，见 `assertSupportedJsonSchema`）；`render(_args, value)` 返回 `[{ type: "text", text }]` 数组。可参考 `dsh-tools` 内置 `run_code` 工具的写法（[`createRunCodeTool`](.../dsh-tools/lib/index.js:1083)）。
+- **注意**：`execute` 的返回值会被当作 `output` 的 `value` 传给 `render`，所以 schema 的 `properties` 要和 `execute` 返回的字段对齐（如 `{ ok, name, player, error }`）。
+
+## 坑 7：Remote 方法名不能撞 `RemoteNamespaceService` 原型方法
+
+- **症状**：浏览器加载插件报 `client api: method "musicAlert/remove" conflicts with its namespace service`。
+- **根因**：手写 TYPERT_REMOTE contribution 里，descriptor 的 `method` 名会通过 `Object.defineProperty` 挂到 `RemoteNamespaceService` 实例上（[`install()`](.../dsh-api-gateway/lib/client.js:306)）。而 `RemoteNamespaceService` 原型上已有内部方法 `remove`（[`remove()`](.../dsh-api-gateway/lib/client.js:330)，用于卸载 direct/scoped record）等，Remote 方法名撞上就冲突。
+- **保留名清单**（`REMOTE_NAMESPACE_FIELDS` + 原型方法，见 [`dsh-api-gateway/lib/client.js`](.../dsh-api-gateway/lib/client.js:342)）：`ctx`、`empty`、`invokeRemote`、`methods`、`name`、`namespace`、`has`、`remove`、`installDirect`、`installScoped`、`install`、`assertMethodAvailable` 等。命名 Remote 方法时避开 `remove`、`has`、`install*` 这类常见词。
+- **修法**：把 Remote 方法 `remove` 改名（如 `deleteFile`），host 侧的 Gateway 方法 + `markRemoteMethods` + client 侧 descriptor + 调用处四处同步改。

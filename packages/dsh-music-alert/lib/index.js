@@ -199,7 +199,7 @@ class MusicAlertGateway extends TypertRemoteService {
     }
     return { ok: true, name: n };
   }
-  async remove(args) {
+  async deleteFile(args) {
     const n = this.runtime.sanitize(args && args.name);
     if (!n) return { ok: false, error: "bad name" };
     try {
@@ -225,7 +225,7 @@ class MusicAlertGateway extends TypertRemoteService {
     return { ok: true, enabled: this.runtime.state.enabled };
   }
 }
-markRemoteMethods(MusicAlertGateway, ["list", "save", "remove", "play", "setDefault", "setEnabled"]);
+markRemoteMethods(MusicAlertGateway, ["list", "save", "deleteFile", "play", "setDefault", "setEnabled"]);
 
 export { MusicAlertGateway };
 
@@ -264,6 +264,23 @@ export default {
         file: {
           type: "string",
           description: "文件名（可选）",
+        },
+      },
+      output: {
+        schema: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            name: { type: "string" },
+            player: { type: "string" },
+            error: { type: "string" },
+          },
+        },
+        render: (_args, value) => {
+          const text = value && value.ok
+            ? `已播放 ${value.name || ""}（${value.player || "系统播放器"}）`
+            : `播放失败：${(value && value.error) || "未知错误"}`;
+          return [{ type: "text", text }];
         },
       },
       async execute(args) {

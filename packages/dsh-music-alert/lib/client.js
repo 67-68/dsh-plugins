@@ -148,7 +148,7 @@ window.__ModuleLoader__.load({
 			const doSetDefault = (name) => run(() => api().setDefault({ name }));
 			const doRemove = (name) => {
 				if (!window.confirm(`${t("remove")}: ${name}?`)) return;
-				run(() => api().remove({ name }));
+				run(() => api().deleteFile({ name }));
 			};
 
 			if (state.status === "loading") return react.createElement("p", { style: styles.status, "aria-busy": true }, t("loading"));
@@ -272,7 +272,7 @@ window.__ModuleLoader__.load({
 			descriptors: [
 				makeDescriptor("list", false),
 				makeDescriptor("save", true),
-				makeDescriptor("remove", true),
+				makeDescriptor("deleteFile", true),
 				makeDescriptor("play", true),
 				makeDescriptor("setDefault", true),
 				makeDescriptor("setEnabled", true),
