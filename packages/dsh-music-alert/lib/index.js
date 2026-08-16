@@ -89,10 +89,16 @@ function buildRuntime(config) {
     /** Play a file by name; empty name falls back to the configured default. */
     playFile(name) {
       const target = typeof name === "string" && name.length > 0 ? name : state.defaultFile;
-      const safe = sanitize(target);
-      if (!safe) return { ok: false, error: "bad name" };
+      const safe = this.sanitize(target);
+      if (!safe) {
+        console.log("[dsh-music-alert] playFile: bad name", JSON.stringify(target));
+        return { ok: false, error: "bad name" };
+      }
       const absPath = join(musicDir, safe);
-      if (!existsSync(absPath)) return { ok: false, error: "not found" };
+      if (!existsSync(absPath)) {
+        console.log("[dsh-music-alert] playFile: not found", absPath);
+        return { ok: false, error: "not found" };
+      }
       try {
         const child = spawn(player, playerArgs(player, absPath), { stdio: "ignore", detached: true });
         child.on("error", (err) => {
@@ -100,8 +106,10 @@ function buildRuntime(config) {
         });
         child.unref();
       } catch (err) {
+        console.log("[dsh-music-alert] playFile: spawn failed", err && err.message);
         return { ok: false, error: "spawn failed: " + (err && err.message) };
       }
+      console.log("[dsh-music-alert] playFile: ok", safe, "player=", player);
       return { ok: true, name: safe, player };
     },
 
@@ -110,7 +118,7 @@ function buildRuntime(config) {
       let files = [];
       try {
         files = readdirSync(musicDir)
-          .filter((n) => sanitize(n) !== null)
+          .filter((n) => this.sanitize(n) !== null)
           .map((n) => {
             let size = 0;
             try {
@@ -120,8 +128,9 @@ function buildRuntime(config) {
             }
             return { name: n, size, isDefault: n === state.defaultFile };
           });
-      } catch (_err) {
-        /* an unreadable dir yields an empty list */
+        console.log("[dsh-music-alert] listFiles: dir=", musicDir, "count=", files.length);
+      } catch (err) {
+        console.log("[dsh-music-alert] listFiles error:", err && err.message);
       }
       return { files, defaultFile: state.defaultFile, enabled: state.enabled, player };
     },
@@ -190,11 +199,20 @@ class MusicAlertGateway extends TypertRemoteService {
     return this.runtime.listFiles();
   }
   async save(args) {
-    const n = this.runtime.sanitize(args && args.name);
-    if (!n) return { ok: false, error: "bad name" };
+    const name = args && args.name;
+    const b64len = (args && typeof args.base64 === "string" && args.base64.length) || 0;
+    console.log("[dsh-music-alert] save: name=", name, "base64Len=", b64len);
+    const n = this.runtime.sanitize(name);
+    if (!n) {
+      console.log("[dsh-music-alert] save: sanitize rejected name=", name);
+      return { ok: false, error: "bad name" };
+    }
     try {
-      writeFileSync(join(this.runtime.musicDir, n), Buffer.from((args && args.base64) || "", "base64"));
+      const absPath = join(this.runtime.musicDir, n);
+      writeFileSync(absPath, Buffer.from((args && args.base64) || "", "base64"));
+      console.log("[dsh-music-alert] save: wrote", absPath);
     } catch (err) {
+      console.log("[dsh-music-alert] save: write failed", err && err.message);
       return { ok: false, error: "write failed: " + (err && err.message) };
     }
     return { ok: true, name: n };
@@ -248,7 +266,7 @@ export default {
       try {
         const result = runtime.playFile(runtime.state.defaultFile);
         // Silence the expected "no default file yet" case; keep real failures loud.
-        if (result && result.ok === false && result.error !== "not found") {
+        if (result && result.ok === false) {
           console.log("[dsh-music-alert] auto-play:", JSON.stringify(result));
         }
       } catch (err) {

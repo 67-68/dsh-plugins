@@ -112,6 +112,7 @@ window.__ModuleLoader__.load({
 				setBusy(true);
 				try {
 					const result = await fn();
+					console.log("[dsh-music-alert] run result: ok=", result && result.ok, result && result.error ? "err=" + String(result.error) : "");
 					if (!result.ok) console.error("[dsh-music-alert] operation failed:", result.error);
 				} catch (err) {
 					console.error("[dsh-music-alert] operation error:", err);
@@ -131,11 +132,13 @@ window.__ModuleLoader__.load({
 			const onUpload = () => {
 				const file = pendingFile;
 				if (!file) return;
+				console.log("[dsh-music-alert] onUpload: name=", file.name, "size=", file.size, "type=", file.type);
 				const reader = new FileReader();
 				reader.onload = () => {
 					const dataUrl = String(reader.result || "");
 					const comma = dataUrl.indexOf(",");
 					const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+					console.log("[dsh-music-alert] onUpload: read done, base64Len=", base64.length);
 					setPendingFile(null);
 					if (fileInputRef.current) fileInputRef.current.value = "";
 					run(() => api().save({ name: file.name, base64 }));

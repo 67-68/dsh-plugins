@@ -4,6 +4,14 @@
 // - also registers an on-demand skill "mode-experience" (plugin doc + index)
 import { readdirSync, readFileSync, existsSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
+
+function expandHome(dir) {
+  if (typeof dir !== 'string' || dir.length === 0) return dir
+  if (dir === '~') return homedir()
+  if (dir.startsWith('~/')) return join(homedir(), dir.slice(2))
+  return dir
+}
 
 function firstHeading(text) {
   const line = (text || '').split('\n').map((l) => l.trim()).find((l) => l.length > 0) || ''
@@ -15,7 +23,7 @@ export default {
   inject: ['systemPrompt', 'agentPresets', 'skills'],
 
   apply(ctx, config) {
-    const docDir = (config && config.docDir) || ''
+    const docDir = expandHome((config && config.docDir) || '')
     const logFile = join(docDir, '.mode-experience.log')
     const log = (msg) => { try { appendFileSync(logFile, msg + '\n') } catch (e) {} }
 

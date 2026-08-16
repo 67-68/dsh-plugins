@@ -7,7 +7,7 @@
     - id: mode-experience
       name: './mode-experience.mjs'
       config:
-        docDir: !!js dshHomePath('DOCUMENT')
+        docDir: '~/.dsh/DOCUMENT'
 
     # Per-mode plugin inventory (dual-face package `dsh-permode-inventory`).
     # The node half (lib/index.js) reads each whitelisted preset's
@@ -29,5 +29,5 @@
     - id: music-alert
       name: 'dsh-music-alert'
       config:
-        musicDir: !!js dshHomePath('music')
+        musicDir: '~/.dsh/music'
         enabled: true
