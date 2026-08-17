@@ -23,11 +23,11 @@ marketplace 的「浏览 + 一键装」解决的是「发现新插件」，解�
 
 `requirements.txt` 里每行一个 `source@version`，升级 = 手动改版本号 + 重跑 install，绝不 `@latest` 漂移。
 
-和 [dshp](https://github.com/asdf17128/dshp) 的区别一句话：**dshp 是「导出快照分发」，我这是「配置即代码，git 常驻 + 幂等同步」**——互补，不互斥。
+这个范式在 Claude Code 生态已经被验证过了（[`ai-sync`](https://github.com/berlinguyinca/ai-sync)、`dotai`、[`ai-config-cli`](https://pypi.org/project/ai-config-cli/)），但在 DSH 里还没被广泛实践——现成的「分享整套配置」工具基本都是刚生成的 1-star repo。所以我把这条路搬进了 DSH。
 
 顺带沉淀了三个坑（每个都卡了我一阵）：preset 必须真实目录不能 symlink、双面包包必须真实拷贝不能 symlink、外部插件要锁版本别追 latest。详见仓库 README。
 
-仓库：https://github.com/67-68/dsh-plugins （MIT，欢迎拍砖，尤其是「和 dshp 到底差在哪」这种问题）
+仓库：https://github.com/67-68/dsh-plugins （MIT，欢迎拍砖，尤其是「为什么不直接用 marketplace 一键装」这种问题）
 
 ---
 
@@ -53,12 +53,11 @@ marketplace 的「浏览 + 一键装」解决的是「发现新插件」，解�
 
 RFC 里讨论的是「怎么生成单个插件」（scaffold），我想补一个相邻的空白：**「怎么把一整套配置当代码来分享」**。
 
-「Everything is a plugin」意味着一个人真正的 setup 是一摞层的组合（preset + bundle + patch + 经验文档），单个插件的 scaffold 解决不了「复现整摞层」的问题。目前生态里有两条路：
+「Everything is a plugin」意味着一个人真正的 setup 是一摞层的组合（preset + bundle + patch + 经验文档），单个插件的 scaffold 解决不了「复现整摞层」的问题。
 
-- **dshp**：把 profile 导出成 `.dshp` 快照分发（快照式，适合一次分享）
-- **dotfiles 式**：git 仓库常驻作真理源，`install.sh` 幂等同步 + `requirements.txt` 锁版本清单（配置即代码，适合长期维护/团队协作）
+这条「配置即代码 / dotfiles」范式在 Claude Code 生态已经被验证（`ai-sync`、`dotai`、`ai-config-cli`），但在 DSH 里还没有被广泛实践——现成的「分享整套配置」工具（如 dshp）基本都是刚生成的 1-star repo，不足以作为范式参考。
 
-我在后者做了一个最小实例（https://github.com/67-68/dsh-plugins），核心就三件事：symlink/copy/pnpm 三种同步策略的边界、preset 与双面包包为什么必须真实拷贝、外部依赖显式锁版本。
+我在 DSH 里做了一个最小实例（https://github.com/67-68/dsh-plugins），核心就三件事：symlink/copy/pnpm 三种同步策略的边界、preset 与双面包包为什么必须真实拷贝、外部依赖显式锁版本。
 
 想抛给 RFC 的问题是：**官方 scaffold 是否应该顺带给出「配置仓库」的推荐目录结构（presets/ + plugins/ + packages/ + document/ + install.sh）**，让「生成一个插件」和「管理一整套配置」两个范式都能一键起步？这比只给 plugin scaffold 更能降低生态的复现成本。
 
@@ -68,7 +67,7 @@ RFC 里讨论的是「怎么生成单个插件」（scaffold），我想补一�
 
 - [x] LICENSE（MIT，2026，67_68）
 - [x] README 清掉个人硬编码路径（`/Users/a67_68/...` → 泛化表达）
-- [x] README 加「定位 / Why / 和 dshp 的区别」
+- [x] README 加「定位 / Why / 生态现状与定位」
 - [ ] GitHub 加 `#dsh` topic + description（**需要你手动执行，命令见下**）
 - [ ] commit + push（**需要你手动执行**）
 

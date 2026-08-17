@@ -16,19 +16,19 @@ DSH 生态里装插件的主流方式是 marketplace「浏览 + 一键装」。�
 | 变更可 review / 回滚 | ❌ | ✅ git PR / revert |
 | 团队共享 | 难 | ✅ 一个仓库 |
 
-## 和 dshp 的区别
+## 生态现状与定位
 
-[`dshp`](https://github.com/asdf17128/dshp) 也做「分享整套 DSH 配置」，但它和本仓库是**两种不同的范式**：
+DSH 生态 2026-08 刚开源，「装插件」的主流是 marketplace 一键装（[dsh-market](https://github.com/dsh-market/dsh-market) 等），解决「发现」已经很成熟；但「把整套配置当代码来管理」这一层在 DSH 里**还没有被广泛验证的方案**——现成的「分享整套配置」工具（如 dshp，1 star / 0 fork）基本是刚生成的 AI repo，不足以作为范式参考。
 
-| | dshp | 本仓库 |
-| --- | --- | --- |
-| 形态 | 把 profile 导出成一个 `.dshp` 快照文件 | git 仓库常驻，是「真理源」 |
-| 同步 | `export` → 手动 `import` 快照 | `./install.sh` 幂等持续同步 |
-| 外部插件 | 记录在快照里 | `requirements.txt` 显式锁版本清单 |
-| 变更 | 快照间 `diff` | git 原生 PR / 历史 / revert |
-| 适用 | 打包一份配置分发给别人 | 长期维护「我的/团队的」整套配置 |
+同一范式在 **Claude Code 生态**已被验证并落地：
 
-一句话：**dshp 是「导出快照分发」，本仓库是「配置即代码，git 常驻 + 幂等同步」**。二者互补，不互斥。
+- [`ai-sync`](https://github.com/berlinguyinca/ai-sync)（git 备份同步 `~/.claude`）
+- [`dotai`](https://www.npmjs.com/package/dotai-cli) / `ai-dotfiles-manager`（AI agent 的 dotfiles 全家桶）
+- [`ai-config-cli`](https://pypi.org/project/ai-config-cli/)（声明式插件清单，对应本仓库的 `requirements.txt`）
+
+本仓库 = **把 ai-sync / dotai 这条已验证的路搬进 DSH**：git 仓库作真理源、`install.sh` 幂等同步、`requirements.txt` 锁版本。
+
+一句话：**marketplace 管「发现」，本仓库管「复现」；两者正交，不互斥。**
 
 ## 目录结构
 

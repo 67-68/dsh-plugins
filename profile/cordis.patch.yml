@@ -31,3 +31,12 @@
       config:
         musicDir: '~/.dsh/music'
         enabled: true
+
+    # Mermaid diagram renderer (dual-face package `dsh-mermaid`): the node
+    # half (lib/index.js) serves the bundled mermaid engine as a static IIFE
+    # asset; the browser half (lib/client.js, declared by the package's
+    # `dsh.client`) loads it and renders whitelisted ```mermaid code blocks
+    # into SVG after the message settles. One row serves both halves.
+    - id: dsh-mermaid
+      name: 'dsh-mermaid'
+      config: {}

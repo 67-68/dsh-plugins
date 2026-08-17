@@ -58,6 +58,16 @@ while IFS= read -r src; do
   echo "    doc      $rel"
 done < <(find "$HERE"/document -name '*.md' -type f)
 
+# 4b) Build the mermaid static asset if it is missing, so the cp -R below
+#     ships a ready-to-serve IIFE bundle. Idempotent: skip when already built.
+MERMAID_ASSET="$HERE/packages/dsh-mermaid/lib/assets/mermaid.js"
+if [ -f "$MERMAID_ASSET" ]; then
+  echo "    asset    dsh-mermaid mermaid.js (already built)"
+else
+  echo "    asset    building dsh-mermaid mermaid.js"
+  node "$HERE/scripts/build-mermaid.mjs"
+fi
+
 # 5) Local dual-face packages (packages/*/ one dir each) copied into the
 #    profile's hoisted node_modules. pnpm hoists the profile's node_modules up
 #    to $DSH_HOME/profiles/node_modules (not profiles/web/node_modules), so the
