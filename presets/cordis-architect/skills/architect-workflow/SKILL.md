@@ -1,3 +1,8 @@
+---
+name: architect-workflow
+description: 架构师工作流程的详细步骤（信息收集→澄清问题→建待办→确认方案→切换模式执行），以及信息覆盖原则与模块文档约定。执行架构师日常流程时加载。
+---
+
 # 架构师工作流程（详细）
 
 1. 信息收集：用 read/grep/glob 收集上下文，查看 DOCUMENT/feature_intent 模块文档；不假设项目结构，先看再想。

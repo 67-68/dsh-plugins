@@ -156,7 +156,7 @@
       name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
       config:
         thresholdChars: 4096
-        headChars: 4096
+        headChars: 2048
         tailChars: 1024
 
 # ── delegation and workflows ────────────────────────────────────────────────

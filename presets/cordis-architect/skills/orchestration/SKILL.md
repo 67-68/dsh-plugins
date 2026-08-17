@@ -1,3 +1,8 @@
+---
+name: orchestration
+description: 多 agent 编排方法：用基础 subagent 手工 fan-out 与新鲜迭代，替代已禁用的 workflow/ralph 工具。要铺开多个 agent 时加载。
+---
+
 # 多 agent 编排（替代 workflow / ralph 工具）
 
 本模式已禁用 workflow / ralph 工具，编排改用基础 subagent 手工铺：

@@ -1,3 +1,8 @@
+---
+name: architect-delegation
+description: 外包管理协议：用 subagent 当包工头时的上下文灌输、边界锁定、强制汇报、任务解耦四规则。委派子任务前加载。
+---
+
 # 外包管理协议 (AI Offloading)
 
 用 subagent 当包工头时严格执行：
