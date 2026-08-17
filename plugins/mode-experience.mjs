@@ -1,7 +1,7 @@
 // Mode-experience injector (host plane, profile cordis.patch.yml).
-// - DOCUMENT/{mode}.md  -> injected only into that mode's sessions
-// - DOCUMENT/GENERAL.md -> injected into every mode's sessions
-// - also registers an on-demand skill "mode-experience" (plugin doc + index)
+// - DOCUMENT/GENERAL.md -> injected into every mode's sessions (resident)
+// - DOCUMENT/{mode}.md -> parsed into on-demand skills, one per `#### [slug]` section
+// - also registers an on-demand index skill "mode-experience" listing all parsed skills
 import { readdirSync, readFileSync, existsSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -13,9 +13,39 @@ function expandHome(dir) {
   return dir
 }
 
-function firstHeading(text) {
-  const line = (text || '').split('\n').map((l) => l.trim()).find((l) => l.length > 0) || ''
-  return line.replace(/^#+\s*/, '') || '(无标题)'
+function sanitizeKebab(s) {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'section'
+}
+
+const HEADING_RE = /^####\s*(?:\[([a-z0-9-]+)\]\s*)?(.*)$/
+
+// Split content into sections on `####` headings. Content before the first
+// heading (preamble) is dropped. Each section = { slug, fallbackIndex, title, lines }.
+function parseSections(content) {
+  const lines = content.split('\n')
+  const sections = []
+  let current = null
+  let index = 0
+  for (const line of lines) {
+    const m = HEADING_RE.exec(line)
+    if (m) {
+      index += 1
+      if (current) sections.push(current)
+      current = {
+        slug: m[1] || null,
+        fallbackIndex: index,
+        title: (m[2] || '').trim(),
+        lines: [],
+      }
+    } else if (current) {
+      current.lines.push(line)
+    }
+  }
+  if (current) sections.push(current)
+  return sections
 }
 
 export default {
@@ -27,8 +57,8 @@ export default {
     const logFile = join(docDir, '.mode-experience.log')
     const log = (msg) => { try { appendFileSync(logFile, msg + '\n') } catch (e) {} }
 
-    const cache = {}   // mode name -> content
     let generalContent = ''
+    const files = {}   // mode name -> raw file content (non-GENERAL .md files)
 
     if (docDir && existsSync(docDir)) {
       try {
@@ -37,61 +67,106 @@ export default {
           const name = entry.slice(0, -3)
           const content = readFileSync(join(docDir, entry), 'utf8')
           if (name === 'GENERAL') generalContent = content
-          else cache[name] = content
+          else files[name] = content
         }
       } catch (err) {
         log('PRELOAD ERROR: ' + (err && err.message))
       }
     }
-    log('APPLY modes=' + JSON.stringify(Object.keys(cache)) + ' general=' + (generalContent ? 'yes' : 'no'))
 
-    const presetOf = (agent) => {
-      if (!agent) return undefined
-      try { return ctx.agentPresets.composedPreset(agent.ctx) } catch (e) { return undefined }
+    // Parse every non-GENERAL file into skills.
+    const usedNames = new Map()
+    const allSkills = []   // { mode, name, title }
+
+    const allocateName = (mode, slug) => {
+      const name = sanitizeKebab(`${mode}-${slug}`)
+      if (!usedNames.has(name)) {
+        usedNames.set(name, 1)
+        return name
+      }
+      const next = usedNames.get(name) + 1
+      usedNames.set(name, next)
+      const dedup = `${name}-${next}`
+      log(`WARN duplicate skill name "${name}" -> "${dedup}"`)
+      return dedup
     }
 
-    // Auto-inject GENERAL.md (all modes) + the mode-specific file.
+    const buildDescription = (title, body) => {
+      let description = title || ''
+      if (body) {
+        const firstLine = body.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || ''
+        if (firstLine && firstLine.length <= 80) {
+          const appended = description + ' — ' + firstLine
+          description = appended.length > 120 ? appended.slice(0, 120) : appended
+        }
+      }
+      return description
+    }
+
+    for (const mode of Object.keys(files).sort()) {
+      const content = files[mode]
+      const sections = parseSections(content)
+
+      if (sections.length === 0) {
+        // No `####` heading: register the whole file as one overview skill.
+        const body = content.trim()
+        const title = `${mode} 经验`
+        const name = allocateName(mode, 'overview')
+        const description = buildDescription(title, body)
+        const skillContent = '# ' + title + (body ? '\n\n' + body : '')
+        ctx.skills.register({ name, description, source: 'runtime', content: skillContent })
+        allSkills.push({ mode, name, title })
+        log(`SKILL ${name} (overview of ${mode})`)
+        continue
+      }
+
+      for (const sec of sections) {
+        const slug = sec.slug || `${mode}-${sec.fallbackIndex}`
+        const title = sec.title || slug
+        const body = sec.lines.join('\n').trim()
+        const name = allocateName(mode, slug)
+        const description = buildDescription(title, body)
+        const skillContent = '# ' + title + (body ? '\n\n' + body : '')
+        ctx.skills.register({ name, description, source: 'runtime', content: skillContent })
+        allSkills.push({ mode, name, title })
+        log(`SKILL ${name} (${mode} / ${slug})`)
+      }
+    }
+
+    log('APPLY modes=' + JSON.stringify(Object.keys(files)) + ' general=' + (generalContent ? 'yes' : 'no') + ' skills=' + allSkills.length)
+
+    // Auto-inject GENERAL.md only (all modes).
     ctx.systemPrompt.section({
       name: 'mode-experience',
       order: 500,
-      text: (assembleCtx) => {
-        const agent = assembleCtx && assembleCtx.agent
-        const preset = presetOf(agent)
-        const chunks = []
-        if (generalContent) chunks.push(generalContent)
-        if (preset && cache[preset]) chunks.push(cache[preset])
-        if (chunks.length === 0) return ''
-        return chunks.join('\n\n')
-      },
+      text: () => generalContent || '',
     })
 
-    // On-demand skill: plugin doc + index of available experience files.
-    const index = []
-    if (generalContent) index.push('- `GENERAL.md`（所有模式）— ' + firstHeading(generalContent))
-    for (const name of Object.keys(cache).sort()) {
-      index.push('- `' + name + '.md` — ' + firstHeading(cache[name]))
+    // On-demand index skill: lists every parsed skill grouped by mode.
+    const byMode = {}
+    for (const s of allSkills) {
+      ;(byMode[s.mode] = byMode[s.mode] || []).push(s)
+    }
+    const indexLines = []
+    for (const mode of Object.keys(byMode).sort()) {
+      const names = byMode[mode].map((s) => `\`${s.name}\``).join('、')
+      indexLines.push(`- \`${mode}\` -> ${names}`)
     }
     const skillContent = [
       '# mode-experience 插件',
       '',
-      '按模式自动注入经验：每次会话开始，把当前模式的经验文件（`DOCUMENT/{mode}.md`）和通用经验（`GENERAL.md`）插入 system prompt。',
+      '把经验文件（`DOCUMENT/{mode}.md`）按 `####` 分节解析成按需加载的 skill；`GENERAL.md` 常驻注入 system prompt。',
       '',
-      '## 文件约定',
-      '- 目录：`~/.dsh/DOCUMENT/`',
-      '- `{mode}.md` → 只注入该模式（mode = preset id，如 cordis）',
-      '- `GENERAL.md` → 注入所有模式',
-      '- 改文件后重启 `dsh web` 生效',
-      '',
-      '## 当前经验文档索引',
-      ...(index.length ? index : ['（暂无）']),
+      '## 经验 skill 索引',
+      ...(indexLines.length ? indexLines : ['（暂无）']),
     ].join('\n')
 
     ctx.skills.register({
       name: 'mode-experience',
-      description: 'mode-experience 插件的文档与当前经验文件索引（按模式自动注入经验）。',
+      description: 'mode-experience 插件的文档与经验 skill 索引（经验按需加载）。',
       source: 'runtime',
       content: skillContent,
     })
-    log('SKILL REGISTERED')
+    log('SKILL mode-experience REGISTERED')
   },
 }

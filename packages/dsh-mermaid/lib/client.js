@@ -195,6 +195,13 @@ window.__ModuleLoader__.load({
           return mermaid.render(id, code).then((result) => {
             const svg = result && result.svg ? result.svg : "";
             if (!svg) throw new Error("mermaid.render returned no svg");
+            // mermaid 11 renders parse failures as a red "error" diagram and
+            // still resolves (no reject). Intercept it before it reaches the
+            // DOM so the .catch fallback keeps the source block instead.
+            if (svg.includes('aria-roledescription="error"') || svg.includes("Syntax error")) {
+              const preview = code.length > 80 ? code.slice(0, 80) + "…" : code;
+              throw new Error("mermaid 无法解析该图：" + preview);
+            }
             if (!el.isConnected) return; // block removed while rendering
             el.style.display = "none";
             const container = buildContainer(el, svg, code);

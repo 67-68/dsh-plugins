@@ -1,6 +1,6 @@
 # cordis 模式经验
 
-## 关于「模式 / preset」相关能力的查找备忘
+#### [preset-lookup] 模式/preset 相关能力查找备忘
 
 本次会话花了较长时间查找「模式相关的东西」，沉淀如下，避免下次重复：
 
@@ -12,20 +12,20 @@
 - 默认 preset 在 `~/.dsh/settings.yaml` 的 `agent-presets.default`
 - 会话日志 `~/.dsh/sessions/<workspace>/<session>/session.jsonl.zstd` 里的 `agent-preset/selected` 事件记录了实际选中的 preset
 
-## 按模式自动注入经验（本插件的机制）
+#### [auto-inject-mechanism] 按模式自动注入经验（本插件的机制）
 
 - 用 `systemPrompt.section({ text: (ctx) => ... })` 实现「会话开始自动插入」，text 是同步函数
 - `AssembleContext.agent` 可拿到当前 agent，再 `agentPresets.composedPreset(agent.ctx)` 得到模式名
 - section 的 text 是同步的，文件要预先异步读进内存缓存
 - skill 是按需加载，`systemPrompt.section` 才是「主动注入」
 
-## 动态插件 vs 持久化
+#### [dynamic-vs-persistent] 动态插件 vs 持久化
 
 - 动态插件（cordis_define/run）是临时的，进程重启即消失
 - 持久化：写进 host composition（全局层，全模式）或某个 preset 目录（仅该模式）
 - 注入插件本身若要长期生效，应落到 host composition，而不是动态插件
 
-## 如何注册永久插件（host-plane，本次实测）
+#### [permanent-plugin-registration] 如何注册永久插件（host-plane，本次实测）
 
 - 落点：`~/.dsh/profiles/web/cordis.patch.yml`（用户 patch 层），重启 `dsh web` 生效
 - 插件文件放同目录 `~/.dsh/profiles/web/*.mjs`，行内 `name: './xxx.mjs'` 相对引用
@@ -34,14 +34,14 @@
 - 校验：`node --check xxx.mjs` 验语法；`dsh --profile web --dump-config` 组合校验（会把空根回写 cordis.yml，无害）
 - 动态插件（cordis_define/run）只是临时演示；web 的 HMR 关闭，改文件要重启
 
-## 踩坑：不声明 inject，apply 时服务是 undefined
+#### [missing-inject-pitfall] 踩坑：不声明 inject，apply 时服务是 undefined
 
 - 症状：插件「加载成功」但啥都没干、终端无报错；`ctx.get('systemPrompt')` 返回 undefined，被 `if` 静默跳过
 - 原因：没声明 inject，loader 不等服务挂载完就激活插件
 - 修法：插件对象加 `inject: ['systemPrompt','agentPresets']`，apply 里直接用 `ctx.xxx`
 - 定位：把 apply 每步写到日志文件（如 `DOCUMENT/.mode-experience.log`），重启后读日志；终端看不到报错，是因为 apply 静默 no-op 而非真成功
 
-## subagent 委派工具：host 侧有 ≠ 该模式能用（本次排查）
+#### [subagent-tool-preset-scope] subagent 委派工具：host 侧有 ≠ 该模式能用（本次排查）
 
 **核心结论**：host composition（`dsh-base` bundle）已经注册了 `subagents` 注册表 + `spawn`/`fork` 后端，甚至还有委派工具行；但**某个模式的 agent 工具清单只来自它自己 preset 的 scope，host scope 注册的工具不会自动出现**。所以「架构师模式调不起 subagent」的根因是该 preset 的 `agent.cordis.yml` 里没注册委派工具行，而不是 host 没开插件（用 `Service.listService` 能看到 `subagents` 服务是活的）。
 
@@ -73,7 +73,7 @@
 
 **为什么不需要 isolate realm**：这 4 个包只 `inject`（消费 host 的 `tools`/`subagents`/`systemPrompt`/`agents`）并注册工具，**不 provide 任何 service**。只有 provide service 的行才必须 isolate（如 workflows 的 `workflowEngine`）。判断方法：grep 包源码里的 `inject` 和 `provide`。
 
-## 路径索引：各类东西都在哪
+#### [path-index] 路径索引：各类东西都在哪
 
 **preset**
 - 用户 preset：`~/.dsh/.agent-presets/<id>/`（`agent.cordis.yml` + `persona.md` + `preset.yml`）
@@ -94,9 +94,9 @@
 - 动态插件 host 可用 Builtin：`Builtin.listBuiltins`（只有 `ctx`/`harness`/`console`/`btoa`/`atob`/`TextEncoder`/`TextDecoder`，**无 `process`/`fs`**）
 - 当前 agent 可见工具：`Tool.listTools`
 
-## 踩坑：复制 cordis 出的 preset 会因 tool-cordis 全局 provider 冲突而回退（本次排查）
+#### [tool-cordis-provider-conflict] 踩坑：tool-cordis 全局 provider 冲突导致 preset 回退（本次排查）
 
-**症状**：「创造架构师」（cordis-architect，从 cordis 复制 + 加架构师人设）在 UI 选中后开始会话，会回退到 standard 或 cordis，而不是它自己。
+**症状**：从 cordis 复制出的 preset（如 cordis-architect，加架构师人设）在 UI 选中后开始会话，会回退到 standard 或 cordis，而不是它自己。
 
 **根因（不是 uuid）**：副本原样保留了 cordis 的 `tool-cordis`（`@deepseek-ai/dsh-tool-cordis`）行。该包 `apply()` 里会 `ctx.cordisInspect.register(provider)` 注册一组**进程级全局** inspect provider（`Service`/`Event`/`Builtin`/`Tool`），注册表是全局单例，每个 id 只能注册一次（源码 `dsh-tool-cordis/lib/index.js` 的 apply，`inject` 含 `cordisInspect`）。报错形如：
 
@@ -114,9 +114,9 @@ Host Cordis inspect provider "Service" is already registered
 2. 从副本删掉 `tool-cordis` 行：保留「写 preset 文件 + editing-cordis-compositions skill + 人设 + 委派」，失去 cordis_define/run/inspect 动态插件，可与 cordis 共存。
 3. 把 `tool-cordis` 挪到 host composition 全局层（一劳永逸，但改动最大）。
 
-## 双面包插件（permode-inventory）上线的四个坑（本次全程排查）
+#### [dual-face-package-pitfalls] 双面包插件（permode-inventory）上线的坑（本次全程排查）
 
-一个本地双面包插件（node 面 + browser 面）从写好到 `dsh web` 正常跑起来，踩了四个连环坑，按报错出现的顺序记：
+一个本地双面包插件（node 面 + browser 面）从写好到 `dsh web` 正常跑起来，踩了几个连环坑，按报错出现的顺序记：
 
 ### 坑 1：目录名 ≠ 包名 → `Cannot find package 'dsh-permode-inventory'`
 
@@ -150,11 +150,18 @@ Host Cordis inspect provider "Service" is already registered
   - `dsh-api-remotes/lib/client.js` `apply()`（静态 5 个 contribution 的 `$mount`）
   - `cordis/lib/index.js` `_execute()`（async apply + thenable 返回值合法，返回 disposer 会被 collect）
 
+### 坑 5：`$mount` 后访问服务要用 `ctx.get()`，点号访问会被 Guard 拦（坑 4 的补完）
+
+- **症状**：坑 4 修完、entry 不再 pending 后，modes tab 仍报「无法读取」，console 显示 `cannot get property "remote.permodeInventory" without inject`（list() 里 `ctx.remote.permodeInventory.list()` 触发）。
+- **根因**：Cordis 的 ctx 是 Proxy（`cordis/lib/index.js` 的 `ReflectService.handler.get`），`ctx.remote.permodeInventory` 这种**点号链**会被解析成服务名 `remote.permodeInventory` 并要求 `inject` 声明；而手写插件一旦 inject 它就死锁（inject 等 apply，apply 等 `$mount`）。官方 plugin-inventory 能点号访问，是因为 api-remotes 启动时就 `$mount` 了静态 contribution、inject 能解析；手写插件没这个前提。
+- **修法**：`$mount` 之后**不要点号访问**，用 `ctx.get("remote.<namespace>")` 取服务（`ctx.get` 不要求 inject，绕开死锁），取到后直接 `service.list()`。记得处理 `undefined`（服务没挂上时）。
+- **教训**：坑 4 只解决了「pending 死锁」，没解决「$mount 后怎么访问」——两者是同一个根因（inject 死锁）的两半，合起来才是完整修法：inject 只声明 `remote` → `$mount` 手动挂载 → `ctx.get("remote.<ns>")` 取服务。**自建 dual-face 包 + Typert Remote，这三步缺一不可。**
+
 ### 顺带：端口占用
 
 - `dsh web` 验证时后台起的进程会占住 3080 端口，下次再 `npx @deepseek-ai/dsh web` 会 `EADDRINUSE`。查：`lsof -nP -iTCP:3080 -sTCP:LISTEN`，杀对应 PID 即可。
 
-## 坑 5：`ctx.tools.register()` 必须声明 `output`（dsh-music-alert 上线）
+#### [tool-register-output] 坑：`ctx.tools.register()` 必须声明 `output`（dsh-music-alert 上线）
 
 - **症状**：`dsh web` 报 `tool "play_music" must declare output { schema, render, presentationMeta? }`。
 - **根因**：`dsh-tools` 新版强制每个工具声明 `output`（[`register()`](.../dsh-tools/lib/index.js:2758) 校验：`output` 必须是对象，且 `render` 必须是函数，`schema` 必须通过 `assertSupportedJsonSchema`）。旧写法只有 `name`/`description`/`parameters`/`execute` 已不合规。
@@ -162,9 +169,9 @@ Host Cordis inspect provider "Service" is already registered
 - **注意**：`execute` 的返回值会被当作 `output` 的 `value` 传给 `render`，所以 schema 的 `properties` 要和 `execute` 返回的字段对齐（如 `{ ok, name, player, error }`）。
 - **另一个坑（同类）**：`ctx.tools.register()` **不编译** `parameters` 和 `output.schema`，要求调用者传**已经编译好的标准 JSON Schema**（根节点必须是 `type: "object"`）。直接用便捷 DSL `{ file: { type: "string" } }` 会报 `Invalid schema for function ...: got 'type: null'`（provider 拿到根节点没有 type 的 schema）。官方工具（如 [`dsh-tool-bash`](.../dsh-tool-bash/lib/index.js:259)）用的是 `register(defineTool({...}))`——`defineTool` 负责把 DSL 编译成 JSON Schema。自建插件不想引 `defineTool` 的话，就手动把 `parameters` 写成 `{ type: "object", properties: {...} }`。
 
-## 坑 6：Remote 方法名不能撞 `RemoteNamespaceService` 原型方法
+#### [remote-method-name-conflict] 坑：Remote 方法名不能撞 `RemoteNamespaceService` 原型方法
 
 - **症状**：浏览器加载插件报 `client api: method "musicAlert/remove" conflicts with its namespace service`。
 - **根因**：手写 TYPERT_REMOTE contribution 里，descriptor 的 `method` 名会通过 `Object.defineProperty` 挂到 `RemoteNamespaceService` 实例上（[`install()`](.../dsh-api-gateway/lib/client.js:306)）。而 `RemoteNamespaceService` 原型上已有内部方法 `remove`（[`remove()`](.../dsh-api-gateway/lib/client.js:330)，用于卸载 direct/scoped record）等，Remote 方法名撞上就冲突。
 - **保留名清单**（`REMOTE_NAMESPACE_FIELDS` + 原型方法，见 [`dsh-api-gateway/lib/client.js`](.../dsh-api-gateway/lib/client.js:342)）：`ctx`、`empty`、`invokeRemote`、`methods`、`name`、`namespace`、`has`、`remove`、`installDirect`、`installScoped`、`install`、`assertMethodAvailable` 等。命名 Remote 方法时避开 `remove`、`has`、`install*` 这类常见词。
-- **修法**：把 Remote 方法 `remove` 改名（如 `deleteFile`），host 侧的 `MusicAlertGateway` 方法 + `markRemoteMethods` + client 侧 descriptor + 调用处四处同步改。
+- **修法**：把 Remote 方法 `remove` 改名（如 `deleteFile`），host 侧的 Gateway 方法 + `markRemoteMethods` + client 侧 descriptor + 调用处四处同步改。
