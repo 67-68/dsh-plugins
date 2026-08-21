@@ -8,3 +8,7 @@ dsh-message-edit@0.2.1
 # 用 GitHub tarball（v0.6.0）：npm 的 @freespace8/dsh-at-file 停在 0.2.3（发送时内联内容、有大小限制）；
 # 0.6.0 起只插 <workspace-reference> 路径标记、agent 自己 read，版本锁死在 URL tag 上（不适用 source@version）。
 https://github.com/omdsh-dev/dsh-at-file/archive/refs/tags/v0.6.0.tar.gz
+# LLM 回退链：GLM(pi-ai) 主力失败时自动切 DeepSeek。声明 dsh.bundle，install.sh 用
+# `dsh plugin add` 装进 profile 后自动挂载（无 fallbacks 时休眠，链在 Settings→回退链 或 settings.yaml 配）。
+# 依赖官方 dsh-llm-retry 已内建，勿重复挂 llm-retry。版本锁死 0.1.2。
+@visol-456/dsh-llm-fallback@0.1.2

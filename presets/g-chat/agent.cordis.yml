@@ -1,11 +1,15 @@
-# `g-chat` preset — 纯对话模式。
-# persona 原文从 persona.md 读取（cp 自 g.md），零内联誊写。
-# 工具仅保留对话辅助：web_search（仅检索）与 ask_user_question。
+# `g-chat` preset — 纯对话 + shell + 检索模式。
+# persona 核心从 persona.md 读取；研究插件已抽到 skills/ 目录按需加载。
+# 工具：bash + skill + web_search（去掉了 ask_user）。
 
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     text: !!js "process.getBuiltinModule('node:fs').readFileSync(process.getBuiltinModule('node:url').fileURLToPath(new URL('persona.md', baseUrl)), 'utf8')"
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
 
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
@@ -13,5 +17,13 @@
     search: true
     fetch: false
 
-- id: tool-ask-user
-  name: '@deepseek-ai/dsh-tool-ask-user'
+# skill 机制：customSkillDirs 指向本 preset 的 skills/ 目录（baseUrl 即 preset 目录），
+# 注册进本 preset 的 skill layer；宿主层已提供全局 skill 注册表与 skill 工具。
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
