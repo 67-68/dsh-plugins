@@ -274,6 +274,30 @@ def check_online(host, ip):
     return data.get("error") == "ok" or bool(data.get("user_name")) or bool(data.get("online_ip"))
 
 
+def logout(host, username, ip):
+    """Log out a stale session via the device-management endpoint (MacAuth)."""
+    host = host.rstrip("/")
+    t = int(time.time())
+    sign_src = "%s%s%s%d%s" % (t, username, ip, 1, t)
+    sign = hashlib.sha1(sign_src.encode()).hexdigest()
+    params = {
+        "callback": _CALLBACK,
+        "ip": ip,
+        "username": username,
+        "time": str(t),
+        "unbind": "1",
+        "sign": sign,
+    }
+    url = host + "/cgi-bin/rad_user_dm?" + urllib.parse.urlencode(params)
+    try:
+        raw = _http_get(url)
+        _log("logout: rad_user_dm response: %s" % raw)
+        return raw
+    except Exception:
+        _log_exc("logout: rad_user_dm")
+        return None
+
+
 _CONNECTIVITY_URLS = (
     "http://captive.apple.com",
     "http://www.baidu.com",
@@ -318,6 +342,9 @@ def login(host, ac_id, username, password):
         _log_exc("login: get_ip")
         return {"ok": False, "msg": "获取 IP 失败: %s" % exc}
     _log("login start: ip=%s username=%s" % (ip, username))
+    if check_online(host, ip):
+        _log("login: account already online (stale session), logging out first")
+        logout(host, username, ip)
     _agree(host, username)
     try:
         token = _get_challenge(host, username, ip)

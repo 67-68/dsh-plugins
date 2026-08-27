@@ -4,10 +4,14 @@
 - insert:
     # Persistent mode-experience injector: reads DOCUMENT/{mode}.md at boot and
     # injects the active preset's file into every system-prompt assembly.
+    # `promoteGatedModes` presets withhold the GENERAL + per-mode sections until
+    # the session promotes (first tool/call or assistant/message), so the first
+    # request can anchor context-free (dsh-anchored-standard).
     - id: mode-experience
       name: './mode-experience.mjs'
       config:
         docDir: '~/.dsh/DOCUMENT'
+        promoteGatedModes: ['anchored-architect']
 
     # Per-mode plugin inventory (dual-face package `dsh-permode-inventory`).
     # The node half (lib/index.js) reads each whitelisted preset's

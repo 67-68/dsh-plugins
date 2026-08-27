@@ -175,3 +175,11 @@ Host Cordis inspect provider "Service" is already registered
 - **根因**：手写 TYPERT_REMOTE contribution 里，descriptor 的 `method` 名会通过 `Object.defineProperty` 挂到 `RemoteNamespaceService` 实例上（[`install()`](.../dsh-api-gateway/lib/client.js:306)）。而 `RemoteNamespaceService` 原型上已有内部方法 `remove`（[`remove()`](.../dsh-api-gateway/lib/client.js:330)，用于卸载 direct/scoped record）等，Remote 方法名撞上就冲突。
 - **保留名清单**（`REMOTE_NAMESPACE_FIELDS` + 原型方法，见 [`dsh-api-gateway/lib/client.js`](.../dsh-api-gateway/lib/client.js:342)）：`ctx`、`empty`、`invokeRemote`、`methods`、`name`、`namespace`、`has`、`remove`、`installDirect`、`installScoped`、`install`、`assertMethodAvailable` 等。命名 Remote 方法时避开 `remove`、`has`、`install*` 这类常见词。
 - **修法**：把 Remote 方法 `remove` 改名（如 `deleteFile`），host 侧的 Gateway 方法 + `markRemoteMethods` + client 侧 descriptor + 调用处四处同步改。
+
+#### [client-module-table-miss] 坑：外部插件 client 面依赖 DSH 内部包 → `missed the module table`
+
+- **症状**：`dsh web` 启动报 `failed to import loader entry (@visol-456/dsh-llm-fallback): client-modules: require("@deepseek-ai/dsh-client-web-react") missed the module table`。
+- **根因**：客户端模块系统（[`dsh-client-modules`](.../dsh-client-modules/lib/index.js:238)）**只把「声明了 `dsh.client` 且 platform=web」的包编进 boot graph**。而 `@deepseek-ai/dsh-client-web-react` 是 DSH 官方内部 React 绑定库，`package.json` 里 **没有 `dsh.client` 字段**（`dsh` 为 undefined），所以永远进不了模块表。
+- **为什么官方包没事**：`dsh-client-ui-settings-general` 等官方包虽然也 `require("dsh-client-web-react")`，但它们的 client bundle 是**打包器内联**的（web-react 源码直接编进 26KB 的 client.js），不是运行时外部依赖。而 `@visol-456/dsh-llm-fallback` 的 client.js 是「源码直出」，`require` 裸包没内联，期望 web-react 作为独立模块出现在模块表里，落空。
+- **判定口诀**：`missed the module table` = 某个 client bundle 里 `require()` 了一个「不在 boot graph 里、也不是 seed/static 词」的裸包。去查该包有没有 `dsh.client` 字段；没有 → 上游应内联却没内联。
+- **修法**：这是上游构建缺陷，不是安装问题。短期从 `plugins/requirements.txt` 移除该插件（并 `dsh plugin --profile web remove <pkg>` 清掉 package.json 的 bundles 引用 + node_modules 残留），等上游修复。给上游提 issue：client 面不要 `require` DSH 内部未声明 `dsh.client` 的包。
