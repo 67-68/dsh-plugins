@@ -10,7 +10,7 @@ window.__ModuleLoader__.load({
 		const zh = {
 			tab: "模式门禁",
 			title: "dsh-mode-gate 模式权限",
-			desc: "当前版本的设置页只展示各模式的权限定义；编辑能力会在后续版本加入。",
+			desc: "展示各模式的权限定义，并维护 bash 禁止命令列表。",
 			modeReadOnly: "READ_ONLY",
 			modePlanOnly: "PLAN_ONLY",
 			modeWriteEnabled: "WRITE_ENABLED",
@@ -21,11 +21,22 @@ window.__ModuleLoader__.load({
 			permLabel: "权限",
 			targetLabel: "当前 Target / 模式",
 			noTarget: "（尚未声明）",
+			denyTitle: "禁止的 bash 命令",
+			denyDesc: "命中以下命令时直接拒绝执行，原因会显示给 agent。一个条目可以包含多个命令。",
+			denyCommands: "命令",
+			denyReason: "原因",
+			denyCommandsPlaceholder: "逗号分隔多个命令，如 curl, wget",
+			denyReasonPlaceholder: "禁止原因",
+			add: "添加",
+			delete: "删除",
+			save: "保存",
+			loadFailed: "读取禁止列表失败",
+			saveFailed: "保存禁止列表失败",
 		};
 		const en = {
 			tab: "Mode Gate",
 			title: "dsh-mode-gate permissions",
-			desc: "This settings tab currently shows the permission definition of each mode. Editing is coming in a later version.",
+			desc: "Shows the permission definition of each mode and maintains the bash deny-list.",
 			modeReadOnly: "READ_ONLY",
 			modePlanOnly: "PLAN_ONLY",
 			modeWriteEnabled: "WRITE_ENABLED",
@@ -36,6 +47,17 @@ window.__ModuleLoader__.load({
 			permLabel: "Permissions",
 			targetLabel: "Current target / mode",
 			noTarget: "(not declared yet)",
+			denyTitle: "Denied bash commands",
+			denyDesc: "Matching commands are rejected immediately and the reason is shown to the agent. One entry can contain multiple commands.",
+			denyCommands: "Commands",
+			denyReason: "Reason",
+			denyCommandsPlaceholder: "Comma separated commands, e.g. curl, wget",
+			denyReasonPlaceholder: "Deny reason",
+			add: "Add",
+			delete: "Delete",
+			save: "Save",
+			loadFailed: "Failed to load deny-list",
+			saveFailed: "Failed to save deny-list",
 		};
 
 		const MODES = ["READ_ONLY", "PLAN_ONLY", "WRITE_ENABLED"];
@@ -79,6 +101,43 @@ window.__ModuleLoader__.load({
 			return state;
 		}
 
+		/** Read and update the bash deny-list through the Remote service. */
+		function useBashDenyList(api) {
+			const [entries, setEntries] = react.useState([]);
+			const [error, setError] = react.useState("");
+
+			const refresh = react.useCallback(async () => {
+				try {
+					const result = await api().getBashDenyList();
+					if (result && result.ok && result.value && Array.isArray(result.value.entries)) {
+						setEntries(result.value.entries);
+					} else {
+						setEntries([]);
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+
+			react.useEffect(() => { refresh(); }, [refresh]);
+
+			const save = react.useCallback(async (nextEntries) => {
+				try {
+					const result = await api().setBashDenyList({ entries: nextEntries });
+					if (result && result.ok && result.value && Array.isArray(result.value.entries)) {
+						setEntries(result.value.entries);
+						setError("");
+					} else {
+						setError("saveFailed");
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+
+			return { entries, error, refresh, save };
+		}
+
 		const MODE_ROWS = [
 			["modeReadOnly", "permReadOnly"],
 			["modePlanOnly", "permPlanOnly"],
@@ -95,6 +154,11 @@ window.__ModuleLoader__.load({
 			th: { textAlign: "left", padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l2)", color: "var(--dsw-alias-label-secondary)", fontWeight: 600 },
 			td: { padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l2)", verticalAlign: "top" },
 			code: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, color: "var(--dsw-alias-label-primary)" },
+			denyHead: { margin: "4px 0 0", fontSize: 15, fontWeight: 600 },
+			input: { width: "100%", boxSizing: "border-box", padding: "6px 8px", fontSize: 13, borderRadius: 6, border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)" },
+			button: { padding: "6px 12px", fontSize: 13, borderRadius: 6, border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)", cursor: "pointer" },
+			addRow: { display: "flex", gap: 8 },
+			error: { color: "var(--dsw-alias-label-danger, #e5484d)", fontSize: 13, margin: 0 },
 		};
 
 		/** Left sidebar footer badge: current mode + declared target. */
@@ -111,7 +175,39 @@ window.__ModuleLoader__.load({
 
 		/** Static settings tab: show mode definitions and permissions. */
 		function ModeGateSettingsTab(props) {
-			const { t } = props;
+			const { t, api } = props;
+			const deny = useBashDenyList(api);
+			const [draft, setDraft] = react.useState([]);
+			const [newCommands, setNewCommands] = react.useState("");
+			const [newReason, setNewReason] = react.useState("");
+
+			react.useEffect(() => {
+				setDraft((deny.entries || []).map((entry) => ({ ...entry, commands: [...entry.commands] })));
+			}, [deny.entries]);
+
+			const updateCommands = (idx, value) => setDraft((prev) => prev.map((entry, i) => (
+				i === idx ? { ...entry, commands: value.split(/[\s,]+/).filter(Boolean) } : entry
+			)));
+			const updateReason = (idx, value) => setDraft((prev) => prev.map((entry, i) => (
+				i === idx ? { ...entry, reason: value } : entry
+			)));
+
+			const saveAll = async () => { await deny.save(draft); };
+			const deleteEntry = async (idx) => {
+				const next = draft.filter((_, i) => i !== idx);
+				setDraft(next);
+				await deny.save(next);
+			};
+			const addEntry = async () => {
+				const commands = newCommands.split(/[\s,]+/).filter(Boolean);
+				if (commands.length === 0) return;
+				const next = [...draft, { id: `deny-${Date.now()}`, commands, reason: newReason.trim() }];
+				setDraft(next);
+				setNewCommands("");
+				setNewReason("");
+				await deny.save(next);
+			};
+
 			const head = react.createElement("p", { style: styles.desc }, t("desc"));
 			const rows = MODE_ROWS.map(([modeKey, permKey]) => react.createElement("tr", { key: modeKey },
 				react.createElement("td", { style: styles.td }, react.createElement("code", { style: styles.code }, t(modeKey))),
@@ -126,7 +222,36 @@ window.__ModuleLoader__.load({
 				),
 				react.createElement("tbody", null, rows),
 			);
-			return react.createElement("div", { style: styles.section }, head, table);
+
+			const denyHead = react.createElement("h3", { style: styles.denyHead }, t("denyTitle"));
+			const denyDesc = react.createElement("p", { style: styles.desc }, t("denyDesc"));
+			const denyRows = draft.map((entry, idx) => react.createElement("tr", { key: entry.id || idx },
+				react.createElement("td", { style: styles.td },
+					react.createElement("input", { style: styles.input, value: entry.commands.join(', '), onChange: (e) => updateCommands(idx, e.target.value) })),
+				react.createElement("td", { style: styles.td },
+					react.createElement("input", { style: styles.input, value: entry.reason || '', onChange: (e) => updateReason(idx, e.target.value) })),
+				react.createElement("td", { style: styles.td },
+					react.createElement("button", { style: styles.button, onClick: () => deleteEntry(idx) }, t("delete"))),
+			));
+			const denyTable = react.createElement("table", { style: styles.table },
+				react.createElement("thead", null,
+					react.createElement("tr", null,
+						react.createElement("th", { style: styles.th }, t("denyCommands")),
+						react.createElement("th", { style: styles.th }, t("denyReason")),
+						react.createElement("th", { style: styles.th }, ""),
+					)
+				),
+				react.createElement("tbody", null, denyRows),
+			);
+			const addRow = react.createElement("div", { style: styles.addRow },
+				react.createElement("input", { style: styles.input, placeholder: t("denyCommandsPlaceholder"), value: newCommands, onChange: (e) => setNewCommands(e.target.value) }),
+				react.createElement("input", { style: styles.input, placeholder: t("denyReasonPlaceholder"), value: newReason, onChange: (e) => setNewReason(e.target.value) }),
+				react.createElement("button", { style: styles.button, onClick: addEntry }, t("add")),
+			);
+			const saveButton = react.createElement("button", { style: styles.button, onClick: saveAll }, t("save"));
+			const errorLine = deny.error ? react.createElement("p", { style: styles.error }, typeof deny.error === "string" && deny.error !== "saveFailed" ? deny.error : t(deny.error === "saveFailed" ? "saveFailed" : "loadFailed")) : null;
+
+			return react.createElement("div", { style: styles.section }, head, table, denyHead, denyDesc, denyTable, addRow, saveButton, errorLine);
 		}
 
 		// ── registration ────────────────────────────────────────────────────────
@@ -138,7 +263,7 @@ window.__ModuleLoader__.load({
 				schema: { parse(value) { return value; } },
 			};
 		}
-		/** Hand-written Typert Remote face for the Host `modeGate/getState` service. */
+		/** Hand-written Typert Remote face for the Host `modeGate` service methods. */
 		const TYPERT_REMOTE = {
 			package: "dsh-mode-gate",
 			descriptors: [{
@@ -154,6 +279,27 @@ window.__ModuleLoader__.load({
 					codec: makeCodec("GetStateArgs"),
 				}],
 				result: makeCodec("GetStateResult"),
+			}, {
+				id: "dsh-mode-gate#modeGate/getBashDenyList",
+				service: "modeGate",
+				namespace: "modeGate",
+				method: "getBashDenyList",
+				invocation: { kind: "direct" },
+				parameters: [],
+				result: makeCodec("GetBashDenyListResult"),
+			}, {
+				id: "dsh-mode-gate#modeGate/setBashDenyList",
+				service: "modeGate",
+				namespace: "modeGate",
+				method: "setBashDenyList",
+				invocation: { kind: "direct" },
+				parameters: [{
+					name: "args",
+					wire: "args",
+					source: "json",
+					codec: makeCodec("SetBashDenyListArgs"),
+				}],
+				result: makeCodec("SetBashDenyListResult"),
 			}],
 		};
 
@@ -178,7 +324,7 @@ window.__ModuleLoader__.load({
 				order: 40,
 				label: () => t("tab"),
 				locale: NS,
-				inject: () => ({})
+				inject: () => ({ api })
 			}, ModeGateSettingsTab));
 
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({

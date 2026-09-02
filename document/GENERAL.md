@@ -12,6 +12,10 @@
 
 ## DSH mode-gate 使用契约
 - 新 session 默认 `READ_ONLY`；除白名单工具外，必须先 `declare_target` 才能行动
+- `declare_target` 时同时声明本次需要的 `skills` 和 `bash` 命令；未声明的 `skill_load` / bash 命令会被拦截
+- 不要花太多算力预判申请清单：需要额外 skill 或 bash 时直接调用 `request_extra` 申请，它会作为问题向用户申报
+- 网页阅读禁止 `curl` / `wget`，统一用 `read_url` 系列工具
+- 始终可用：`skill_search`（查看所有 skill）、`switch_mode`（请求切换模式）、`request_extra`（申请额外访问）
 - 切换模式用 `switch_mode`，需要人工批准
 - 插件代码在 `packages/dsh-mode-gate`；修改后运行 `install.sh` 同步
 

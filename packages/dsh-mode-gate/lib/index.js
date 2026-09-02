@@ -9,16 +9,28 @@ const DEFAULT_MODE = 'READ_ONLY';
 
 const STATE_FILE = join(homedir(), '.dsh', 'mode-gate-state.json');
 
+/** Default bash deny-list entries; overridable from the Web settings tab. */
+const DEFAULT_BASH_DENY_LIST = [
+  {
+    id: 'deny-web-fetch',
+    commands: ['curl', 'wget'],
+    reason: '禁止使用 curl/wget 抓取网页，请改用 read_url 工具',
+  },
+];
+
 /** Tools that are always allowed regardless of mode / declared target. */
-const ALWAYS_ALLOWED = new Set(['declare_target', 'switch_mode']);
+const ALWAYS_ALLOWED = new Set(['declare_target', 'switch_mode', 'skill_search', 'request_extra']);
 
 /** Tools allowed without a declared target (besides ALWAYS_ALLOWED). */
-const ALLOWED_WITHOUT_TARGET = new Set(['ask_user_question', 'get_goal', 'todo_write']);
+const ALLOWED_WITHOUT_TARGET = new Set([
+  'ask_user_question', 'get_goal', 'todo_write', 'skill_search', 'request_extra',
+]);
 
 /** Tools considered safe in READ_ONLY (and therefore PLAN_ONLY too). */
 const READ_ONLY_TOOLS = new Set([
   'read', 'grep', 'glob', 'skill', 'skill_search', 'skill_load', 'read_image',
   'web_search', 'list_agents', 'get_goal', 'job_list', 'job_output', 'ask_user_question',
+  'read_url', 'read_url_batch', 'read_url_links', 'read_url_site',
 ]);
 
 const READ_ONLY_TOOL_GLOBS = ['cordis_inspect_*'];
@@ -32,6 +44,13 @@ function matchesReadOnlyToolGlob(name) {
 
 /** Tools considered planning-safe on top of READ_ONLY. */
 const PLAN_TOOLS = new Set(['todo_write', 'exit_plan_mode']);
+
+/** Generated mode-specific prompt lines. */
+const MODE_RULES = {
+  READ_ONLY: '- READ_ONLY：只读。bash 仅允许已声明的只读命令；禁止写入/危险命令；网页阅读只用 read_url 工具。',
+  PLAN_ONLY: '- PLAN_ONLY：只读 + 规划（todo_write / exit_plan_mode）；bash 仅允许已声明的只读命令；网页阅读只用 read_url 工具。',
+  WRITE_ENABLED: '- WRITE_ENABLED：可写，但危险 bash 命令仍需人工授权；网页阅读只用 read_url 工具。',
+};
 
 /** Tool names that are always considered writes when classified by name. */
 const KNOWN_WRITE_TOOLS = new Set([
@@ -204,22 +223,92 @@ function classifyCommand(command) {
   return 'read-only';
 }
 
+/** Return the command verb (basename of first command word) for each top-level shell segment. */
+function extractCommandVerbs(command) {
+  const segments = splitShellSegments(String(command || ''));
+  const verbs = [];
+  for (const segment of segments) {
+    const tokens = tokenizeSimpleCommand(segment);
+    const first = tokens.find((token) => redirectOpOf(token) === null && !token.includes('='));
+    if (first !== void 0) verbs.push(first.split('/').pop());
+  }
+  return verbs;
+}
+
+/** Normalize a bash deny-list payload. `undefined` means "use the built-in default". */
+function normalizeDenyList(value) {
+  if (value === void 0) return DEFAULT_BASH_DENY_LIST.map((entry) => ({ ...entry, commands: [...entry.commands] }));
+  if (!Array.isArray(value)) return DEFAULT_BASH_DENY_LIST.map((entry) => ({ ...entry, commands: [...entry.commands] }));
+  const out = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const commands = Array.isArray(entry.commands)
+      ? entry.commands.filter((c) => typeof c === 'string' && c.trim()).map((c) => c.trim())
+      : (typeof entry.command === 'string' && entry.command.trim() ? [entry.command.trim()] : []);
+    if (commands.length === 0) continue;
+    out.push({
+      id: typeof entry.id === 'string' && entry.id ? entry.id : `deny-${out.length + 1}`,
+      commands,
+      reason: typeof entry.reason === 'string' ? entry.reason : '',
+    });
+  }
+  return out;
+}
+
+function stringArray(value) {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
+    : [];
+}
+
+function readBashDenyList() {
+  return loadStateStore().bashDenyList;
+}
+
+function saveBashDenyList(entries) {
+  const store = loadStateStore();
+  store.bashDenyList = normalizeDenyList(entries);
+  saveStateStore(store);
+  return store.bashDenyList;
+}
+
+function matchBashDeny(command, denyList) {
+  const verbs = extractCommandVerbs(command);
+  for (const entry of denyList) {
+    for (const banned of entry.commands) {
+      if (verbs.includes(banned)) return entry;
+    }
+  }
+  return null;
+}
+
+function isBashDeclared(command, declaredBash) {
+  const set = new Set(declaredBash);
+  return extractCommandVerbs(command).every((verb) => set.has(verb));
+}
+
 /**
  * Load the durable mode-gate state from `~/.dsh/mode-gate-state.json`.
- * The shape is `{ sessions: { [sessionId]: { mode, target } } }`. State is keyed
- * by session id so a resumed session folds back to the mode/target it had.
+ * The shape is `{ sessions: { [sessionId]: { mode, target, skills, bash } }, bashDenyList }`.
+ * State is keyed by session id so a resumed session folds back to the
+ * mode/target/capabilities it had; bashDenyList is global.
  * Session-log custom events are NOT used: the harness's persistence read path
  * only accepts its own known event types and refuses logs containing unknown
  * non-ignorable types (SessionFormatUnsupportedError).
  */
 function loadStateStore() {
   try {
-    if (!existsSync(STATE_FILE)) return { sessions: {} };
+    if (!existsSync(STATE_FILE)) return { sessions: {}, bashDenyList: normalizeDenyList() };
     const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-    if (parsed && typeof parsed === 'object' && parsed.sessions && typeof parsed.sessions === 'object') return parsed;
-    return { sessions: {} };
+    if (parsed && typeof parsed === 'object') {
+      return {
+        sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
+        bashDenyList: normalizeDenyList(parsed.bashDenyList),
+      };
+    }
+    return { sessions: {}, bashDenyList: normalizeDenyList() };
   } catch (_err) {
-    return { sessions: {} };
+    return { sessions: {}, bashDenyList: normalizeDenyList() };
   }
 }
 
@@ -239,6 +328,8 @@ function readState(agent, fallbackMode) {
   return {
     mode: entry && MODES.includes(entry.mode) ? entry.mode : (fallbackMode || DEFAULT_MODE),
     target: entry && entry.target ? entry.target : null,
+    skills: stringArray(entry && entry.skills),
+    bash: stringArray(entry && entry.bash),
   };
 }
 
@@ -265,7 +356,16 @@ function toolDisposition(name, mode) {
 }
 
 /** Decide a bash/pwsh command in the current mode. */
-function bashDisposition(command, mode) {
+function bashDisposition(command, mode, declaredBash, denyList) {
+  const deny = matchBashDeny(command, denyList);
+  if (deny) {
+    return { kind: 'deny', reason: deny.reason || `命令 ${deny.commands.join('/')} 已被禁止。` };
+  }
+
+  if (!isBashDeclared(command, declaredBash)) {
+    return { kind: 'deny', reason: `当前 bash 命令未声明：${command}。请调用 request_extra 申请额外 bash 命令。` };
+  }
+
   const kind = classifyCommand(command);
   if (mode === 'READ_ONLY' || mode === 'PLAN_ONLY') {
     if (kind === 'read-only') return { kind: 'allow' };
@@ -275,6 +375,17 @@ function bashDisposition(command, mode) {
     return { kind: 'ask', reason: `检测到危险命令，需要人工授权：${command}` };
   }
   return { kind: 'allow' };
+}
+
+function formatCapabilities(state) {
+  return [
+    `当前模式：${state.mode}`,
+    `当前 Target：${state.target ? state.target.target : '未声明'}`,
+    `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
+    `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
+    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换模式）、request_extra（申请额外 skill/bash）。',
+    '要申请额外 skill 或 bash：request_extra({ skills: [...], bash: [...] })，会作为问题向用户申报。',
+  ].join('\n');
 }
 
 /**
@@ -301,7 +412,7 @@ function markRemoteMethods(cls, methodNames) {
   for (const fn of initializers) fn.call(probe);
 }
 
-/** Remote service exposing the durable mode-gate state to the Web settings/footer. */
+/** Remote service exposing the durable mode-gate state and bash deny-list. */
 class ModeGateGateway extends TypertRemoteService {
   static inject = [];
   constructor(ctx) {
@@ -316,8 +427,15 @@ class ModeGateGateway extends TypertRemoteService {
       target: entry && entry.target ? entry.target : null,
     };
   }
+  async getBashDenyList() {
+    return { entries: readBashDenyList() };
+  }
+  async setBashDenyList(args) {
+    const entries = saveBashDenyList(args && args.entries);
+    return { entries };
+  }
 }
-markRemoteMethods(ModeGateGateway, ['getState']);
+markRemoteMethods(ModeGateGateway, ['getState', 'getBashDenyList', 'setBashDenyList']);
 
 export default {
   name: 'mode-gate',
@@ -332,24 +450,33 @@ export default {
       text: (assembleCtx) => {
         const agent = assembleCtx && assembleCtx.agent;
         const state = readState(agent, defaultMode);
+        const denyList = readBashDenyList();
         const targetText = state.target ? state.target.target : '未声明';
         const targetModeText = state.target && state.target.mode ? state.target.mode : '（未指定）';
+        const denyLines = denyList.length
+          ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n')
+          : '  （无）';
         return [
           '[mode-gate]',
           `当前模式：${state.mode}`,
           `当前 Target：${targetText}`,
           `Target 关联模式：${targetModeText}`,
+          `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
+          `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
           '规则：',
-          '- 每次行动前必须先调用 declare_target 声明 Target。',
-          '- READ_ONLY：只读；PLAN_ONLY：只读 + 规划；WRITE_ENABLED：可写，但危险命令仍需授权。',
-          '- 需要切换模式时调用 switch_mode，经用户批准后生效。',
+          '- 每次行动前必须先调用 declare_target 声明 Target，并同时声明本次需要的 skills 和 bash 命令。',
+          MODE_RULES[state.mode] || MODE_RULES[DEFAULT_MODE],
+          '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 request_extra 申请，会作为问题向用户申报。不要花太多算力预判申请清单。',
+          '- 始终可用：skill_search（查看所有 skill）、switch_mode（请求切换模式）、request_extra（申请额外 skill/bash）。',
+          '当前禁止的 bash 命令：',
+          denyLines,
         ].join('\n');
       },
     });
 
     ctx.tools.register(defineTool({
       name: 'declare_target',
-      description: '声明当前任务目标（Target），可选关联一个执行模式。必须在其他工具调用之前使用。',
+      description: '声明当前任务目标（Target），可选关联一个执行模式，并同时声明本次需要的 skills 和 bash 命令。必须在其他工具调用之前使用。',
       parameters: {
         target: {
           type: 'string',
@@ -361,6 +488,16 @@ export default {
           enum: [...MODES],
           description: '该目标预期执行的模式。缺省则保持当前模式。',
         },
+        skills: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '本次任务需要使用的 skill 名称列表（未声明的 skill_load 会被拦截）。',
+        },
+        bash: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '本次任务需要使用的 bash 命令动词列表，例如 ["ls", "cat", "grep"]。',
+        },
       },
       output: {
         schema: { type: 'string' },
@@ -369,9 +506,15 @@ export default {
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('declare_target 需要 agent 上下文');
+        const skills = stringArray(args.skills);
+        const bash = stringArray(args.bash);
         const target = { target: args.target, mode: args.mode };
-        writeState(agent, { target });
-        return `已声明 Target：${args.target}${args.mode ? `，关联模式：${args.mode}` : ''}`;
+        writeState(agent, { target, skills, bash });
+        return [
+          `已声明 Target：${args.target}${args.mode ? `，关联模式：${args.mode}` : ''}`,
+          `已声明 skills：${skills.length ? skills.join(', ') : '（无）'}`,
+          `已声明 bash 命令：${bash.length ? bash.join(', ') : '（无）'}`,
+        ].join('\n');
       },
     }));
 
@@ -402,6 +545,41 @@ export default {
       },
     }));
 
+    ctx.tools.register(defineTool({
+      name: 'request_extra',
+      description: '查看或申请额外的 skill 和 bash 命令访问。无参数时返回当前已声明的 skills 和 bash 命令；带 skills/bash 参数时作为问题向用户申报，批准后立即生效。',
+      parameters: {
+        skills: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '要申请的 skill 名称列表。',
+        },
+        bash: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '要申请的 bash 命令动词列表。',
+        },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: String(value) }],
+      },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        if (agent === void 0) throw new Error('request_extra 需要 agent 上下文');
+        const state = readState(agent, defaultMode);
+        const requestedSkills = stringArray(args.skills);
+        const requestedBash = stringArray(args.bash);
+        if (requestedSkills.length || requestedBash.length) {
+          const nextSkills = [...new Set([...state.skills, ...requestedSkills])];
+          const nextBash = [...new Set([...state.bash, ...requestedBash])];
+          writeState(agent, { skills: nextSkills, bash: nextBash });
+          return formatCapabilities({ ...state, skills: nextSkills, bash: nextBash });
+        }
+        return formatCapabilities(state);
+      },
+    }));
+
     ctx.on('tools/pre-execute', (exec, next) => {
       const name = exec.name;
 
@@ -418,6 +596,23 @@ export default {
         });
       }
 
+      if (name === 'request_extra') {
+        const requestedSkills = stringArray(exec.arguments?.skills);
+        const requestedBash = stringArray(exec.arguments?.bash);
+        if (requestedSkills.length || requestedBash.length) {
+          const state = readState(exec.agent, defaultMode);
+          const items = [
+            ...requestedSkills.map((s) => `skill: ${s}`),
+            ...requestedBash.map((b) => `bash: ${b}`),
+          ].join('、');
+          return Promise.resolve({
+            kind: 'ask',
+            reason: `是否授予以下额外访问？${items}（当前模式 ${state.mode}，批准后立即生效）`,
+          });
+        }
+        return next();
+      }
+
       const agent = exec.agent;
       const state = readState(agent, defaultMode);
 
@@ -430,8 +625,31 @@ export default {
 
       if (name === 'bash' || name === 'pwsh') {
         const command = String(exec.arguments?.command || '');
-        const decision = bashDisposition(command, state.mode);
+        const decision = bashDisposition(command, state.mode, state.bash, readBashDenyList());
         return decision.kind === 'allow' ? next() : Promise.resolve(decision);
+      }
+
+      if (name === 'skill_load' || name === 'skill') {
+        const requested = typeof exec.arguments?.name === 'string' ? exec.arguments.name : '';
+        if (requested && !state.skills.includes(requested)) {
+          return Promise.resolve({
+            kind: 'deny',
+            reason: `skill "${requested}" 未声明。请先用 skill_search 查看，再用 request_extra 申请额外 skill。`,
+          });
+        }
+        const decision = toolDisposition(name, state.mode);
+        return decision.kind === 'allow' ? next() : Promise.resolve(decision);
+      }
+
+      if (name === 'str_replace_editor') {
+        if (state.mode === 'READ_ONLY' || state.mode === 'PLAN_ONLY') {
+          if (exec.arguments?.command === 'view') return next();
+          return Promise.resolve({
+            kind: 'deny',
+            reason: `当前模式为 ${state.mode}，str_replace_editor 仅允许 view 命令。`,
+          });
+        }
+        return next();
       }
 
       if (KNOWN_WRITE_TOOLS.has(name)) {
