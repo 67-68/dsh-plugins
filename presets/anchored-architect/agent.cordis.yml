@@ -92,16 +92,23 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# Keep this text byte-identical to the Minimal preset. `complete` prevents the
-# Harness identity and per-tool guidance from changing the system prompt, while
-# runtime-context suppression leaves task and repository rules to user messages
-# and explicit file reads. Tool schemas and their runtime enforcement remain.
+# Persona is the COMPLETE system prompt, byte-identical to the Minimal preset
+# before promotion. After promotion this row's plugin appends GENERAL.md +
+# anchored-architect.md to the SAME complete section — system-level text, not
+# a user message — so the mode experience is followed as core persona while
+# the first-request anchor remains untouched. Runtime context stays
+# suppressed; task and repository rules remain user-message / explicit-read
+# material. Tool schemas and their runtime enforcement remain.
 - id: persona
-  name: '@deepseek-ai/dsh-persona'
+  name: ./persona-gated.mjs
   config:
-    text: You are a helpful software engineer assistant.
-    complete: true
+    basePersona: You are a helpful software engineer assistant.
+    mode: anchored-architect
+    docDir: '~/.dsh/DOCUMENT'
     includeRuntimeContext: false
+    includeSubagents: true
+    # 1 = every promoted turn; 2 = every 2nd promoted turn (round 2, 4, 6 …).
+    modeExperienceInterval: 2
 
 # Instruction FILES are NOT injected (replaces dsh-agent-instructions, local
 # addition): the full AGENTS.md/CLAUDE.md digest is a large injected block

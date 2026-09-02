@@ -1,2 +1,2 @@
 name: 锚定架构师
-description: 基于 dsh-anchored-standard 的 Minimal 首轮锚定，架构师人格经 mode-experience 晋升后注入。
+description: 基于 dsh-anchored-standard 的 Minimal 首轮锚定，晋升后由 persona-gated 将架构师经验注入完整 system prompt。

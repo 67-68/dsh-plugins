@@ -132,6 +132,17 @@ const DEFAULT_BOOTSTRAP_TOOLS = ['bash', 'str_replace_editor']
 /** Discovery tools always resident after promotion (the tool-search pattern). */
 const RESIDENT_DISCOVERY_TOOLS = ['dev_tool_search', 'skill_search', 'skill_load']
 
+/**
+ * The host mode-gate's control tools (`dsh-mode-gate` registers these at the
+ * host plane). They must survive EVERY catalog narrowing — bootstrap, resident,
+ * and compaction — or a gated session deadlocks: the `tools/pre-execute` gate
+ * demands `declare_target` before any other tool call, but the model can only
+ * call it while the tool stays in the visible catalog. Best-effort: when the
+ * gate is not mounted these names simply match nothing, and their absence must
+ * never trigger the missing-tool degrade (see `keepTools`).
+ */
+const GATE_CONTROL_TOOLS = ['declare_target', 'switch_mode']
+
 function stringList(value, field) {
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== 'string' || item.length === 0)) {
     throw new TypeError(`${name}: ${field} must be a non-empty array of non-empty strings`)
@@ -235,9 +246,14 @@ export function apply(ctx, config) {
       )
       if (missingAllowsFullCatalog) return assembled
     }
+    // Keep the mode gate's escape hatch regardless of phase. Merged AFTER the
+    // missing check so a gate tool that is absent (gate not mounted) neither
+    // triggers the degrade above nor breaks the filter below — it just matches
+    // nothing.
+    const keepPlusGate = new Set([...keep, ...GATE_CONTROL_TOOLS])
     return {
       ...assembled,
-      tools: assembled.tools.filter((tool) => keep.has(tool.name)),
+      tools: assembled.tools.filter((tool) => keepPlusGate.has(tool.name)),
     }
   }
 

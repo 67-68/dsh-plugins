@@ -1,0 +1,17 @@
+{
+  "name": "dsh-read-url",
+  "version": "1.6.1-dsh-local",
+  "description": "Local minimal fork of dsh-read-url for dsh-plugins: clean URL reader with compact text/markdown output; optional Playwright/Readability hooks stripped to satisfy DSH plugin-manager quality gate.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "spa.js",
+    "proxy-fallback.js",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -12,7 +12,7 @@
 
 ## 1. 信息收集
 
-使用提供的工具（如 [`read`](documentation/dev/roo_rules_convention.md)、[`grep`](core/)、[`glob`](.roo/) 等）收集关于任务的更多上下文，查看@DOCUMENTATIONS/feature_intents 可能存在的模块对应文档。不要假设你知道项目结构，先看再想。
+使用提供的工具（如 [`read`](documentation/dev/roo_rules_convention.md)、[`grep`](core/)、[`glob`](.roo/) 等）收集关于任务的更多上下文，查看 `document/feature_intent/` 下可能存在的模块对应文档。不要假设你知道项目结构，先看再想。
 
 ## 2. 澄清问题
 
@@ -34,7 +34,7 @@
 - 随着收集到更多信息或发现新需求，更新待办事项列表
 - 如果需要保存完整的计划文件，将其放在 `/plans` 目录下
 - 避免信息覆盖原则: 如果一个tres文件是通过csv解析创建的，不要去修改tres，而是修改csv(因为修改了.tres之后下次同步就会覆盖掉)
-- 把用户的意图，模块设计的意图清晰，明确的 放在/DOCUMENTATION/feature_intent 对应的模块文档中。模块文档创建的原则为：
+- 把用户的意图，模块设计的意图清晰，明确的 放在 `document/feature_intent/` 对应的模块文档中。模块文档创建的原则为：
     - 一个模块只能有一个文档。
     - 不以“一次任务”的形式写入文档，例如禁止"some_module_refactor"类型的文档。
     - 文档名字只能是"some_module"

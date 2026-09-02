@@ -183,3 +183,11 @@ Host Cordis inspect provider "Service" is already registered
 - **为什么官方包没事**：`dsh-client-ui-settings-general` 等官方包虽然也 `require("dsh-client-web-react")`，但它们的 client bundle 是**打包器内联**的（web-react 源码直接编进 26KB 的 client.js），不是运行时外部依赖。而 `@visol-456/dsh-llm-fallback` 的 client.js 是「源码直出」，`require` 裸包没内联，期望 web-react 作为独立模块出现在模块表里，落空。
 - **判定口诀**：`missed the module table` = 某个 client bundle 里 `require()` 了一个「不在 boot graph 里、也不是 seed/static 词」的裸包。去查该包有没有 `dsh.client` 字段；没有 → 上游应内联却没内联。
 - **修法**：这是上游构建缺陷，不是安装问题。短期从 `plugins/requirements.txt` 移除该插件（并 `dsh plugin --profile web remove <pkg>` 清掉 package.json 的 bundles 引用 + node_modules 残留），等上游修复。给上游提 issue：client 面不要 `require` DSH 内部未声明 `dsh.client` 的包。
+
+#### [session-event-custom-type] 坑：第三方插件不能写自定义 session 事件 → SessionFormatUnsupportedError
+
+- **症状**：历史加载报 `SessionFormatUnsupportedError: session contains event type "modeGate/target" (seq N) unknown to this harness and not marked ignorable; refusing to interpret the log`。
+- **根因**：harness 的 session 持久化读取路径维护已知事件类型白名单 [`KNOWN_SESSION_EVENT_TYPES`](.../dsh-session/lib/index.js:1054)，遇到白名单外、且没有 `ignorable: true` 标记的事件就拒绝解释整条日志（防旧版 harness 错误重建新版写的会话）。
+- **关键事实**：`session.append()`（[`dsh-session`](.../dsh-session/lib/index.js:1440)）**没有提供 `ignorable` 通道**（opts 只认 `sourceEventSeqs`/`surfaceOp`），所以第三方插件无法写「可忽略」的自定义事件。源码注释明说：out-of-repo plugin events are outside this list by construction; a registration surface for them is deferred。
+- **修法**：第三方插件的持久化状态**不能**写 session log 自定义事件。改用插件私有文件（如 `~/.dsh/<plugin>-state.json`，按 session id 分键），客户端通过 Remote 服务读取。dsh-mode-gate 就是踩了这个坑后改存 `~/.dsh/mode-gate-state.json` + Remote `modeGate/getState`。
+- **通用教训**：想在 agent 里持久化插件私有状态 → 用 `node:fs` 写自己的文件，或 `dsh-storage-domain`；session log 是 harness 的私有词汇表，第三方不能往里加类型。

@@ -3,15 +3,24 @@
 # overrides, disables, and insert lists; `!!js` expressions allowed).
 - insert:
     # Persistent mode-experience injector: reads DOCUMENT/{mode}.md at boot and
-    # injects the active preset's file into every system-prompt assembly.
-    # `promoteGatedModes` presets withhold the GENERAL + per-mode sections until
-    # the session promotes (first tool/call or assistant/message), so the first
-    # request can anchor context-free (dsh-anchored-standard).
+    # injects GENERAL.md into every non-gated mode's system prompt, and parses
+    # every {mode}.md into on-demand skills. Promote-gated modes
+    # (anchored-architect) get their GENERAL + mode file through the preset's
+    # complete-persona plugin (persona-gated.mjs) instead, so their mode
+    # experience arrives as SYSTEM prompt text after promotion.
     - id: mode-experience
       name: './mode-experience.mjs'
       config:
         docDir: '~/.dsh/DOCUMENT'
         promoteGatedModes: ['anchored-architect']
+
+    # Mode gate: host half declares `declare_target` / `switch_mode` tools and
+    # enforces READ_ONLY / PLAN_ONLY / WRITE_ENABLED on `tools/pre-execute`;
+    # the browser half renders the mode-permission settings tab.
+    - id: mode-gate
+      name: 'dsh-mode-gate'
+      config:
+        defaultMode: READ_ONLY
 
     # Per-mode plugin inventory (dual-face package `dsh-permode-inventory`).
     # The node half (lib/index.js) reads each whitelisted preset's
@@ -44,3 +53,12 @@
     - id: dsh-mermaid
       name: 'dsh-mermaid'
       config: {}
+
+# dsh-plugin-manager:managed:start
+- insert:
+    - id: dsh-read-url
+      name: 'dsh-read-url'
+# dsh-plugin-manager:managed:end
+
+# ── Managed MCP servers (dsh-skill-mcp-manager, disabled shadow entries) ──
+# ── End managed MCP servers (dsh-skill-mcp-manager) ──

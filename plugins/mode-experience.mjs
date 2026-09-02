@@ -58,8 +58,10 @@ export default {
     const log = (msg) => { try { appendFileSync(logFile, msg + '\n') } catch (e) {} }
 
     // Modes whose GENERAL.md resident section is gated behind "promotion":
-    // the section stays empty until that session has produced a tool call or
-    // an assistant message (so a first request can anchor context-free).
+    // for these presets this host-plane section ALWAYS returns empty; the
+    // preset-local complete-persona plugin (e.g. persona-gated.mjs) is the
+    // one that appends GENERAL.md + {mode}.md as SYSTEM prompt text after the
+    // session promotes (first tool/call or assistant/message).
     const promoteGatedModes = new Set(
       Array.isArray(config && config.promoteGatedModes) ? config.promoteGatedModes : []
     )
@@ -142,33 +144,10 @@ export default {
 
     log('APPLY modes=' + JSON.stringify(Object.keys(files)) + ' general=' + (generalContent ? 'yes' : 'no') + ' skills=' + allSkills.length)
 
-    // Promotion tracking: a session is "promoted" once it has emitted a tool
-    // call or an assistant message. The in-memory Set is warmed from the
-    // durable session log on first use, so a resumed or reloaded session keeps
-    // its phase. Original semantics: promotion is one-shot (compaction does
-    // not demote here).
-    const promotedSessions = new Set()
-    const isSessionPromoted = (session) => {
-      if (session === undefined) return false
-      if (promotedSessions.has(session.id)) return true
-      const events = Array.isArray(session.events) ? session.events : []
-      for (const event of events) {
-        if (event && (event.type === 'tool/call' || event.type === 'assistant/message')) {
-          promotedSessions.add(session.id)
-          return true
-        }
-      }
-      return false
-    }
-    ctx.on('session/event', (session, event) => {
-      if (event && (event.type === 'tool/call' || event.type === 'assistant/message')) {
-        promotedSessions.add(session.id)
-      }
-    })
-
-    // Auto-inject GENERAL.md for every NON-gated mode. Promote-gated modes use
-    // the pre-step path below instead; their `complete` persona discards
-    // sections, and this text must not duplicate what the pre-step injects.
+    // Auto-inject GENERAL.md for every NON-gated mode. Promote-gated modes
+    // (e.g. anchored-architect) receive GENERAL.md + {mode}.md through their
+    // preset-local complete-persona plugin instead, so this host-plane section
+    // must not duplicate that content.
     ctx.systemPrompt.section({
       name: 'mode-experience',
       order: 500,
@@ -180,59 +159,6 @@ export default {
         return generalContent || ''
       },
     })
-
-    // Promote-gated modes run with a `complete` persona (e.g. anchored-architect),
-    // so dsh-system-prompt discards every other SECTION after assembly. The
-    // section registrations above therefore cannot reach those sessions. Inject
-    // the same gated content as a pre-step user message instead: while the
-    // session is unpromoted, the anchored context-gate strips it; after
-    // promotion the gate opens and the message survives. One deterministic id
-    // per session keeps history replay stable across process restarts.
-    const injectedSessions = new Map()
-    const injectionIsDurable = (session) => {
-      if (session === undefined) return false
-      const known = injectedSessions.get(session.id)
-      if (known !== undefined) return known
-      const events = Array.isArray(session.events) ? session.events : []
-      const found = events.some((event) =>
-        event.type === 'user/message' && event.data?.source?.kind === 'mode-experience-gated',
-      )
-      injectedSessions.set(session.id, found)
-      return found
-    }
-    ctx.on('session/event', (session, event) => {
-      if (event && event.type === 'user/message' && event.data?.source?.kind === 'mode-experience-gated') {
-        injectedSessions.set(session.id, true)
-      }
-    })
-
-    ctx.on('agent/pre-step', async ({ agent }, next) => {
-      const decision = await next()
-      try {
-        if (!agent || promoteGatedModes.size === 0) return decision
-        const presetId = ctx.agentPresets.composedPreset(agent.ctx)
-        if (presetId === undefined || !promoteGatedModes.has(presetId)) return decision
-        const session = agent.session
-        if (session === undefined || injectionIsDurable(session)) return decision
-        if (!isSessionPromoted(session)) return decision
-        const content = [generalContent, files[presetId]].filter(Boolean).join('\n\n')
-        if (content.length === 0) return decision
-        injectedSessions.set(session.id, true)
-        return {
-          ...decision,
-          messages: [...decision.messages, {
-            id: `mode-experience-gated-${session.id}`,
-            role: 'user',
-            content: [{ type: 'text', text: content }],
-            source: { kind: 'mode-experience-gated', form: 'mode-experience' },
-          }],
-        }
-      } catch (error) {
-        // An experience bug must never eat the request: skip the injection.
-        log('PRE-STEP INJECT ERROR: ' + (error && error.message))
-        return decision
-      }
-    }, { prepend: true })
 
     // On-demand index skill: lists every parsed skill grouped by mode.
     const byMode = {}
