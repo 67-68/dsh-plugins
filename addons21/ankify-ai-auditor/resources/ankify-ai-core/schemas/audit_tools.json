@@ -1,0 +1,86 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "modify_note",
+      "description": "修改一条已有 Anki note 的字段内容，使其符合卡片制作 policy。适合“内容不合适但只需要改措辞/缩短/补最小语境”的情况。",
+      "parameters": {
+        "type": "object",
+        "required": ["note_guid", "fields", "reason"],
+        "properties": {
+          "note_guid": {
+            "type": "string",
+            "description": "目标 note 的 guid。"
+          },
+          "fields": {
+            "type": "object",
+            "description": "替换后的字段字典。键必须是该 note type 已有的字段名；未提及的字段保持原值。",
+            "additionalProperties": { "type": "string" }
+          },
+          "reason": {
+            "type": "string",
+            "description": "一句话说明修改理由。"
+          },
+          "type_hint": {
+            "type": "string",
+            "enum": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"],
+            "description": "修正后的卡片类型。"
+          },
+          "reset_scheduling": {
+            "type": "boolean",
+            "default": false,
+            "description": "当 front 的检索键语义发生实质变化时置为 true，将受影响卡片重置为新卡。"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "split_note",
+      "description": "把一条不符合最小信息原则的 note 拆成多条新 note。适合集合/枚举/时间线/层级等非规整结构。",
+      "parameters": {
+        "type": "object",
+        "required": ["note_guid", "new_notes", "reason"],
+        "properties": {
+          "note_guid": {
+            "type": "string",
+            "description": "目标 note 的 guid。"
+          },
+          "new_notes": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": ["fields", "type_hint"],
+              "properties": {
+                "fields": {
+                  "type": "object",
+                  "description": "新 note 的字段字典，字段名沿用原 note type。",
+                  "additionalProperties": { "type": "string" }
+                },
+                "type_hint": {
+                  "type": "string",
+                  "enum": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"]
+                },
+                "tags": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "追加或替换的标签，可为空数组。"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "reason": {
+            "type": "string",
+            "description": "一句话说明拆解理由。"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+]

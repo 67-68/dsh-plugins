@@ -1,0 +1,12 @@
+{
+  "api_endpoint": "https://api.deepseek.com/chat/completions",
+  "api_key": "",
+  "model": "deepseek-chat",
+  "batch_size": 10,
+  "dry_run": false,
+  "two_pass": false,
+  "reset_on_key_change": true,
+  "source_tag": "ankify-ai::split-source",
+  "locked_tag": "ankify-ai::locked",
+  "exclude_decks": []
+}

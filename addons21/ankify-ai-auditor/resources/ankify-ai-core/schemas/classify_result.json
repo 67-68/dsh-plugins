@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ankify-ai.local/schemas/classify_result.json",
+  "title": "ClassifyResult",
+  "type": "object",
+  "required": ["types", "complexity", "pipeline"],
+  "properties": {
+    "types": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"]
+      },
+      "minItems": 1,
+      "description": "文本中出现的卡片类型，可多个。"
+    },
+    "complexity": {
+      "type": "string",
+      "enum": ["atomic", "structural", "mixed"],
+      "description": "atomic=只有规整键值对；structural=含集合/序列/层级等非规整结构；mixed=两者都有。"
+    },
+    "pipeline": {
+      "type": "string",
+      "enum": ["single-pass", "two-pass"],
+      "description": "建议的生成流水线。"
+    },
+    "source_summary": {
+      "type": "string",
+      "description": "一句话说明材料主题。"
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "分类备注或对特定段落的标注。",
+      "default": []
+    }
+  },
+  "additionalProperties": true
+}

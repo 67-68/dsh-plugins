@@ -18,19 +18,22 @@ const DEFAULT_BASH_DENY_LIST = [
   },
 ];
 
+/** Harmless read-only bash built-ins that never need to be declared. */
+const ALWAYS_ALLOWED_BASH_VERBS = new Set(['echo', 'printf', 'pwd', 'cd', 'true', 'false']);
+
 /** Tools that are always allowed regardless of mode / declared target. */
-const ALWAYS_ALLOWED = new Set(['declare_target', 'switch_mode', 'skill_search', 'request_extra']);
+const ALWAYS_ALLOWED = new Set(['declare_target', 'switch_mode', 'skill_search', 'request_extra', 'dev_tool_search']);
 
 /** Tools allowed without a declared target (besides ALWAYS_ALLOWED). */
 const ALLOWED_WITHOUT_TARGET = new Set([
-  'ask_user_question', 'get_goal', 'todo_write', 'skill_search', 'request_extra',
+  'ask_user_question', 'get_goal', 'todo_write', 'skill_search', 'request_extra', 'dev_tool_search',
 ]);
 
 /** Tools considered safe in READ_ONLY (and therefore PLAN_ONLY too). */
 const READ_ONLY_TOOLS = new Set([
   'read', 'grep', 'glob', 'skill', 'skill_search', 'skill_load', 'read_image',
   'web_search', 'list_agents', 'get_goal', 'job_list', 'job_output', 'ask_user_question',
-  'read_url', 'read_url_batch', 'read_url_links', 'read_url_site',
+  'read_url', 'read_url_batch', 'read_url_links', 'read_url_site', 'dev_tool_search',
 ]);
 
 const READ_ONLY_TOOL_GLOBS = ['cordis_inspect_*'];
@@ -74,6 +77,16 @@ const DOWNLOAD_VERBS = new Set(['curl', 'wget']);
 const SHELL_VERBS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 const HARMLESS_WRITE_TARGETS = new Set(['&1', '&2']);
 
+/**
+ * Shell reserved words. `do`/`then`/`else`/`elif` are skipped when they
+ * prefix a body segment (the real command follows them); the other keywords
+ * indicate a compound-command header like `for url in ...` and therefore a
+ * segment with no simple command verb at all.
+ */
+const COMPOUND_HEAD_KEYWORDS = new Set(['for', 'while', 'until', 'if', 'case', 'select', 'coproc', 'function']);
+const BODY_KEYWORDS = new Set(['do', 'then', 'else', 'elif']);
+const SHELL_KEYWORDS = new Set([...COMPOUND_HEAD_KEYWORDS, ...BODY_KEYWORDS, 'done', 'fi', 'esac', 'in']);
+
 function stripOuterQuotes(token) {
   if (token.length >= 2 && ((token[0] === "'" && token[token.length - 1] === "'") || (token[0] === '"' && token[token.length - 1] === '"'))) {
     return token.slice(1, -1);
@@ -81,7 +94,126 @@ function stripOuterQuotes(token) {
   return token;
 }
 
+function findParenEnd(command, openParenIndex) {
+  let depth = 1;
+  let quote = null;
+  let escaped = false;
+  for (let i = openParenIndex + 1; i < command.length; i += 1) {
+    const ch = command[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === '(') { depth += 1; continue; }
+    if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return command.length - 1;
+}
+
+function findBacktickEnd(command, openIndex) {
+  let escaped = false;
+  for (let i = openIndex + 1; i < command.length; i += 1) {
+    const ch = command[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (ch === '`') return i;
+  }
+  return command.length - 1;
+}
+
+/** Locate a `<<`/`<<-` heredoc body. Returns null when no delimiter follows. */
+function readHeredocRange(command, opIndex) {
+  let p = opIndex + 2;
+  if (command[p] === '-') p += 1;
+  while (p < command.length && (command[p] === ' ' || command[p] === '\t')) p += 1;
+  const tokenStart = p;
+  while (p < command.length && !/[\s;|&<>]/.test(command[p])) p += 1;
+  if (p === tokenStart) return null;
+  const delimiter = stripOuterQuotes(command.slice(tokenStart, p));
+  if (!delimiter) return null;
+
+  const newline = command.indexOf('\n', opIndex);
+  if (newline === -1) {
+    return { bodyStart: command.length, bodyEnd: command.length - 1, scanResume: command.length };
+  }
+
+  const bodyStart = newline + 1;
+  let lineStart = bodyStart;
+  for (let pos = bodyStart; pos <= command.length; pos += 1) {
+    if (pos === command.length || command[pos] === '\n') {
+      let line = command.slice(lineStart, pos);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      if (line.replace(/^\t+/, '') === delimiter) {
+        return { bodyStart, bodyEnd: lineStart - 1, scanResume: pos };
+      }
+      if (pos === command.length) break;
+      lineStart = pos + 1;
+    }
+  }
+  return { bodyStart, bodyEnd: command.length - 1, scanResume: command.length };
+}
+
+/** Mask heredoc bodies so their content is never parsed as shell segments. */
+function maskHeredocs(command) {
+  const chars = command.split('');
+  let quote = null;
+  let escaped = false;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === '$' && command[i + 1] === '(') {
+      i = findParenEnd(command, i + 1);
+      continue;
+    }
+    if (ch === '`') {
+      i = findBacktickEnd(command, i);
+      continue;
+    }
+    if (ch === '<' && command[i + 1] === '<') {
+      const range = readHeredocRange(command, i);
+      if (range !== null) {
+        for (let j = range.bodyStart; j <= range.bodyEnd; j += 1) {
+          if (chars[j] !== '\n') chars[j] = ' ';
+        }
+        i = range.scanResume;
+      }
+    }
+  }
+  return chars.join('');
+}
+
+/** Return the inner text of every `$(...)` / backtick substitution in a word. */
+function commandSubstitutions(word) {
+  const substitutions = [];
+  for (let i = 0; i < word.length; i += 1) {
+    if (word[i] === '$' && word[i + 1] === '(') {
+      const end = findParenEnd(word, i + 1);
+      if (end > i + 2) substitutions.push(word.slice(i + 2, end));
+      i = end;
+    } else if (word[i] === '`') {
+      const end = findBacktickEnd(word, i);
+      if (end > i + 1) substitutions.push(word.slice(i + 1, end));
+      i = end;
+    }
+  }
+  return substitutions;
+}
+
+
 function splitShellSegments(command) {
+  const masked = maskHeredocs(String(command || ''));
   const segments = [];
   let current = '';
   let quote = null;
@@ -91,8 +223,8 @@ function splitShellSegments(command) {
     if (seg.length > 0) segments.push(seg);
     current = '';
   };
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i];
+  for (let i = 0; i < masked.length; i += 1) {
+    const ch = masked[i];
     if (escaped) { current += ch; escaped = false; continue; }
     if (ch === '\\') { current += ch; escaped = true; continue; }
     if (quote !== null) {
@@ -101,8 +233,21 @@ function splitShellSegments(command) {
       continue;
     }
     if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    if (ch === '$' && masked[i + 1] === '(') {
+      const end = findParenEnd(masked, i + 1);
+      current += masked.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === '`') {
+      const end = findBacktickEnd(masked, i);
+      current += masked.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === '|' && masked[i + 1] === '|') { flush(); i += 1; continue; }
+    if (ch === '&' && masked[i + 1] === '&') { flush(); i += 1; continue; }
     if (ch === '|') { flush(); continue; }
-    if (ch === '&' && command[i + 1] === '&') { flush(); i += 1; continue; }
     if (ch === ';') { flush(); continue; }
     current += ch;
   }
@@ -129,6 +274,18 @@ function tokenizeSimpleCommand(segment) {
       continue;
     }
     if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    if (ch === '$' && segment[i + 1] === '(') {
+      const end = findParenEnd(segment, i + 1);
+      current += segment.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === '`') {
+      const end = findBacktickEnd(segment, i);
+      current += segment.slice(i, end + 1);
+      i = end;
+      continue;
+    }
     if (ch === ' ' || ch === '\t') { flush(); continue; }
     current += ch;
   }
@@ -146,10 +303,45 @@ function isHarmlessWriteTarget(target) {
   return HARMLESS_WRITE_TARGETS.has(t) || t.startsWith('/dev/');
 }
 
+/** First simple command word in a tokenized segment, ignoring shell syntax. */
+function firstCommandWord(tokens) {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    const op = redirectOpOf(token);
+    if (op !== null) {
+      if (tokens[i + 1] !== void 0) i += 1;
+      continue;
+    }
+    if (token.includes('=')) continue;
+    const base = token.split('/').pop();
+    if (base === 'time') continue;
+    if (COMPOUND_HEAD_KEYWORDS.has(base)) return null;
+    if (BODY_KEYWORDS.has(base)) continue;
+    if (SHELL_KEYWORDS.has(base)) return null;
+    return base;
+  }
+  return null;
+}
+
+/** Worst safety classification among all command substitutions in `tokens`. */
+function worstSubstitutionKind(tokens) {
+  let worst = 'read-only';
+  for (const token of tokens) {
+    for (const inner of commandSubstitutions(token)) {
+      const kind = classifyCommand(inner);
+      if (kind === 'dangerous') return 'dangerous';
+      if (kind === 'mutating') worst = 'mutating';
+    }
+  }
+  return worst;
+}
+
 function analyzeSimpleCommand(tokens) {
   let commandWord = null;
+  let commandWordIndex = -1;
   const commandTokens = [];
   let mutatingRedirect = false;
+  let suppressCommandWord = false;
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -174,40 +366,46 @@ function analyzeSimpleCommand(tokens) {
       continue;
     }
 
-    if (commandWord === null && !token.includes('=')) {
-      commandWord = token;
-    }
     commandTokens.push(token);
+
+    if (commandWord === null && !suppressCommandWord) {
+      if (token.includes('=')) continue;
+      const base = token.split('/').pop();
+      if (base === 'time') continue;
+      if (COMPOUND_HEAD_KEYWORDS.has(base)) { suppressCommandWord = true; continue; }
+      if (BODY_KEYWORDS.has(base)) continue;
+      if (SHELL_KEYWORDS.has(base)) { suppressCommandWord = true; continue; }
+      commandWord = token;
+      commandWordIndex = commandTokens.length - 1;
+    }
   }
 
-  if (commandWord === null) return { kind: 'read-only' };
+  const subKind = worstSubstitutionKind(commandTokens);
+
+  if (commandWord === null) return { kind: subKind };
 
   const base = commandWord.split('/').pop();
 
   if (DANGEROUS_VERBS.has(base)) return { kind: 'dangerous' };
   if (base === 'chmod' && commandTokens.includes('-R') && commandTokens.includes('777')) return { kind: 'dangerous' };
   if (base === 'rm' && commandTokens.includes('-rf') && commandTokens.includes('/')) return { kind: 'dangerous' };
-  if (MUTATING_VERBS.has(base)) return { kind: 'mutating' };
+  if (MUTATING_VERBS.has(base)) return { kind: subKind === 'dangerous' ? 'dangerous' : 'mutating' };
 
   if (base === 'git') {
-    const sub = commandTokens[1];
+    const sub = commandTokens[commandWordIndex + 1];
     if (DANGEROUS_GIT_SUBCOMMANDS.has(sub)) return { kind: 'dangerous' };
     if (MUTATING_GIT_SUBCOMMANDS.has(sub)) return { kind: 'mutating' };
   }
 
-  if (mutatingRedirect) return { kind: 'mutating' };
-  return { kind: 'read-only' };
+  if (mutatingRedirect) return { kind: subKind === 'dangerous' ? 'dangerous' : 'mutating' };
+  return { kind: subKind };
 }
 
 function classifyCommand(command) {
   const cmd = String(command || '');
   const segments = splitShellSegments(cmd);
 
-  const pipeline = segments.map((segment) => {
-    const tokens = tokenizeSimpleCommand(segment);
-    const first = tokens.find((token) => redirectOpOf(token) === null && !token.includes('='));
-    return first === void 0 ? '' : first.split('/').pop();
-  }).filter(Boolean).join('|');
+  const pipeline = segments.map((segment) => firstCommandWord(tokenizeSimpleCommand(segment))).filter(Boolean).join('|');
 
   const pipelineCommands = pipeline.split('|');
   if (pipelineCommands.length > 1 && DOWNLOAD_VERBS.has(pipelineCommands[0]) && SHELL_VERBS.has(pipelineCommands[pipelineCommands.length - 1])) {
@@ -223,16 +421,21 @@ function classifyCommand(command) {
   return 'read-only';
 }
 
-/** Return the command verb (basename of first command word) for each top-level shell segment. */
+/** Return the command verb for each top-level shell segment, including verbs inside `$(...)`. */
 function extractCommandVerbs(command) {
   const segments = splitShellSegments(String(command || ''));
   const verbs = [];
   for (const segment of segments) {
     const tokens = tokenizeSimpleCommand(segment);
-    const first = tokens.find((token) => redirectOpOf(token) === null && !token.includes('='));
-    if (first !== void 0) verbs.push(first.split('/').pop());
+    const outer = firstCommandWord(tokens);
+    if (outer !== null) verbs.push(outer);
+    for (const token of tokens) {
+      for (const inner of commandSubstitutions(token)) {
+        for (const verb of extractCommandVerbs(inner)) verbs.push(verb);
+      }
+    }
   }
-  return verbs;
+  return [...new Set(verbs)];
 }
 
 /** Normalize a bash deny-list payload. `undefined` means "use the built-in default". */
@@ -282,9 +485,9 @@ function matchBashDeny(command, denyList) {
   return null;
 }
 
-function isBashDeclared(command, declaredBash) {
+function undeclaredBashVerbs(command, declaredBash) {
   const set = new Set(declaredBash);
-  return extractCommandVerbs(command).every((verb) => set.has(verb));
+  return extractCommandVerbs(command).filter((verb) => !set.has(verb) && !ALWAYS_ALLOWED_BASH_VERBS.has(verb));
 }
 
 /**
@@ -362,8 +565,12 @@ function bashDisposition(command, mode, declaredBash, denyList) {
     return { kind: 'deny', reason: deny.reason || `命令 ${deny.commands.join('/')} 已被禁止。` };
   }
 
-  if (!isBashDeclared(command, declaredBash)) {
-    return { kind: 'deny', reason: `当前 bash 命令未声明：${command}。请调用 request_extra 申请额外 bash 命令。` };
+  const missing = undeclaredBashVerbs(command, declaredBash);
+  if (missing.length) {
+    return {
+      kind: 'deny',
+      reason: `当前 bash 命令使用了未声明的命令动词：${missing.join(', ')}。完整命令：${command}。请调用 dev_tool_search（或 request_extra）申请额外 bash 命令，或在 declare_target 中补充声明。`,
+    };
   }
 
   const kind = classifyCommand(command);
@@ -383,8 +590,8 @@ function formatCapabilities(state) {
     `当前 Target：${state.target ? state.target.target : '未声明'}`,
     `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
     `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
-    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换模式）、request_extra（申请额外 skill/bash）。',
-    '要申请额外 skill 或 bash：request_extra({ skills: [...], bash: [...] })，会作为问题向用户申报。',
+    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换模式）、dev_tool_search / request_extra（申请额外 skill/bash）。',
+    '要申请额外 skill 或 bash：dev_tool_search({ skills: [...], bash: [...] })（或 request_extra 同参），会作为问题向用户申报。',
   ].join('\n');
 }
 
@@ -466,8 +673,8 @@ export default {
           '规则：',
           '- 每次行动前必须先调用 declare_target 声明 Target，并同时声明本次需要的 skills 和 bash 命令。',
           MODE_RULES[state.mode] || MODE_RULES[DEFAULT_MODE],
-          '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 request_extra 申请，会作为问题向用户申报。不要花太多算力预判申请清单。',
-          '- 始终可用：skill_search（查看所有 skill）、switch_mode（请求切换模式）、request_extra（申请额外 skill/bash）。',
+          '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请，会作为问题向用户申报。不要花太多算力预判申请清单。',
+          '- 始终可用：skill_search（查看所有 skill）、switch_mode（请求切换模式）、dev_tool_search / request_extra（申请额外 skill/bash）。',
           '当前禁止的 bash 命令：',
           denyLines,
         ].join('\n');
@@ -509,7 +716,9 @@ export default {
         const skills = stringArray(args.skills);
         const bash = stringArray(args.bash);
         const target = { target: args.target, mode: args.mode };
-        writeState(agent, { target, skills, bash });
+        const patch = { target, skills, bash };
+        if (MODES.includes(args.mode)) patch.mode = args.mode;
+        writeState(agent, patch);
         return [
           `已声明 Target：${args.target}${args.mode ? `，关联模式：${args.mode}` : ''}`,
           `已声明 skills：${skills.length ? skills.join(', ') : '（无）'}`,
@@ -634,7 +843,7 @@ export default {
         if (requested && !state.skills.includes(requested)) {
           return Promise.resolve({
             kind: 'deny',
-            reason: `skill "${requested}" 未声明。请先用 skill_search 查看，再用 request_extra 申请额外 skill。`,
+            reason: `skill "${requested}" 未声明。请先用 skill_search 查看，再用 dev_tool_search（或 request_extra）申请额外 skill。`,
           });
         }
         const decision = toolDisposition(name, state.mode);

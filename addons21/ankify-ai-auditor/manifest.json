@@ -1,0 +1,11 @@
+{
+  "name": "Ankify AI Auditor",
+  "package": "ankify-ai-auditor",
+  "version": "0.1.0",
+  "minAnkiVersion": "2.1.60",
+  "maxAnkiVersion": "2.4.0",
+  "conflicts": [],
+  "addon": {
+    "permissions": ["read", "write"]
+  }
+}

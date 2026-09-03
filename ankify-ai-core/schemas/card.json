@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ankify-ai.local/schemas/card.json",
+  "title": "Card",
+  "type": "object",
+  "required": ["front", "back", "type"],
+  "properties": {
+    "front": {
+      "type": "string",
+      "minLength": 1,
+      "description": "正面：最小检索键，一行以内，问句或填空。"
+    },
+    "back": {
+      "type": "string",
+      "minLength": 1,
+      "description": "背面：最短答案，一个词/数字/短句。"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"]
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "extra": {
+      "type": "string",
+      "description": "背景、助记、来源等，不作考点，放在答案后括号里。"
+    }
+  },
+  "additionalProperties": true
+}

@@ -13,11 +13,16 @@
 ## DSH mode-gate 使用契约
 - 新 session 默认 `READ_ONLY`；除白名单工具外，必须先 `declare_target` 才能行动
 - `declare_target` 时同时声明本次需要的 `skills` 和 `bash` 命令；未声明的 `skill_load` / bash 命令会被拦截
-- 不要花太多算力预判申请清单：需要额外 skill 或 bash 时直接调用 `request_extra` 申请，它会作为问题向用户申报
+- 不要花太多算力预判申请清单：需要额外 skill 或 bash 时直接调用 `dev_tool_search`（或 `request_extra`）申请，它会作为问题向用户申报
 - 网页阅读禁止 `curl` / `wget`，统一用 `read_url` 系列工具
-- 始终可用：`skill_search`（查看所有 skill）、`switch_mode`（请求切换模式）、`request_extra`（申请额外访问）
-- 切换模式用 `switch_mode`，需要人工批准
+- 始终可用：`skill_search`（查看所有 skill）、`switch_mode`（请求切换模式）、`dev_tool_search` / `request_extra`（申请额外访问）
+- 显式切换模式用 `switch_mode`，需要人工批准；`declare_target` 携带 `mode` 时同步切换当前模式
 - 插件代码在 `packages/dsh-mode-gate`；修改后运行 `install.sh` 同步
+
+## 阶段性发言契约
+- 干活时不要连续只调用工具；每完成一个阶段或关键结果，用 1-2 句话向用户说明「已完成什么 + 下一步做什么」
+- 阶段可以按：信息收集 → 方案确认 → 逐文件修改 → 测试验证 → 文档更新 来切分
+- 被 mode-gate 拦截时，把被拦截的 skill/bash 动词在回复里说清楚，然后调用 `request_extra` 申请
 
 ## 模式经验系统
 
