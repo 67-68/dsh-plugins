@@ -54,6 +54,14 @@
       name: 'dsh-mermaid'
       config: {}
 
+    # Session icon marker (dual-face package `dsh-icon-marker`): the node half
+    # registers the `dsh-icon-marker` settings namespace; the browser half
+    # renders per-session unicode icons in the sidebar, FSM state mapping,
+    # output regex auto rules, and the hide-native-status-dot setting.
+    - id: icon-marker
+      name: 'dsh-icon-marker'
+      config: {}
+
 # dsh-plugin-manager:managed:start
 - insert:
     - id: dsh-read-url
