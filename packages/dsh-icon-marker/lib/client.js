@@ -219,6 +219,7 @@ window.__ModuleLoader__.load({
       var value = settingsValue() || {};
       if (value.sessions && value.sessions[sessionId]) return; // manual wins
       var map = Object.assign({}, value.autoSessions || {});
+      if (map[sessionId] === key) return; // avoid self-triggering loops
       map[sessionId] = key;
       writeObjectField('autoSessions', map);
     }
@@ -339,15 +340,26 @@ window.__ModuleLoader__.load({
     }
 
     // ── row rendering ───────────────────────────────────────────────────────
+    function findOwnMarker(row, sid) {
+      var children = row.children;
+      for (var i = 0; i < children.length; i++) {
+        var child = children[i];
+        if (child && child.getAttribute && child.getAttribute('data-owner') === 'dsh-icon-marker-row' && child.getAttribute('data-session-id') === sid) {
+          return child;
+        }
+      }
+      return null;
+    }
+
     function renderRows() {
       if (!scopeRef.scope) return;
-      removeOwnRows();
       var snap = scopeRef.scope.getSnapshot();
       if (!snap || snap.status !== 'ready' || !snap.value) return;
       var list = sessionsRef.list ? sessionsRef.list.getSnapshot() : null;
       if (!list || list.phase !== 'ready') return;
       var value = snap.value;
       var byTitle = buildTitleMap(list);
+      var liveMarkers = [];
       var rows = document.querySelectorAll('[role="treeitem"][aria-selected]');
       for (var r = 0; r < rows.length; r++) {
         (function (row) {
@@ -368,38 +380,56 @@ window.__ModuleLoader__.load({
           if (!summary) return;
 
           var pick = resolveIconFor(sid, summary, value);
-          var marker = document.createElement('button');
-          marker.type = 'button';
-          marker.setAttribute('data-owner', 'dsh-icon-marker-row');
-          marker.setAttribute('data-session-id', sid);
-          marker.textContent = pick ? pick.symbol.char : '+';
-          marker.title = pick ? pick.symbol.label : t('placeholderTitle');
-          marker.style.cssText = [
-            'display:inline-flex', 'align-items:center', 'justify-content:center',
-            'flex:none', 'width:16px', 'height:20px', 'margin:0 2px',
-            'padding:0', 'border:none', 'background:transparent', 'cursor:pointer',
-            'color:var(--dsw-alias-label-secondary,#9ca3af)',
-            'font-size:12px', 'line-height:20px', 'border-radius:4px',
-          ].join(';');
-          marker.addEventListener('click', function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            openSymbolPicker(marker, {
-              allowClear: true,
-              selectedKey: pick ? pick.symbol.key : null,
-              onPick: function (key) {
-                writeManual(sid, key);
-                renderAll();
-              },
+          var char = pick ? pick.symbol.char : '+';
+          var label = pick ? pick.symbol.label : t('placeholderTitle');
+          var symbolKey = pick ? pick.symbol.key : '';
+          var marker = findOwnMarker(row, sid);
+          if (!marker) {
+            marker = document.createElement('button');
+            marker.type = 'button';
+            marker.setAttribute('data-owner', 'dsh-icon-marker-row');
+            marker.setAttribute('data-session-id', sid);
+            marker.style.cssText = [
+              'display:inline-flex', 'align-items:center', 'justify-content:center',
+              'flex:none', 'width:16px', 'height:20px', 'margin:0 2px',
+              'padding:0', 'border:none', 'background:transparent', 'cursor:pointer',
+              'color:var(--dsw-alias-label-secondary,#9ca3af)',
+              'font-size:12px', 'line-height:20px', 'border-radius:4px',
+            ].join(';');
+            marker.addEventListener('click', function (event) {
+              event.preventDefault();
+              event.stopPropagation();
+              openSymbolPicker(marker, {
+                allowClear: true,
+                selectedKey: marker.getAttribute('data-symbol-key') || null,
+                onPick: function (key) {
+                  writeManual(sid, key);
+                  renderAll();
+                },
+              });
             });
-          });
+          }
+          if (marker.textContent !== char) marker.textContent = char;
+          if (marker.title !== label) marker.title = label;
+          if (marker.getAttribute('data-symbol-key') !== symbolKey) {
+            marker.setAttribute('data-symbol-key', symbolKey);
+          }
 
           if (titleEl && titleEl.parentNode === row) {
-            row.insertBefore(marker, titleEl);
-          } else {
+            if (marker.nextSibling !== titleEl) row.insertBefore(marker, titleEl);
+          } else if (marker.parentNode !== row) {
             row.insertBefore(marker, row.firstChild);
           }
+          liveMarkers.push(marker);
         })(rows[r]);
+      }
+
+      var allMarkers = document.querySelectorAll(ownRowSelector());
+      for (var m = 0; m < allMarkers.length; m++) {
+        var stale = allMarkers[m];
+        if (liveMarkers.indexOf(stale) === -1) {
+          if (stale.parentNode) stale.parentNode.removeChild(stale);
+        }
       }
     }
 
@@ -509,7 +539,9 @@ window.__ModuleLoader__.load({
         if (!rule || typeof rule.pattern !== 'string' || rule.pattern === '') continue;
         var matched = false;
         try {
-          matched = new RegExp(rule.pattern, rule.flags || '').test(haystack);
+          // Always case-insensitive. `flags` is not surfaced in the UI anymore;
+          // it stays in the schema only for older data compatibility.
+          matched = new RegExp(rule.pattern, 'i').test(haystack);
         } catch (_err) {
           matched = false;
         }
@@ -538,6 +570,20 @@ window.__ModuleLoader__.load({
       var session = binding && binding.session;
       if (!session) return;
       autoHook.dispose = session.subscribe(function () { autoScan(session); });
+      autoScan(session);
+    }
+
+    function rescanCurrentSession() {
+      var service = sessionsRef.service;
+      var list = sessionsRef.list ? sessionsRef.list.getSnapshot() : null;
+      if (!service || !list || list.phase !== 'ready') return;
+      var current = list.current;
+      if (typeof current !== 'string' || current === '') return;
+      var binding = null;
+      try { binding = service.binding(current); } catch (_err) { binding = null; }
+      var session = binding && binding.session;
+      if (!session) return;
+      autoHook.lastSeenSeq = 0;
       autoScan(session);
     }
 
@@ -783,12 +829,6 @@ window.__ModuleLoader__.load({
           placeholder: t('patternPlaceholder'),
           onChange: function (event) { props.onChange(rule.id, 'pattern', event.target.value); },
         }),
-        el('input', {
-          style: styles.flagsInput,
-          value: rule.flags || '',
-          placeholder: t('flagsPlaceholder'),
-          onChange: function (event) { props.onChange(rule.id, 'flags', event.target.value); },
-        }),
         el('button', {
           type: 'button',
           style: styles.symbolBtn,
@@ -943,7 +983,10 @@ window.__ModuleLoader__.load({
       sessionsRef.service = ctx.sessions;
 
       var disposers = [];
-      disposers.push(scope.subscribe(renderAll));
+      disposers.push(scope.subscribe(function () {
+        renderAll();
+        rescanCurrentSession();
+      }));
       disposers.push(ctx.sessions.list.subscribe(function () {
         renderAll();
         syncAutoHook();
