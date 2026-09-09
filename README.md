@@ -42,6 +42,7 @@ dsh-plugins/
 ├── presets/                  # 自建 agent preset（每 preset 一个目录）
 │   ├── architect/
 │   └── g-chat/
+├── preset-actions/           # mode-gate preset actions（每 action 一个目录，内含 SKILL.md）
 ├── profile/
 │   └── cordis.patch.yml      # web profile 的 user patch 层，引用 ../plugins/*.mjs
 ├── document/                 # 经验文档（GENERAL.md 全模式 + {mode}.md 按模式）

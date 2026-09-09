@@ -58,6 +58,19 @@ for dir in "$HERE"/presets/*/; do
   echo "    preset   $name (copied)"
 done
 
+# 3c) Preset actions (one dir each, each containing SKILL.md) into
+#     $DSH_HOME/preset-actions. Real directories for the same reason as presets:
+#     mode-gate discovers them with readdir(..., { withFileTypes: true }).
+PRESET_ACTIONS_DIR="$DSH_HOME/preset-actions"
+mkdir -p "$PRESET_ACTIONS_DIR"
+for dir in "$HERE"/preset-actions/*/; do
+  [ -d "$dir" ] || continue
+  name="$(basename "$dir")"
+  rm -rf "$PRESET_ACTIONS_DIR/$name"
+  cp -R "$dir" "$PRESET_ACTIONS_DIR/$name"
+  echo "    action   $name (copied)"
+done
+
 # 4) Docs (*.md, recursive) into DSH_HOME/DOCUMENT, preserving subdirs
 #    (e.g. feature_intent/ module docs).
 while IFS= read -r src; do

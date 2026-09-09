@@ -1043,9 +1043,9 @@ export default {
         const bash = stringArray(args.bash);
         const target = { target: args.target, mode: args.mode };
         const patch = { target, skills, bash };
-        if (PHASES.includes(args.mode)) patch.phase = args.mode;
-        writeState(agent, patch);
         const isFresh = !before.target && !before.goal;
+        if (isFresh) patch.phase = DEFAULT_PHASE;
+        writeState(agent, patch);
         if (isFresh) {
           await activateGoal(agent, 'preset-action-match');
         }
@@ -1169,10 +1169,13 @@ export default {
         if (!result.ok) throw new Error(result.reason);
         const transition = result.transition;
         await applyTransition(agent, transition);
+        const selectedModel = transition.statePatch && transition.statePatch.selectedModel;
+        if (selectedModel) await saveDefaultModelSelection(selectedModel);
         const saved = readState(agent, defaultPhase);
         return JSON.stringify({
           ok: true,
           phase: saved.phase,
+          ...(selectedModel ? { selected_model: selectedModel } : {}),
           ...(transition.prompt ? { prompt: transition.prompt } : {}),
         }, null, 2);
       },
@@ -1272,6 +1275,7 @@ export default {
         },
         model_override: {
           type: 'object',
+          additionalProperties: true,
           description: '可选。覆盖 task_mode 默认模型：{ provider, model, reasoning_effort }。',
         },
         feature_intent_file: {
@@ -1388,6 +1392,25 @@ export default {
         });
       }
 
+      if (name === 'update_feature_intent' && state.phase !== 'REQUIREMENT_RECOGNITION') {
+        return Promise.resolve({
+          kind: 'deny',
+          reason: `update_feature_intent 只在 REQUIREMENT_RECOGNITION 阶段可用，当前阶段为 ${state.phase}。`,
+        });
+      }
+      if ((name === 'list_preset_actions' || name === 'submit_preset_action') && state.phase !== 'PRESET_ACTION') {
+        return Promise.resolve({
+          kind: 'deny',
+          reason: `${name} 只在 PRESET_ACTION 阶段可用，当前阶段为 ${state.phase}。`,
+        });
+      }
+      if (name === 'submit_requirement_protocol' && state.phase !== 'REQUIREMENT_RECOGNITION') {
+        return Promise.resolve({
+          kind: 'deny',
+          reason: `submit_requirement_protocol 只在 REQUIREMENT_RECOGNITION 阶段可用，当前阶段为 ${state.phase}。`,
+        });
+      }
+
       if (state.goal && state.goal.status === 'active') {
         const def = goalEngine.defFor(state);
         if (def) {
@@ -1411,11 +1434,14 @@ export default {
             }
           }
 
-          if (name !== 'bash' && name !== 'pwsh' && !allowedTools.has(name)) {
-            return Promise.resolve({
-              kind: 'deny',
-              reason: `当前目标「${def.id}」未完成，只允许工具：${[...allowedTools].join(', ')}。你尝试调用 ${name}。`,
-            });
+          if (name !== 'bash' && name !== 'pwsh') {
+            if (!allowedTools.has(name)) {
+              return Promise.resolve({
+                kind: 'deny',
+                reason: `当前目标「${def.id}」未完成，只允许工具：${[...allowedTools].join(', ')}。你尝试调用 ${name}。`,
+              });
+            }
+            return next();
           }
         }
       }

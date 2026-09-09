@@ -14,13 +14,17 @@
         docDir: '~/.dsh/DOCUMENT'
         promoteGatedModes: ['anchored-architect']
 
-    # Mode gate: host half declares `declare_target` / `switch_mode` tools and
-    # enforces READ_ONLY / PLAN_ONLY / WRITE_ENABLED on `tools/pre-execute`;
-    # the browser half renders the mode-permission settings tab.
+    # Mode gate: protocol-driven requirement loop. Phases:
+    # PRESET_ACTION -> REQUIREMENT_RECOGNITION -> IMPLEMENT.
+    # The host half registers the phase/feature-intent/protocol tools and the
+    # goal engine; the browser half renders the settings tab (phases, model
+    # catalog, task-mode defaults, bash deny-list).
     - id: mode-gate
       name: 'dsh-mode-gate'
       config:
-        defaultMode: READ_ONLY
+        defaultPhase: PRESET_ACTION
+        featureIntentDir: '/Users/a67_68/projects/documentation/feature_intents'
+        presetActionDir: '~/.dsh/preset-actions'
 
     # Per-mode plugin inventory (dual-face package `dsh-permode-inventory`).
     # The node half (lib/index.js) reads each whitelisted preset's
