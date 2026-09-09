@@ -14,7 +14,7 @@ export function createBuiltinGoals() {
   return [
     {
       id: 'preset-action-match',
-      phase: 'preset-action',
+      phase: 'PRESET_ACTION',
       prompt: [
         '[目标] 探测 preset action',
         '先调用 list_preset_actions 查看可用 preset actions 的 id、说明和匹配条件。',
@@ -44,7 +44,7 @@ export function createBuiltinGoals() {
       async onSubmit(parsed, env) {
         if (parsed.kind === 'no-match') {
           return {
-            nextPhase: 'requirement-recognition',
+            nextPhase: 'REQUIREMENT_RECOGNITION',
             nextGoal: 'feature-intent-read',
             prompt: '未命中 preset action，进入普通需求分解阶段。',
             statePatch: { chosenPresetAction: null },
@@ -57,7 +57,7 @@ export function createBuiltinGoals() {
           ...(skill.reasoningEffort ? { reasoningEffort: skill.reasoningEffort } : {}),
         };
         return {
-          nextPhase: 'implement',
+          nextPhase: 'IMPLEMENT',
           nextGoal: null,
           prompt: [
             `已命中 preset action "${skill.id}"，跳过需求分解阶段，进入实现阶段。`,
@@ -77,7 +77,7 @@ export function createBuiltinGoals() {
 
     {
       id: 'feature-intent-read',
-      phase: 'requirement-recognition',
+      phase: 'REQUIREMENT_RECOGNITION',
       prompt: [
         '[目标] 至少阅读一个 feature intent',
         '当前阶段只解锁 feature intent 阅读工具。系统会尝试自动读取一个 feature intent 作为起点；',
@@ -121,7 +121,7 @@ export function createBuiltinGoals() {
       async onComplete(env, state) {
         const file = state.featureIntentFile || (state.goal && state.goal.featureIntentFile) || '';
         return {
-          nextPhase: 'requirement-recognition',
+          nextPhase: 'REQUIREMENT_RECOGNITION',
           nextGoal: 'feature-intent-update',
           prompt: `已阅读 feature intent${file ? ` "${file}"` : ''}。现在进入本阶段第二步：追加 feature intent 记录并提交需求识别协议。`,
           statePatch: { featureIntentFile: file || null },
@@ -131,7 +131,7 @@ export function createBuiltinGoals() {
 
     {
       id: 'feature-intent-update',
-      phase: 'requirement-recognition',
+      phase: 'REQUIREMENT_RECOGNITION',
       prompt: (env) => buildFeatureIntentUpdatePrompt(env.modelCatalog, env.taskModes),
       allowedTools: [
         'list_feature_intents',
@@ -155,7 +155,7 @@ export function createBuiltinGoals() {
       },
       async onSubmit(parsed, env) {
         return {
-          nextPhase: 'implement',
+          nextPhase: 'IMPLEMENT',
           nextGoal: null,
           prompt: [
             '需求识别协议已通过，进入实现阶段。',

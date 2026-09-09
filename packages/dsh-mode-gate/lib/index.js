@@ -621,8 +621,9 @@ function saveStateStore(store) {
 }
 
 function normalizePhase(value) {
-  if (PHASES.includes(value)) return value;
-  if (LEGACY_MODE_TO_PHASE[value]) return LEGACY_MODE_TO_PHASE[value];
+  const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  if (PHASES.includes(normalized)) return normalized;
+  if (LEGACY_MODE_TO_PHASE[normalized]) return LEGACY_MODE_TO_PHASE[normalized];
   return DEFAULT_PHASE;
 }
 
@@ -926,7 +927,7 @@ export default {
       if (!def) return { prompt: '', messages: [], statePatch: {} };
       const result = await goalEngine.activate(goalId, envFor(agent));
       const patch = { ...(result.statePatch || {}) };
-      if (def.phase) patch.phase = def.phase;
+      if (def.phase) patch.phase = normalizePhase(def.phase);
       writeState(agent, patch);
       return result;
     }
@@ -934,7 +935,7 @@ export default {
     async function applyTransition(agent, transition) {
       if (!transition) return null;
       const patch = { ...(transition.statePatch || {}) };
-      if (transition.nextPhase) patch.phase = transition.nextPhase;
+      if (transition.nextPhase) patch.phase = normalizePhase(transition.nextPhase);
       if (transition.nextGoal) {
         writeState(agent, patch);
         return activateGoal(agent, transition.nextGoal);
