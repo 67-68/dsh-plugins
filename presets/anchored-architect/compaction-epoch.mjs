@@ -40,7 +40,7 @@ export function createEpochPromotion(promoteEvents, options = {}) {
     let promoted = false
     let turns = 0
     let firstPromotedTurn = null
-    for (const event of session.events) {
+    for (const event of session.snapshotEvents()) {
       const seq = event.seq ?? 0 // events without a seq are treated as post-boundary
       if (event.type === 'compaction/end') {
         boundary = seq
