@@ -10,9 +10,12 @@ dsh-chat-manager@1.2.2
 # 能力库：Skills & MCP 可视化管理，mcp_load 在当前会话热重载 MCP 工具列表。
 dsh-skill-mcp-manager@1.1.1
 # @ 文件下拉选择（Codex 风格 @ 引用）：输入 @ 搜工作区文件/目录并引用路径。
-# 用 GitHub tarball（v0.6.0）：npm 的 @freespace8/dsh-at-file 停在 0.2.3（发送时内联内容、有大小限制）；
-# 0.6.0 起只插 <workspace-reference> 路径标记、agent 自己 read，版本锁死在 URL tag 上（不适用 source@version）。
-https://github.com/omdsh-dev/dsh-at-file/archive/refs/tags/v0.6.0.tar.gz
+# 用 GitHub tarball（v0.7.0）：npm 的 @freespace8/dsh-at-file 停在 0.2.3（发送时内联内容、有大小限制）；
+# 0.6.0 起只插 <workspace-reference> 路径标记、agent 自己 read；v0.7.0 适配 DSH 升级：
+# @deepseek-ai/dsh-settings@0.1.2-rc.1 移除了 settingsNamespace 具名导出，
+# v0.6.0 的 bundle 仍 import 它导致 "does not provide an export named 'settingsNamespace'" 启动崩溃。
+# 版本锁死在 URL tag 上（不适用 source@version）。
+https://github.com/omdsh-dev/dsh-at-file/archive/refs/tags/v0.7.0.tar.gz
 # dsh-read-url 改为本地 fork（packages/dsh-read-url）：上游 npm/GitHub 包带未声明的
 # 可选动态 import，过不了 DSH 插件管理器质量门；本地包由 install.sh 拷贝并由
 # profile/cordis.patch.yml 挂载，因此不列在外部插件清单里。

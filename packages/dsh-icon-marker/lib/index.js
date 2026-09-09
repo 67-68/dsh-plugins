@@ -1,4 +1,3 @@
-import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import z from '@deepseek-ai/schemastery';
 
 /**
@@ -35,5 +34,8 @@ export const MARKER_SCHEMA = z.object({
 });
 
 export function apply(ctx) {
-  ctx.settings.register(settingsNamespace('dsh-icon-marker'), MARKER_SCHEMA);
+  // DSH 升级后 @deepseek-ai/dsh-settings@0.1.2-rc.1 移除了 settingsNamespace
+  // 具名导出：register(ns, schema) 现在直接接收 namespace 字符串，
+  // 格式校验（/^[a-z][a-z0-9-]*$/）已内建在 SettingsProvider.register 中。
+  ctx.settings.register('dsh-icon-marker', MARKER_SCHEMA);
 }

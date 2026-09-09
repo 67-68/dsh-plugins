@@ -63,7 +63,8 @@ Schema 由宿主侧用 `@deepseek-ai/dsh-settings` + `@deepseek-ai/schemastery` 
 
 2. **宿主侧 `lib/index.js`**：
    - `inject: ['settings']`。
-   - 用 `settingsNamespace('dsh-icon-marker')` + `schemastery` 注册 schema：`symbols` / `sessions` / `stateSymbols` / `autoRules` / `autoSessions` / `hideStatus`。
+   - 用 `ctx.settings.register('dsh-icon-marker', MARKER_SCHEMA)` + `schemastery` 注册 schema：`symbols` / `sessions` / `stateSymbols` / `autoRules` / `autoSessions` / `hideStatus`。
+   - 注意：DSH 升级后 `@deepseek-ai/dsh-settings@0.1.2-rc.1` 移除了 `settingsNamespace` 具名导出，`register()` 直接接收 namespace 字符串。
    - 不写业务逻辑。
 
 3. **浏览器侧基础框架 `lib/client.js`**：
