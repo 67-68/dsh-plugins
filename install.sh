@@ -34,6 +34,16 @@ if [ -f "$HERE/profile/cordis.patch.yml" ]; then
   echo "    patch    cordis.patch.yml"
 fi
 
+# 3b) Deploy ankifyd + ankify-ai-core into a user-level app share, so Anki and
+#     Raycast share one daemon and one core copy (no per-plugin vendoring).
+ANKIFY_AI_HOME="${ANKIFY_AI_HOME:-$HOME/.local/share/ankify-ai}"
+mkdir -p "$ANKIFY_AI_HOME/logs"
+cp "$HERE/ankifyd/ankifyd.py" "$ANKIFY_AI_HOME/ankifyd.py"
+rm -rf "$ANKIFY_AI_HOME/core"
+cp -R "$HERE/ankify-ai-core" "$ANKIFY_AI_HOME/core"
+echo "    ankifyd  $ANKIFY_AI_HOME/ankifyd.py (copied)"
+
+
 # 3) Agent presets (one dir each) into .agent-presets.
 # Presets must be REAL directories, not symlinks: agent-presets discovery does
 # readdir(..., { withFileTypes: true }) and skips any child where

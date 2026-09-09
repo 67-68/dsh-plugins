@@ -1,0 +1,10 @@
+{
+  "package": "ankify_ai_auditor",
+  "name": "Ankify AI Auditor",
+  "mod": 0,
+  "conflicts": [],
+  "min_point_version": 60,
+  "max_point_version": 0,
+  "human_version": "0.1.0",
+  "homepage": ""
+}

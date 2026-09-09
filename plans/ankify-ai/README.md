@@ -1,41 +1,41 @@
 # Ankify AI 共享后端：可行性结论与总体架构
 
+> 2025-09 更新：架构已从“两端各自 vendor core”演进为 **ankifyd 本地服务**。当前实现以服务版为准，详见 `ankifyd-plan.md`。
+
 ## 1. 结论：可行
 
-Raycast 插件（TypeScript）与 Anki 插件（Python）**可以共享同一套后端**，但共享的形态必须是：
+Raycast 插件（TypeScript）与 Anki 插件（Python）**可以共享同一套后端**。最终选型：
 
-> **共享“数据资产”（policy + prompts + JSON Schema + examples），而不是共享运行时代码。**
+> **共享 `ankifyd` 本地服务**：服务统一持有 core（policy + prompts + JSON Schema + examples）和 AI 配置，两端只做薄壳调用。
 
 理由：
 
-1. 两端都调用 OpenAI 兼容的 `chat/completions`，不需要自建服务器。
-2. 提示词、分类法、卡片标准、输出 Schema 都是纯文本/JSON，TypeScript 和 Python 都能零成本读取。
-3. 两端业务差异只在：输入源不同（图片/文本 vs Anki note）、输出落点不同（Markdown vs Anki collection）、调用封装不同（TS fetch vs Python HTTP）。这些属于薄适配层，不属于“后端”。
-4. 卡片对象模型（front/back/type/tags/extra）在两个场景中是同一概念，可以共用 Schema 和示例。
+1. 两端都调用 OpenAI 兼容的 `chat/completions`，把调用收进本地服务后，配置与提示词只有一份。
+2. 两端业务差异只在：输入源不同（图片/文本 vs Anki note）、输出落点不同（Markdown vs Anki collection）、调用封装不同（TS fetch vs Python HTTP）。这些属于薄适配层，不属于“后端”。
+3. 卡片对象模型（front/back/type/tags/extra）在两个场景中是同一概念，可以共用 Schema 和示例。
+4. 本地服务方式比各自 vendor core 更容易热更新提示词、统一限流与排查问题。
 
 ## 2. 核心边界：共享什么 / 不共享什么
 
-| 共享（放在 core 里） | 不共享（各自实现） |
+| 共享（ankifyd 服务拥有） | 不共享（各自实现） |
 |---|---|
-| 卡片分类法 A1-B8 | 图片 OCR/多模态读取（Raycast） |
-| 卡片制作 criteria（最小信息原则、五性质、措辞规则等） | Anki note 抽取与写回（Anki 插件） |
-| 分类输出 Schema | Markdown 渲染（Raycast） |
-| 卡片对象 Schema | Anki 批量预览 UI（Anki 插件） |
-| 审计工具定义（modify/split/keep） | API key 存储与配置界面 |
-| 系统提示词核心段落 | 重试/限流策略（可各自实现，core 给建议值） |
-| 1848 时间线等 few-shot 示例 | |
+| core：卡片分类法 A1-B8、制作 criteria、few-shot 示例 | 图片 OCR/多模态读取（Raycast） |
+| classify / ankify / audit 的 prompt 组装与模型调用 | Anki note 抽取与写回（Anki 插件） |
+| JSON Schema 校验与 tool-call 解析 | Markdown 渲染（Raycast） |
+| OpenAI 兼容 API 配置（endpoint / api_key / models） | Anki 批量预览 UI（Anki 插件） |
+| 重试/超时策略 | 各自的文件选择、剪贴板读取等 UI 逻辑 |
 
 ## 3. 总体架构
 
 ```mermaid
 flowchart LR
-  CORE[shared-core: policy.md + prompts/ + schemas/ + examples/] --> R[Raycast 插件]
-  CORE --> A[Anki 插件]
-  R --> AI1[OpenAI 兼容 API]
-  A --> AI2[OpenAI 兼容 API]
+  R[Raycast 插件] --> D[ankifyd 本地服务]
+  A[Anki 插件] --> D
+  D --> C[core: policy.md + prompts/ + schemas/ + examples/]
+  D --> CFG[~/.config/ankify-ai/config.json]
+  D --> AI[OpenAI 兼容 API]
   R --> MD[Obsidian Markdown 输出]
   A --> ANKI[Anki notes 写回]
-  R -.-> ANKI[经 Obsidian-to-Anki 导入]
 ```
 
 ## 4. 共享核心目录（建议）
@@ -99,5 +99,6 @@ ankify-ai-core/
 
 ## 7. 文档索引
 
+- ankifyd 本地服务计划与协议：`ankifyd-plan.md`
 - 完整 Anki 插件计划：`anki-plugin-plan.md`
 - 给 Raycast 插件团队的对接说明：`raycast-shared-backend-report.md`
