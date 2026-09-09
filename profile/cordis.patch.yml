@@ -62,6 +62,20 @@
       name: 'dsh-icon-marker'
       config: {}
 
+# DeepSeek official catalog: keep the shipped defaults and add the V4.1 Flash
+# limited-beta route (API model id expires 2026-09-10). The settings layer
+# (`llm-deepseek:` in $DSH_HOME/settings.yaml) can still override this list.
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  config:
+    models:
+      - id: deepseek-v4-flash
+        name: DeepSeek-V4-Flash
+      - id: deepseek-v4-pro
+        name: DeepSeek-V4-Pro
+      - id: deepseek-v4.1-flash-expires-on-0910
+        name: "DeepSeek-V4.1-Flash 试用版（9/10 到期）"
+
 # dsh-plugin-manager:managed:start
 - insert:
     - id: dsh-read-url
