@@ -3,7 +3,13 @@ dsh-web-plugin-manager@0.3.10
 # `#` 开头为注释；空行会被 install.sh 跳过。
 # 升级 = 手动改版本号 + 重跑 ./install.sh（pnpm 对已装版本是 no-op，幂等）。
 dsh-music-alert@0.1.0
-dsh-message-edit@0.2.1
+# 临时禁用 dsh-message-edit（2026-09-09）：
+# 其 client bundle 以 externals 形式 require("@deepseek-ai/dsh-client-runtime/client")，
+# 而 DSH 升级后已删除 dsh-client-runtime 这个 platform seed word（连 0.2.3 最新版也未适配），
+# 导致启动时 "client-modules: require(...) missed the module table" 崩溃。
+# 上游仓库：https://github.com/Moeblack/dsh-message-edit
+# 待上游修复后取消注释并恢复此插件。
+# dsh-message-edit@0.2.1
 
 # 归档会话管理器（UI）：侧边栏归档入口，浏览/搜索/恢复/安全删除归档会话。
 dsh-chat-manager@1.2.2
