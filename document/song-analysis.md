@@ -7,7 +7,7 @@
 核心目录：
 
 ```text
-dsh-plugins/musicfree-dev/
+musicfree-dev/
 ├── music_install.sh              # 安装分析侧环境 + Vamp 插件
 └── analysis/
     ├── bin/song-analyze          # CLI 入口（bash 包装）
@@ -23,7 +23,7 @@ dsh-plugins/musicfree-dev/
 安装 / 重装：
 
 ```bash
-cd dsh-plugins/musicfree-dev
+cd musicfree-dev
 ./music_install.sh
 ```
 

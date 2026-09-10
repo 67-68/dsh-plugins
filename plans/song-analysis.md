@@ -46,7 +46,7 @@ flowchart LR
 ## 3. 目录结构
 
 ```text
-dsh-plugins/musicfree-dev/
+musicfree-dev/
 ├── analysis/
 │   ├── bin/song-analyze          # CLI 入口
 │   ├── pipeline/                 # 各步骤 Python 模块
