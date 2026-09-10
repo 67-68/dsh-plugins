@@ -1,0 +1,371 @@
+#!/usr/bin/env node
+/**
+ * clean-v0-sessions.mjs — 清洗 DSH 升级后无法迁移的 v0 历史 session 日志。
+ *
+ * 背景（DSH 升级引入的 v0→v1 强制迁移拒绝两类历史脏数据）：
+ *   1. `permission/preset` 事件 data 带旧版写入的 `origin` 字段，新版冻结 v0
+ *      清单只认 `preset`，迁移抛 "unexpected member"。
+ *   2. 旧版 dsh-mode-gate / dsh-message-edit 写入的自定义事件
+ *      (`modeGate/mode`、`modeGate/target`、`message-edit/version`) 不在冻结
+ *      v0 清单里，迁移抛 "unknown historical event type ... even when
+ *      ignorable"（补 `ignorable` 无效，必须物理删除）。
+ *
+ * 清洗算法（已用真实数据 + 官方 sessionFormatCatalog 迁移器验证）：
+ *   - 删除上述未知类型事件（普通事件）；
+ *   - 删除 `permission/preset` data 的 `origin` 字段（保留事件本体）；
+ *   - 删除事件后 seq 断裂，需重排：普通事件重排 `seq`，packed run
+ *     (reasoning-chunks / text-chunks / tool-call-chunks) 重排 `seq0`；
+ *   - 引用重映射：`sourceEventSeqs` 与 `surfaceOp.start/end` 中指向已删
+ *     事件的引用直接删除（悬空），其余引用减去「前面被删掉的事件数」偏移；
+ *   - 清洗后用官方 sessionFormatCatalog 迁移器做完整校验，失败则不写盘。
+ *
+ * 用法：
+ *   node clean-v0-sessions.mjs [--apply] [--sessions <dir>] [--backup <dir>] [--skip id1,id2]
+ *
+ *   默认 dry-run：只报告会改哪些文件、每个文件的清洗结果，不写任何文件。
+ *   --apply：先全量备份，再逐文件清洗 + 校验 + 重新 zstd 压缩。
+ *   --sessions：session 根目录（默认 $HOME/.dsh/sessions）。
+ *   --backup：备份目录（默认 $HOME/.dsh/session-clean-backups-<时间戳>）。
+ *   --skip：额外跳过的 session id（逗号分隔），叠加在内置默认跳过名单上。
+ *
+ * 要求：本机需有 `zstd` 可执行文件（macOS 默认在 /opt/homebrew/bin/zstd）。
+ */
+
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const DSH_GLOBAL_ROOT = "/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules";
+const sessionFormatCatalog = require(
+  join(DSH_GLOBAL_ROOT, "@deepseek-ai", "dsh-session-format-catalog", "lib", "index.js"),
+).sessionFormatCatalog;
+
+// ── 配置 ────────────────────────────────────────────────────────────────────
+
+const UNKNOWN_EVENT_TYPES = new Set([
+  "modeGate/mode",
+  "modeGate/target",
+  "message-edit/version",
+]);
+
+/** 历史注入事件：旧版 mode-experience 写入的「通用经验」提示，v2→v3 迁移器
+ *  不认其 source.kind="mode-experience-gated"，且它是自动注入文本（非用户
+ *  真实输入），删除不影响会话语义。通过删除集合一并物理删除。 */
+const INJECTED_SOURCE_KINDS = new Set(["mode-experience-gated"]);
+
+/** source.kind 归一化：旧版 dsh-at-file 写入的 @ 引用消息 source 带
+ *  kind="at-file-mention" + relative 字段，v0→v1 迁移器不认该 kind 也不认
+ *  relative 成员。该消息本质是用户输入（内容为 <workspace-reference> 标记），
+ *  归一化为 kind:"user"（删 relative）。 */
+const SOURCE_KIND_NORMALIZE = {
+  "at-file-mention": "user",
+};
+const PACKED_TYPES = new Set([
+  "reasoning-chunks",
+  "text-chunks",
+  "tool-call-chunks",
+]);
+const ORIGIN_STRIP_TYPES = new Set(["permission/preset"]);
+
+function findZstd() {
+  const candidates = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "zstd"];
+  for (const c of candidates) {
+    try {
+      execFileSync(c, ["--version"], { stdio: "ignore" });
+      return c;
+    } catch {
+      /* try next */
+    }
+  }
+  throw new Error("zstd not found on PATH (expected /opt/homebrew/bin/zstd)");
+}
+
+const ZSTD = findZstd();
+
+// ── 命令行参数 ──────────────────────────────────────────────────────────────
+
+const args = process.argv.slice(2);
+const hasFlag = (name) => args.includes(name);
+const flagValue = (name, fallback) => {
+  const i = args.indexOf(name);
+  return i !== -1 && args[i + 1] !== undefined ? args[i + 1] : fallback;
+};
+
+const APPLY = hasFlag("--apply");
+const SESSIONS_DIR = resolve(flagValue("--sessions", join(homedir(), ".dsh", "sessions")));
+const BACKUP_DIR = resolve(
+  flagValue("--backup", join(homedir(), ".dsh", `session-clean-backups-${Date.now()}`)),
+);
+
+// 显式跳过的 session id 名单（不清洗，保持原样）。逗号分隔。
+// session-bbdc7466-f84e-47b2-9513-064e48abe80e：旧版 fork 会话，header
+// seedLength=111 与物理文件不匹配（旧版记录 bug），删事件后
+// inheritedEventCount 超界，无法清洗。保持原样（它本来就打不开）。
+const SKIP_SESSION_IDS = new Set(
+  (flagValue("--skip", "") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+);
+const DEFAULT_SKIP = [
+  "session-bbdc7466-f84e-47b2-9513-064e48abe80e",
+];
+for (const id of DEFAULT_SKIP) SKIP_SESSION_IDS.add(id);
+
+// ── 工具函数 ────────────────────────────────────────────────────────────────
+
+function decompress(file) {
+  return execFileSync(ZSTD, ["-dc", file], { encoding: "utf8", maxBuffer: 1 << 30 });
+}
+
+function compress(text) {
+  return execFileSync(ZSTD, ["-c", "-q"], { input: text, maxBuffer: 1 << 30 });
+}
+
+function listSessionFiles(dir) {
+  const out = [];
+  function walk(d) {
+    if (!existsSync(d)) return;
+    for (const name of readdirSync(d)) {
+      const p = join(d, name);
+      const st = statSync(p);
+      if (st.isDirectory()) walk(p);
+      else if (name === "session.jsonl.zstd") out.push(p);
+    }
+  }
+  walk(dir);
+  return out;
+}
+
+/** 解析 JSONL 为行对象数组；返回 { header, rows }。 */
+function parseJsonl(text) {
+  const lines = text.split("\n").filter((l) => l.trim() !== "");
+  const parsed = lines.map((l) => JSON.parse(l));
+  return { header: parsed[0], rows: parsed.slice(1) };
+}
+
+/** 清洗单文件内容，返回 { header, rows }。失败抛错。 */
+function cleanSession(parsed) {
+  const { header, rows } = parsed;
+
+  // 判断一个事件是否为「注入事件」：source.kind 在 INJECTED_SOURCE_KINDS 里。
+  const isInjected = (row) => {
+    const src = row && row.data && typeof row.data === "object" ? row.data.source : undefined;
+    return typeof src === "object" && src !== null && INJECTED_SOURCE_KINDS.has(src.kind);
+  };
+
+  // 收集要删除的普通事件 seq
+  const deletedSeqs = new Set();
+  for (const row of rows) {
+    if (UNKNOWN_EVENT_TYPES.has(row.type) || isInjected(row)) deletedSeqs.add(row.seq);
+  }
+  const deletedSorted = [...deletedSeqs].sort((a, b) => a - b);
+
+  // 某 seq 之前的删除累计偏移
+  function offsetBefore(seq) {
+    let c = 0;
+    for (const d of deletedSorted) if (d < seq) c += 1;
+    return c;
+  }
+  function isDeleted(seq) {
+    return deletedSeqs.has(seq);
+  }
+
+  const cleaned = [];
+  for (const row of rows) {
+    if (UNKNOWN_EVENT_TYPES.has(row.type) || isInjected(row)) continue; // 物理删除
+
+    const out = { ...row };
+
+    if (PACKED_TYPES.has(row.type)) {
+      // packed run：重排 seq0
+      out.seq0 = row.seq0 - offsetBefore(row.seq0);
+    } else {
+      out.seq = row.seq - offsetBefore(row.seq);
+
+      // 删除 permission/preset 的 origin 字段
+      if (ORIGIN_STRIP_TYPES.has(row.type) && row.data && typeof row.data === "object" && "origin" in row.data) {
+        const { origin: _origin, ...rest } = row.data;
+        out.data = rest;
+      }
+
+      // source.kind 归一化：at-file-mention -> user（删 relative）
+      if (out.data && typeof out.data === "object" && out.data.source && typeof out.data.source === "object") {
+        const src = out.data.source;
+        if (SOURCE_KIND_NORMALIZE[src.kind] !== undefined) {
+          const { relative: _relative, ...rest } = src;
+          out.data = { ...out.data, source: { ...rest, kind: SOURCE_KIND_NORMALIZE[src.kind] } };
+        }
+      }
+
+      // 通用 seq 引用 remap：单值悬空删除，否则减偏移；数组成员悬空删除。
+      const remapSeqRef = (x) => {
+        if (Array.isArray(x)) return x.map(remapSeqRef).filter((v) => v !== null);
+        if (typeof x === "number") {
+          if (isDeleted(x)) return null;
+          return x - offsetBefore(x);
+        }
+        return x;
+      };
+
+      // 重映射 sourceEventSeqs
+      if (row.sourceEventSeqs !== undefined) {
+        out.sourceEventSeqs = remapSeqRef(row.sourceEventSeqs);
+      }
+
+      // 重映射 surfaceOp start/end
+      if (row.surfaceOp && typeof row.surfaceOp === "object") {
+        const sop = { ...row.surfaceOp };
+        for (const k of ["start", "end"]) {
+          if (typeof sop[k] === "number") {
+            if (isDeleted(sop[k])) sop[k] = null;
+            else sop[k] = sop[k] - offsetBefore(sop[k]);
+          }
+        }
+        out.surfaceOp = sop;
+      }
+
+      // 重映射 data 内的 seq 引用字段（session/title 的 messageSeqs、
+      // session/title-llm-request 的 messageSeqs、command/done 的 sourceEventSeq）。
+      // 这些字段引用必须保留（不能悬空删除），只做减偏移。
+      // 注意：基于 out.data（已删 origin 的），而不是 row.data，否则 origin 会被带回来。
+      if (out.data && typeof out.data === "object") {
+        const data = { ...out.data };
+        if (Array.isArray(data.messageSeqs)) {
+          data.messageSeqs = data.messageSeqs.map((s) =>
+            typeof s === "number" ? s - offsetBefore(s) : s,
+          );
+        }
+        if (typeof data.sourceEventSeq === "number") {
+          data.sourceEventSeq = data.sourceEventSeq - offsetBefore(data.sourceEventSeq);
+        }
+        if (typeof data.throughSeq === "number") {
+          data.throughSeq = data.throughSeq - offsetBefore(data.throughSeq);
+        }
+        out.data = data;
+      }
+    }
+
+    cleaned.push(out);
+  }
+
+  return { header, rows: cleaned };
+}
+
+/** 用官方迁移器完整校验清洗结果；通过返回 true，否则抛出携带原因的错误。 */
+function validateCleaned(parsed) {
+  const { header, rows } = parsed;
+  const restore = sessionFormatCatalog.createRestore(header, {
+    recovery: "strict",
+    validation: "transformed",
+  });
+  for (const row of rows) restore.decodeRow(row);
+  restore.finish();
+  return true;
+}
+
+// ── 主流程 ───────────────────────────────────────────────────────────────────
+
+const files = listSessionFiles(SESSIONS_DIR);
+if (files.length === 0) {
+  console.log(`no session.jsonl.zstd files found under ${SESSIONS_DIR}`);
+  process.exit(0);
+}
+
+console.log(`mode: ${APPLY ? "APPLY (write + backup)" : "DRY-RUN (no writes)"}`);
+console.log(`sessions dir: ${SESSIONS_DIR}`);
+console.log(`files found:  ${files.length}\n`);
+
+let cleanCount = 0;
+let cleanPassCount = 0;
+let cleanFailCount = 0;
+let skipCount = 0;
+const failures = [];
+
+for (const file of files) {
+  // 跳过名单（按 session id 匹配文件名）
+  const fileSessionId = file.match(/session-[0-9a-f-]{36}/)?.[0];
+  if (fileSessionId && SKIP_SESSION_IDS.has(fileSessionId)) {
+    console.log(`[skip]    ${file.replace(SESSIONS_DIR + "/", "")} (in skip list, untouched)`);
+    skipCount += 1;
+    continue;
+  }
+
+  let text;
+  try {
+    text = decompress(file);
+  } catch (e) {
+    failures.push([file, `decompress failed: ${e.message}`]);
+    continue;
+  }
+
+  let parsed;
+  try {
+    parsed = parseJsonl(text);
+  } catch (e) {
+    failures.push([file, `parse failed: ${e.message}`]);
+    continue;
+  }
+
+  // 判断是否需要清洗
+  const needsClean = parsed.rows.some((r) => {
+    const src = r && r.data && typeof r.data === "object" ? r.data.source : undefined;
+    const injected = typeof src === "object" && src !== null && INJECTED_SOURCE_KINDS.has(src.kind);
+    const normalizeKind =
+      typeof src === "object" && src !== null && SOURCE_KIND_NORMALIZE[src.kind] !== undefined;
+    return (
+      UNKNOWN_EVENT_TYPES.has(r.type) ||
+      injected ||
+      normalizeKind ||
+      (ORIGIN_STRIP_TYPES.has(r.type) && r.data && typeof r.data === "object" && "origin" in r.data)
+    );
+  });
+  if (!needsClean) {
+    skipCount += 1;
+    continue;
+  }
+
+  cleanCount += 1;
+  let cleaned;
+  try {
+    cleaned = cleanSession(parsed);
+    validateCleaned(cleaned);
+  } catch (e) {
+    cleanFailCount += 1;
+    failures.push([file, `clean/validate failed: ${e.message}`]);
+    continue;
+  }
+
+  cleanPassCount += 1;
+  const rel = file.replace(SESSIONS_DIR + "/", "");
+
+  if (APPLY) {
+    const backupPath = join(BACKUP_DIR, rel);
+    mkdirSync(dirname(backupPath), { recursive: true });
+    writeFileSync(backupPath, readFileSync(file)); // 原文件字节级备份
+
+    const outText = [JSON.stringify(cleaned.header), ...cleaned.rows.map((r) => JSON.stringify(r))].join("\n") + "\n";
+    writeFileSync(file, compress(outText));
+    console.log(`CLEANED  ${rel}  (rows ${parsed.rows.length} -> ${cleaned.rows.length})`);
+  } else {
+    const changed = parsed.rows.length - cleaned.rows.length;
+    const originStripped = parsed.rows.length - cleaned.rows.length > 0 ? "" : "";
+    console.log(`[dry-run] ${rel}  (deleted ${changed} unknown events${originStripped})`);
+  }
+}
+
+console.log(`\nsummary: clean=${cleanCount} passed=${cleanPassCount} failed=${cleanFailCount} skipped=${skipCount} total=${files.length}`);
+if (failures.length > 0) {
+  console.log("\nfailures:");
+  for (const [f, msg] of failures) console.log(`  ${f}: ${msg}`);
+  process.exit(1);
+}
+
+if (APPLY) {
+  console.log(`\nbackups written to: ${BACKUP_DIR}`);
+} else {
+  console.log("\ndry-run only — no files were modified. Re-run with --apply to commit.");
+}
