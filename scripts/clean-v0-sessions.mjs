@@ -32,9 +32,18 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -95,6 +104,9 @@ const flagValue = (name, fallback) => {
 };
 
 const APPLY = hasFlag("--apply");
+// --reframe：只把单 frame 的 .jsonl.zstd 重新编码为 DSH 要求的多 frame
+// （第一帧=header 行），不改内容。用于修复早期 compress() 单 frame 的产物。
+const REFRAME = hasFlag("--reframe");
 const SESSIONS_DIR = resolve(flagValue("--sessions", join(homedir(), ".dsh", "sessions")));
 const BACKUP_DIR = resolve(
   flagValue("--backup", join(homedir(), ".dsh", `session-clean-backups-${Date.now()}`)),
@@ -121,8 +133,27 @@ function decompress(file) {
   return execFileSync(ZSTD, ["-dc", file], { encoding: "utf8", maxBuffer: 1 << 30 });
 }
 
-function compress(text) {
+function compressFrame(text) {
   return execFileSync(ZSTD, ["-c", "-q"], { input: text, maxBuffer: 1 << 30 });
+}
+
+/**
+ * 把 JSONL 文本编码为 DSH 要求的「多 frame」zstd：
+ * 第一个 frame 必须恰好是 header 一行（含换行），其余内容进第二个 frame。
+ * DSH 的 readFirstZstdLine 会独立解码第一个 frame 并断言它就是 header 行
+ * （assertZstdHeaderFrame），单 frame 压缩会启动失败。
+ */
+function compress(text) {
+  const newlineIdx = text.indexOf("\n");
+  if (newlineIdx === -1) {
+    // 没有换行（不应发生）：退化为单 frame。
+    return compressFrame(text);
+  }
+  const headerLine = text.slice(0, newlineIdx + 1); // 含换行
+  const body = text.slice(newlineIdx + 1);
+  const frames = [compressFrame(headerLine)];
+  if (body.length > 0) frames.push(compressFrame(body));
+  return Buffer.concat(frames);
 }
 
 function listSessionFiles(dir) {
@@ -275,9 +306,147 @@ if (files.length === 0) {
   process.exit(0);
 }
 
-console.log(`mode: ${APPLY ? "APPLY (write + backup)" : "DRY-RUN (no writes)"}`);
+console.log(`mode: ${REFRAME ? "REFRAME (re-encode zstd frames)" : APPLY ? "APPLY (write + backup)" : "DRY-RUN (no writes)"}`);
 console.log(`sessions dir: ${SESSIONS_DIR}`);
 console.log(`files found:  ${files.length}\n`);
+
+// ── 诊断工具 ────────────────────────────────────────────────────────────────
+
+/** 统计 zstd frame magic (0x28B52FFD) 出现次数。 */
+function countZstdFrames(buf) {
+  let n = 0;
+  for (let i = 0; i + 3 < buf.length; i++) {
+    if (buf[i] === 0x28 && buf[i + 1] === 0xb5 && buf[i + 2] === 0x2f && buf[i + 3] === 0xfd) n += 1;
+  }
+  return n;
+}
+
+/** 对 JSONL 文本做统计诊断（返回一行摘要）。 */
+function jsonStats(text) {
+  const lines = text.split("\n").filter((l) => l.trim() !== "");
+  const types = Object.create(null);
+  let headerOk = false;
+  let parseErrors = 0;
+  for (let i = 0; i < lines.length; i++) {
+    let obj;
+    try {
+      obj = JSON.parse(lines[i]);
+    } catch {
+      parseErrors += 1;
+      continue;
+    }
+    const t = typeof obj.type === "string" ? obj.type : "(no-type)";
+    types[t] = (types[t] || 0) + 1;
+    if (i === 0 && t === "session") headerOk = true;
+  }
+  const top = Object.entries(types)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(" ");
+  return { lines: lines.length, headerOk, parseErrors, top };
+}
+
+const T0 = Date.now();
+const elapsed = () => `${((Date.now() - T0) / 1000).toFixed(1)}s`;
+
+/**
+ * 用「临时文件 + shell 流式」把单 frame 文件重压为多 frame（首帧=header 行）。
+ * 关键：大文件绝不能经 Node 的 input/output buffer（execFileSync 大 input 会
+ * 管道死锁）；全程用 shell 重定向，只在最后读一次产物。
+ * 返回 { framesBefore, framesAfter, bytesBefore, bytesAfter }。
+ */
+function reframeFileOnDisk(file) {
+  const bufBefore = readFileSync(file);
+  const framesBefore = countZstdFrames(bufBefore);
+  const tmp = mkdtempSync(join(tmpdir(), "dsh-reframe-"));
+  try {
+    const all = join(tmp, "all.jsonl");
+    const hdr = join(tmp, "hdr.jsonl");
+    const body = join(tmp, "body.jsonl");
+    const f1 = join(tmp, "f1.zst");
+    const f2 = join(tmp, "f2.zst");
+    const out = join(tmp, "out.zst");
+    const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    // 解压原文件到临时明文
+    execFileSync("/bin/sh", ["-c", `${shq(ZSTD)} -dc ${shq(file)} > ${shq(all)}`], { maxBuffer: 1 << 20 });
+    // 首行 = header；其余 = body
+    execFileSync("/bin/sh", ["-c", `head -n 1 ${shq(all)} > ${shq(hdr)}`], { maxBuffer: 1 << 20 });
+    execFileSync("/bin/sh", ["-c", `tail -n +2 ${shq(all)} > ${shq(body)}`], { maxBuffer: 1 << 20 });
+    // 分别压缩（文件→文件）
+    execFileSync("/bin/sh", ["-c", `${shq(ZSTD)} -q -f -o ${shq(f1)} ${shq(hdr)}`], { maxBuffer: 1 << 20 });
+    execFileSync("/bin/sh", ["-c", `${shq(ZSTD)} -q -f -o ${shq(f2)} ${shq(body)}`], { maxBuffer: 1 << 20 });
+    // 拼接两帧
+    execFileSync("/bin/sh", ["-c", `cat ${shq(f1)} ${shq(f2)} > ${shq(out)}`], { maxBuffer: 1 << 20 });
+    const bufAfter = readFileSync(out);
+    const framesAfter = countZstdFrames(bufAfter);
+    // 写回
+    writeFileSync(file, bufAfter);
+    return { framesBefore, framesAfter, bytesBefore: bufBefore.length, bytesAfter: bufAfter.length };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── reframe 分支：只重压 frame 结构 ─────────────────────────────────────────
+if (REFRAME) {
+  let reframed = 0;
+  let skipped = 0;
+  const reframeFailures = [];
+  for (const file of files) {
+    const rel = file.replace(SESSIONS_DIR + "/", "");
+    let raw;
+    try {
+      raw = readFileSync(file);
+    } catch (e) {
+      reframeFailures.push([rel, `read failed: ${e.message}`]);
+      console.log(`[reframe][${elapsed()}] FAIL   ${rel} :: read failed: ${e.message}`);
+      continue;
+    }
+    const framesBefore = countZstdFrames(raw);
+    // 诊断：JSON 统计（解压后）
+    let stats = null;
+    if (process.env.DSH_CLEAN_VERBOSE === "1") {
+      try {
+        stats = jsonStats(decompress(file));
+      } catch (e) {
+        stats = { error: e.message };
+      }
+    }
+    if (framesBefore >= 2) {
+      skipped += 1;
+      console.log(
+        `[reframe][${elapsed()}] skip   ${rel} :: frames=${framesBefore} bytes=${raw.length}` +
+          (stats ? ` lines=${stats.lines} headerOk=${stats.headerOk} top=${stats.top}` : ""),
+      );
+      continue;
+    }
+    // 单帧：需要重压。先备份原文件，再就地重压。
+    try {
+      const backupPath = join(BACKUP_DIR, rel);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      writeFileSync(backupPath, raw); // 备份单帧原文（可回滚）
+      const r = reframeFileOnDisk(file);
+      reframed += 1;
+      console.log(
+        `[reframe][${elapsed()}] OK     ${rel} :: frames ${r.framesBefore}->${r.framesAfter} bytes ${r.bytesBefore}->${r.bytesAfter}` +
+          (stats ? ` lines=${stats.lines} headerOk=${stats.headerOk} top=${stats.top}` : ""),
+      );
+    } catch (e) {
+      reframeFailures.push([rel, `reframe failed: ${e.message}`]);
+      console.log(`[reframe][${elapsed()}] FAIL   ${rel} :: ${e.message}`);
+    }
+  }
+  console.log(
+    `\nreframe summary @${elapsed()}: reframed=${reframed} already-ok=${skipped} failed=${reframeFailures.length} total=${files.length}`,
+  );
+  if (reframeFailures.length > 0) {
+    for (const [f, msg] of reframeFailures) console.log(`  ${f}: ${msg}`);
+    process.exit(1);
+  }
+  console.log(`\n(注：reframe 直接就地写回；原文件备份见下方建议)`);
+  process.exit(0);
+}
 
 let cleanCount = 0;
 let cleanPassCount = 0;
