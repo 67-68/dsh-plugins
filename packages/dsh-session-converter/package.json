@@ -1,0 +1,15 @@
+{
+  "name": "dsh-session-converter",
+  "version": "0.1.0",
+  "description": "Local DSH plugin: list old DeepSeek Harness sessions and import their user/agent dialogue (final replies only, no reasoning or tool calls) as background text into the current model context.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -11,7 +11,7 @@
     - id: mode-experience
       name: './mode-experience.mjs'
       config:
-        docDir: '~/.dsh/DOCUMENT'
+        docDir: '/Users/a67_68/projects/dsh-plugins/document'
         promoteGatedModes: ['anchored-architect']
 
     # Mode gate: protocol-driven requirement loop. Phases:
@@ -65,6 +65,17 @@
     - id: icon-marker
       name: 'dsh-icon-marker'
       config: {}
+
+    # Old-session importer (host plugin `dsh-session-converter`): scans
+    # ~/.dsh/sessions for v0/v3 session logs, registers the model-visible
+    # `import_session` tool (user/agent final replies as background text) and
+    # the user-facing `/import` command (lists importable sessions).
+    - id: session-converter
+      name: 'dsh-session-converter'
+      config:
+        sessionsDir: '~/.dsh/sessions'
+        maxChars: 200000
+        includeReasoning: false
 
 # DeepSeek official catalog: keep the shipped defaults and add the V4.1 Flash
 # limited-beta route (API model id expires 2026-09-10). The settings layer
