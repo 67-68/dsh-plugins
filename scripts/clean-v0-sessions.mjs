@@ -104,6 +104,9 @@ const flagValue = (name, fallback) => {
 };
 
 const APPLY = hasFlag("--apply");
+// --restore=<backupDir>：把备份目录里的原始 session 文件恢复到 sessions 根目录
+// （用于把被污染的文件回滚到清洗前的完好原文），之后可重跑 --apply 清洗。
+const RESTORE = flagValue("--restore", "");
 // --reframe：只把单 frame 的 .jsonl.zstd 重新编码为 DSH 要求的多 frame
 // （第一帧=header 行），不改内容。用于修复早期 compress() 单 frame 的产物。
 const REFRAME = hasFlag("--reframe");
@@ -133,27 +136,39 @@ function decompress(file) {
   return execFileSync(ZSTD, ["-dc", file], { encoding: "utf8", maxBuffer: 1 << 30 });
 }
 
-function compressFrame(text) {
-  return execFileSync(ZSTD, ["-c", "-q"], { input: text, maxBuffer: 1 << 30 });
-}
+const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 /**
- * 把 JSONL 文本编码为 DSH 要求的「多 frame」zstd：
- * 第一个 frame 必须恰好是 header 一行（含换行），其余内容进第二个 frame。
- * DSH 的 readFirstZstdLine 会独立解码第一个 frame 并断言它就是 header 行
- * （assertZstdHeaderFrame），单 frame 压缩会启动失败。
+ * 原子写入 DSH 会话文件：全程「临时文件 + shell 流式」，最后 rename 原子替换。
+ *
+ * 为什么不用 execFileSync 的 input（大 buffer）：4.8MB 级内容走 Node 的
+ * stdin 管道会死锁（实测两次被 SIGKILL），且中途写入会产生半截文件，被 DSH
+ * 读出后叠加损坏。
+ *
+ * DSH 要求「多 frame」zstd：第一个 frame 必须恰好是 header 一行（含换行），
+ * 其余内容进第二个 frame（assertZstdHeaderFrame / readFirstZstdLine 契约）。
  */
-function compress(text) {
-  const newlineIdx = text.indexOf("\n");
-  if (newlineIdx === -1) {
-    // 没有换行（不应发生）：退化为单 frame。
-    return compressFrame(text);
+function atomicWriteSession(file, headerLine, rowsText) {
+  const tmp = mkdtempSync(join(tmpdir(), "dsh-write-"));
+  try {
+    const hdr = join(tmp, "hdr.jsonl");
+    const body = join(tmp, "body.jsonl");
+    const f1 = join(tmp, "f1.zst");
+    const f2 = join(tmp, "f2.zst");
+    const out = join(tmp, "out.zst");
+    // header 行（含换行）；rows 为空时 body 给空文件
+    writeFileSync(hdr, headerLine, "utf8");
+    writeFileSync(body, rowsText ?? "", "utf8");
+    // 分别压缩
+    execFileSync("/bin/sh", ["-c", `${shellQuote(ZSTD)} -q -f -o ${shellQuote(f1)} ${shellQuote(hdr)}`], { maxBuffer: 1 << 20 });
+    execFileSync("/bin/sh", ["-c", `${shellQuote(ZSTD)} -q -f -o ${shellQuote(f2)} ${shellQuote(body)}`], { maxBuffer: 1 << 20 });
+    // 拼接两帧 → 目标同目录临时文件 → 原子 rename
+    const destTmp = `${file}.tmp-${process.pid}`;
+    execFileSync("/bin/sh", ["-c", `cat ${shellQuote(f1)} ${shellQuote(f2)} > ${shellQuote(destTmp)}`], { maxBuffer: 1 << 20 });
+    execFileSync("/bin/sh", ["-c", `mv -f ${shellQuote(destTmp)} ${shellQuote(file)}`], { maxBuffer: 1 << 20 });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
-  const headerLine = text.slice(0, newlineIdx + 1); // 含换行
-  const body = text.slice(newlineIdx + 1);
-  const frames = [compressFrame(headerLine)];
-  if (body.length > 0) frames.push(compressFrame(body));
-  return Buffer.concat(frames);
 }
 
 function listSessionFiles(dir) {
@@ -298,7 +313,105 @@ function validateCleaned(parsed) {
   return true;
 }
 
+/**
+ * 断言事件的 seq 连续（packed run 用 seq0 + 展开长度推进）。
+ * 这是防污染的第二道闸：迁移器对某些 seq 断裂容忍，但 DSH 实际读取会拒绝。
+ */
+function assertSeqContiguous(parsed) {
+  let expected = 0;
+  for (let i = 0; i < parsed.rows.length; i++) {
+    const r = parsed.rows[i];
+    if (PACKED_TYPES.has(r.type)) {
+      const cnt = (r.data && (r.data.texts || r.data.args || r.data.toolCalls || []).length) || 0;
+      if (r.seq0 !== expected) {
+        throw new Error(`seq gap at row ${i + 1}: packed ${r.type} seq0=${r.seq0} expected=${expected}`);
+      }
+      expected += cnt;
+    } else {
+      if (r.seq !== expected) {
+        throw new Error(`seq gap at row ${i + 1}: ${r.type} seq=${r.seq} expected=${expected}`);
+      }
+      expected += 1;
+    }
+  }
+  return expected;
+}
+
+// ── debug-one：对单个文件跑完整流程，dump 中间状态，定位污染点 ────────────
+const DEBUG_ONE = flagValue("--debug-one", "");
+if (DEBUG_ONE) {
+  const text = decompress(DEBUG_ONE);
+  const raw = readFileSync(DEBUG_ONE);
+  console.log(`[debug] file=${DEBUG_ONE}`);
+  console.log(`[debug] frames=${countZstdFrames(raw)} bytes=${raw.length} textLen=${text.length}`);
+  const sIn = jsonStats(text);
+  console.log(`[debug] INPUT  lines=${sIn.lines} headerOk=${sIn.headerOk} parseErrors=${sIn.parseErrors} top=${sIn.top}`);
+  let inTexts = 0;
+  for (const line of text.split("\n").filter((l) => l.trim())) {
+    const o = JSON.parse(line);
+    if (o.type === "reasoning-chunks") inTexts += (o.data.texts || []).length;
+  }
+  console.log(`[debug] INPUT  totalReasoningTexts=${inTexts}`);
+
+  const parsed = parseJsonl(text);
+  const cleaned = cleanSession(parsed);
+  const outText = [JSON.stringify(cleaned.header), ...cleaned.rows.map((r) => JSON.stringify(r))].join("\n") + "\n";
+  let outTexts = 0;
+  for (const r of cleaned.rows) if (r.type === "reasoning-chunks") outTexts += (r.data.texts || []).length;
+  const sOut = jsonStats(outText);
+  console.log(`[debug] CLEAN  lines=${outText.lines} totalReasoningTexts=${outTexts} top=${sOut.top}`);
+  // 打印 seq0 附近的 packed run
+  for (const r of cleaned.rows) {
+    if (r.type === "reasoning-chunks" && r.seq0 >= 120 && r.seq0 <= 140) {
+      console.log(`[debug]   cleaned seq0=${r.seq0} cnt=${(r.data.texts || []).length}`);
+    }
+  }
+
+  // compress round-trip 验证
+  const compressed = compress(outText);
+  const tmpOut = join(tmpdir(), `dsh-dbg-${Date.now()}.zstd`);
+  writeFileSync(tmpOut, compressed);
+  const back = decompress(tmpOut);
+  console.log(`[debug] COMPRESS frames=${countZstdFrames(compressed)} bytes=${compressed.length} roundtripEqual=${back === outText}`);
+  if (back !== outText) {
+    console.log(`[debug]   outText.length=${outText.length} back.length=${back.length}`);
+    // 找第一个差异位置
+    const n = Math.min(outText.length, back.length);
+    for (let i = 0; i < n; i++) {
+      if (outText[i] !== back[i]) {
+        console.log(`[debug]   first diff at char ${i}: out=${JSON.stringify(outText.slice(i - 40, i + 40))} back=${JSON.stringify(back.slice(i - 40, i + 40))}`);
+        break;
+      }
+    }
+  }
+  rmSync(tmpOut, { force: true });
+  process.exit(0);
+}
+
 // ── 主流程 ───────────────────────────────────────────────────────────────────
+
+// ── restore 分支：从备份目录把原始文件恢复到 sessions 根目录 ──────────────
+if (RESTORE) {
+  const srcDir = resolve(RESTORE);
+  const backupFiles = listSessionFiles(srcDir);
+  if (backupFiles.length === 0) {
+    console.log(`no session files under backup dir ${srcDir}`);
+    process.exit(1);
+  }
+  let restored = 0;
+  for (const bf of backupFiles) {
+    const rel = bf.slice(srcDir.length + 1);
+    const dest = join(SESSIONS_DIR, rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    // 原子恢复：copy 到临时文件再 rename
+    const destTmp = `${dest}.restore-${process.pid}`;
+    writeFileSync(destTmp, readFileSync(bf));
+    execFileSync("/bin/sh", ["-c", `mv -f ${shellQuote(destTmp)} ${shellQuote(dest)}`], { maxBuffer: 1 << 20 });
+    restored += 1;
+  }
+  console.log(`restored ${restored} files from ${srcDir} -> ${SESSIONS_DIR}`);
+  process.exit(0);
+}
 
 const files = listSessionFiles(SESSIONS_DIR);
 if (files.length === 0) {
@@ -501,7 +614,12 @@ for (const file of files) {
   let cleaned;
   try {
     cleaned = cleanSession(parsed);
-    validateCleaned(cleaned);
+    validateCleaned(cleaned); // 官方迁移器完整校验（唯一权威）
+    // roundtrip 预检：内存对象 → JSON 文本 → 解析 → 再校验。
+    // 若此处失败，说明 JSON 序列化环节有损（与写盘无关）。
+    const rtText =
+      [JSON.stringify(cleaned.header), ...cleaned.rows.map((r) => JSON.stringify(r))].join("\n") + "\n";
+    validateCleaned(parseJsonl(rtText));
   } catch (e) {
     cleanFailCount += 1;
     failures.push([file, `clean/validate failed: ${e.message}`]);
@@ -516,13 +634,17 @@ for (const file of files) {
     mkdirSync(dirname(backupPath), { recursive: true });
     writeFileSync(backupPath, readFileSync(file)); // 原文件字节级备份
 
-    const outText = [JSON.stringify(cleaned.header), ...cleaned.rows.map((r) => JSON.stringify(r))].join("\n") + "\n";
-    writeFileSync(file, compress(outText));
+    // 原子写入：header 行独立一帧 + rows 一帧，临时文件 + rename。
+    const headerLine = JSON.stringify(cleaned.header) + "\n";
+    const rowsText = cleaned.rows.length > 0 ? cleaned.rows.map((r) => JSON.stringify(r)).join("\n") + "\n" : "";
+    atomicWriteSession(file, headerLine, rowsText);
+
+    // 写回后立刻复读，用官方迁移器校验（确认原子写入无损）。
+    validateCleaned(parseJsonl(decompress(file)));
     console.log(`CLEANED  ${rel}  (rows ${parsed.rows.length} -> ${cleaned.rows.length})`);
   } else {
     const changed = parsed.rows.length - cleaned.rows.length;
-    const originStripped = parsed.rows.length - cleaned.rows.length > 0 ? "" : "";
-    console.log(`[dry-run] ${rel}  (deleted ${changed} unknown events${originStripped})`);
+    console.log(`[dry-run] ${rel}  (deleted ${changed} unknown events)`);
   }
 }
 
