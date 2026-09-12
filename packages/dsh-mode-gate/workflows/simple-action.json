@@ -1,0 +1,68 @@
+{
+  "id": "simple-action",
+  "label": "SIMPLE-ACTION",
+  "description": "匹配并执行已定义的 preset action，完成即回 IDLE。",
+  "kind": "workflow",
+  "startState": "PRESET_ACTION",
+  "ui": {
+    "showInIdleModal": true,
+    "order": 10,
+    "buttonLabel": "SIMPLE-ACTION：简单工作流执行",
+    "buttonDescription": "命中预设动作后直接执行，不进入需求分解"
+  },
+  "onComplete": {
+    "workflow": "IDLE",
+    "state": "IDLE"
+  },
+  "states": [
+    {
+      "id": "PRESET_ACTION",
+      "label": "匹配 preset action",
+      "description": "探测 preset action；命中则进入执行，未命中则回 IDLE。",
+      "permissions": {
+        "write": false,
+        "bash": "none",
+        "tools": ["list_preset_actions", "submit_preset_action"]
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "preset-action.match"
+      },
+      "transitions": [
+        {
+          "when": { "type": "presetAction.matched" },
+          "to": { "workflow": "$self", "state": "ACTION_EXECUTE" }
+        },
+        {
+          "when": { "type": "presetAction.unmatched" },
+          "to": { "workflow": "IDLE", "state": "IDLE" }
+        }
+      ]
+    },
+    {
+      "id": "ACTION_EXECUTE",
+      "label": "执行预设动作",
+      "description": "按注入的 preset action skill 执行，不扩大范围。",
+      "permissions": {
+        "write": true,
+        "bash": "declared",
+        "tools": "*"
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "preset-action.execute"
+      },
+      "prompt": "按下面注入的 preset action 内容执行，不要自行扩大任务范围。完成后结束本工作流。",
+      "transitions": [
+        {
+          "when": { "type": "goal.completed" },
+          "to": { "workflow": "IDLE", "state": "IDLE" }
+        }
+      ]
+    }
+  ]
+}

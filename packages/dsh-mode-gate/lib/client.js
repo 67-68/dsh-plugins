@@ -17,6 +17,11 @@ window.__ModuleLoader__.load({
 			permPresetAction: "仅 list_preset_actions / submit_preset_action；bash 禁用；命中 skill 直接进入实现阶段",
 			permRequirementRecognition: "只读 + 规划 + feature intent 工具；bash 仅允许已声明的只读命令；禁止写文件",
 			permImplement: "可写；危险 bash 命令仍需人工授权；feature_intent 目录仍禁止直接写",
+			wfIdle: "IDLE（后端不限制，modal 遮罩纯 UI）",
+			wfSimpleAction: "SIMPLE-ACTION：PRESET_ACTION → ACTION_EXECUTE → IDLE",
+			permSimpleAction: "PRESET_ACTION 只允许 list/submit preset action；ACTION_EXECUTE 可写",
+			wfCreate: "CREATE：BASE_READ → REQUIREMENT_RECOGNITION → (RESEARCH → EXECUTE → DEBUG → ACCUMULATION)*n → IDLE",
+			permCreate: "BASE_READ/REQUIREMENT_RECOGNITION/RESEARCH 只读；EXECUTE/DEBUG 可写；ACCUMULATION 仅允许 update_project_experience",
 			modeLabel: "阶段",
 			permLabel: "权限",
 			targetLabel: "当前 Target / 阶段",
@@ -65,6 +70,11 @@ window.__ModuleLoader__.load({
 			permPresetAction: "Only list_preset_actions / submit_preset_action; bash disabled; matched skill jumps to implement",
 			permRequirementRecognition: "Read-only + planning + feature intent tools; bash read-only declared commands only; no file writes",
 			permImplement: "Write allowed; dangerous bash requires approval; feature_intent directory stays write-protected",
+			wfIdle: "IDLE (backend unrestricted, modal is pure UI)",
+			wfSimpleAction: "SIMPLE-ACTION: PRESET_ACTION -> ACTION_EXECUTE -> IDLE",
+			permSimpleAction: "PRESET_ACTION only list/submit preset action; ACTION_EXECUTE writable",
+			wfCreate: "CREATE: BASE_READ -> REQUIREMENT_RECOGNITION -> (RESEARCH -> EXECUTE -> DEBUG -> ACCUMULATION)*n -> IDLE",
+			permCreate: "BASE_READ/REQUIREMENT_RECOGNITION/RESEARCH read-only; EXECUTE/DEBUG writable; ACCUMULATION only update_project_experience",
 			modeLabel: "Phase",
 			permLabel: "Permissions",
 			targetLabel: "Current target / phase",
@@ -104,7 +114,12 @@ window.__ModuleLoader__.load({
 			saveTaskModesFailed: "Failed to save task modes",
 		};
 
-		const PHASES = ["PRESET_ACTION", "REQUIREMENT_RECOGNITION", "IMPLEMENT"];
+		const PHASES = ["IDLE", "BASE_READ", "REQUIREMENT_RECOGNITION", "RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION", "PRESET_ACTION", "ACTION_EXECUTE"];
+
+		/** Fresh IDLE state used before the first Remote read resolves. */
+		function idleState() {
+			return { workflowId: "IDLE", phase: "IDLE", target: null, goal: null, selectedModel: null };
+		}
 
 		/** Read the durable mode-gate state for the current session via the Remote service. */
 		function useModeGateState(sessions, api) {
@@ -114,7 +129,7 @@ window.__ModuleLoader__.load({
 				sessions.list.getSnapshot
 			);
 			const sessionId = list.current;
-			const [state, setState] = react.useState({ phase: "PRESET_ACTION", target: null, goal: null, selectedModel: null });
+			const [state, setState] = react.useState(idleState());
 			const sessionKey = typeof sessionId === "string" ? sessionId : "";
 
 			react.useEffect(() => {
@@ -122,7 +137,7 @@ window.__ModuleLoader__.load({
 				let timer;
 				const refresh = async () => {
 					if (sessionKey === "") {
-						if (current) setState({ phase: "PRESET_ACTION", target: null, goal: null, selectedModel: null });
+						if (current) setState(idleState());
 						return;
 					}
 					try {
@@ -131,10 +146,10 @@ window.__ModuleLoader__.load({
 						if (result && result.ok && result.value) {
 							setState(result.value);
 						} else if (current) {
-							setState({ phase: "PRESET_ACTION", target: null, goal: null, selectedModel: null });
+							setState(idleState());
 						}
 					} catch (_err) {
-						if (current) setState({ phase: "PRESET_ACTION", target: null, goal: null, selectedModel: null });
+						if (current) setState(idleState());
 					}
 				};
 				refresh();
@@ -257,9 +272,9 @@ window.__ModuleLoader__.load({
 		}
 
 		const PHASE_ROWS = [
-			["phasePresetAction", "permPresetAction"],
-			["phaseRequirementRecognition", "permRequirementRecognition"],
-			["phaseImplement", "permImplement"],
+			["wfIdle", "permImplement"],
+			["wfSimpleAction", "permSimpleAction"],
+			["wfCreate", "permCreate"],
 		];
 
 		const styles = {
@@ -508,6 +523,8 @@ window.__ModuleLoader__.load({
 			package: "dsh-mode-gate",
 			descriptors: [
 				remoteArgsDescriptor("getState", "GetStateResult"),
+				remoteArgsDescriptor("getWorkflows", "GetWorkflowsResult"),
+				remoteArgsDescriptor("selectWorkflow", "SelectWorkflowResult"),
 				remoteDescriptor("getBashDenyList", "GetBashDenyListResult"),
 				remoteArgsDescriptor("setBashDenyList", "SetBashDenyListResult"),
 				remoteDescriptor("getModelCatalog", "GetModelCatalogResult"),
@@ -516,6 +533,189 @@ window.__ModuleLoader__.load({
 				remoteArgsDescriptor("setTaskModes", "SetTaskModesResult"),
 			],
 		};
+
+		// ── IDLE workflow modal + composer placeholder ───────────────────────
+		const modalStore = (() => {
+			let hidden = false;
+			const listeners = new Set();
+			const emit = () => { for (const listener of listeners) listener(); };
+			return {
+				subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+				getSnapshot: () => hidden,
+				set: (next) => { if (next !== hidden) { hidden = next; emit(); } },
+				toggle: () => { hidden = !hidden; emit(); },
+			};
+		})();
+
+		const composerStore = (() => {
+			let state = { focused: false, hasText: false };
+			const listeners = new Set();
+			const emit = () => { for (const listener of listeners) listener(); };
+			return {
+				subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+				getSnapshot: () => state,
+				update: (next) => {
+					if (next.focused !== state.focused || next.hasText !== state.hasText) {
+						state = next;
+						emit();
+					}
+				},
+			};
+		})();
+
+		function readComposerState() {
+			if (typeof document === "undefined") return { focused: false, hasText: false };
+			const el = document.querySelector("[data-composer-seat] textarea")
+				|| document.querySelector("textarea[aria-haspopup]")
+				|| document.querySelector("textarea");
+			if (!el) return { focused: false, hasText: false };
+			return {
+				focused: document.activeElement === el,
+				hasText: Boolean(el.value && el.value.trim().length > 0),
+			};
+		}
+
+		function useComposerState() {
+			return react.useSyncExternalStore(composerStore.subscribe, composerStore.getSnapshot, composerStore.getSnapshot);
+		}
+
+		function useIdleModalHidden() {
+			return react.useSyncExternalStore(modalStore.subscribe, modalStore.getSnapshot, modalStore.getSnapshot);
+		}
+
+		/** Read the workflow buttons for the current session. */
+		function useWorkflows(sessions, api) {
+			const list = react.useSyncExternalStore(sessions.list.subscribe, sessions.list.getSnapshot, sessions.list.getSnapshot);
+			const sessionId = list.current;
+			const [data, setData] = react.useState({ workflows: [], workspace: null });
+			react.useEffect(() => {
+				let current = true;
+				let timer;
+				const refresh = async () => {
+					if (typeof sessionId !== "string") return;
+					try {
+						const result = await api().getWorkflows({ sessionId });
+						if (!current) return;
+						if (result && result.ok && result.value) {
+							setData({ workflows: result.value.workflows || [], workspace: result.value.workspace || null });
+						}
+					} catch (_err) { /* keep previous */ }
+				};
+				refresh();
+				timer = setInterval(refresh, 4000);
+				return () => { current = false; clearInterval(timer); };
+			}, [sessionId, api]);
+			return { ...data, sessionId };
+		}
+
+		function useIsIdle(sessions, api) {
+			const state = useModeGateState(sessions, api);
+			return !state.workflowId || state.workflowId === "IDLE";
+		}
+
+		/** Full-screen modal covering the conversation but not header/composer. */
+		function IdleWorkflowModal(props) {
+			const { sessions, api, hostCtx } = props;
+			const isIdle = useIsIdle(sessions, api);
+			const { workflows, sessionId } = useWorkflows(sessions, api);
+			const composer = useComposerState();
+			const hidden = useIdleModalHidden();
+			const [box, setBox] = react.useState({ top: 44, bottom: 120 });
+
+			react.useEffect(() => {
+				const measure = () => {
+					if (typeof document === "undefined") return;
+					const header = document.querySelector('[data-slot="conversation.session.header"]');
+					const seat = document.querySelector("[data-composer-seat]");
+					const top = header ? header.getBoundingClientRect().bottom : 44;
+					const bottom = seat ? Math.max(0, window.innerHeight - seat.getBoundingClientRect().top) : 120;
+					setBox({ top, bottom });
+				};
+				measure();
+				window.addEventListener("resize", measure);
+				const timer = setInterval(measure, 1000);
+				return () => { window.removeEventListener("resize", measure); clearInterval(timer); };
+			}, []);
+
+			const visible = isIdle && !hidden && !(composer.focused && composer.hasText);
+			if (!visible) return null;
+
+			const run = async (workflowId) => {
+				modalStore.set(true);
+				try {
+					const commands = hostCtx && hostCtx.get ? hostCtx.get("remote.commands") : undefined;
+					if (commands && typeof commands.execute === "function" && typeof sessionId === "string") {
+						await commands.execute(sessionId, `/mode ${workflowId}`);
+						return;
+					}
+				} catch (_err) { /* fall through to direct state write */ }
+				try { await api().selectWorkflow({ sessionId, workflowId }); } catch (_err) { /* surfaced by refresh */ }
+			};
+
+			return react.createElement("div", {
+				style: {
+					position: "fixed", left: 0, right: 0, top: box.top, bottom: box.bottom,
+					zIndex: 40, display: "flex", alignItems: "center", justifyContent: "center",
+					background: "color-mix(in srgb, var(--dsw-alias-bg-base) 88%, transparent)",
+					backdropFilter: "blur(2px)", overflow: "auto", padding: 24,
+				},
+			}, react.createElement("div", {
+				style: { width: "100%", maxWidth: 720, display: "flex", flexDirection: "column", gap: 12 },
+			},
+				react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 18, fontWeight: 600 } }, "选择一个工作流开始"),
+				react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, marginBottom: 4 } }, "或者直接在下方输入框聊天；点击工作流等价于 /mode <id>。"),
+				...(workflows.length > 0 ? workflows.map((wf) => react.createElement("button", {
+					key: wf.id,
+					onClick: () => run(wf.id),
+					style: {
+						textAlign: "left", cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)",
+						background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
+						borderRadius: 12, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 4,
+					},
+				},
+					react.createElement("span", { style: { fontWeight: 600, fontSize: 15 } }, (wf.ui && wf.ui.buttonLabel) || wf.label),
+					react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, (wf.ui && wf.ui.buttonDescription) || wf.description || ""),
+				)) : react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)" } }, "（未加载到工作流定义）")),
+			));
+		}
+
+		/** Header-right button that toggles the IDLE modal. */
+		function ModeGateHeaderToggle(props) {
+			const { sessions, api } = props;
+			const isIdle = useIsIdle(sessions, api);
+			const hidden = useIdleModalHidden();
+			if (!isIdle) return null;
+			return react.createElement("button", {
+				onClick: () => modalStore.toggle(),
+				title: hidden ? "显示工作流面板" : "隐藏工作流面板",
+				style: {
+					cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)",
+					background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
+					borderRadius: 8, padding: "3px 8px", fontSize: 12,
+				},
+			}, hidden ? "显示工作流" : "隐藏工作流");
+		}
+
+		/** IDLE-only custom placeholder rendered inside the composer input. */
+		function ComposerPlaceholder(props) {
+			const { sessions, api } = props;
+			const isIdle = useIsIdle(sessions, api);
+			const composer = useComposerState();
+			react.useEffect(() => {
+				if (typeof document === "undefined") return undefined;
+				if (isIdle) document.body.classList.add("mode-gate-idle-composer");
+				else document.body.classList.remove("mode-gate-idle-composer");
+				return () => document.body.classList.remove("mode-gate-idle-composer");
+			}, [isIdle]);
+			if (!isIdle || composer.hasText) return null;
+			return react.createElement("div", {
+				style: {
+					position: "absolute", top: 4, left: 16, right: 16,
+					pointerEvents: "none", color: "var(--dsw-alias-label-caption)",
+					fontSize: "inherit", lineHeight: "inherit", whiteSpace: "pre-wrap",
+				},
+			}, "或者你想随便聊点什么？（未来功能：小模型自动路由匹配工作流）");
+		}
 
 		const NS = "settings.modeGate";
 		const inject = ["slots", "locale", "sessions", "remote"];
@@ -548,6 +748,58 @@ window.__ModuleLoader__.load({
 				locale: NS,
 				inject: () => ({ sessions: ctx.get("sessions"), api })
 			}, ModeGateFooterAction));
+
+			// Track the composer textarea so the IDLE modal can yield when the
+			// user starts typing (focus + non-empty draft).
+			ctx.effect(() => {
+				if (typeof document === "undefined") return () => {};
+				const update = () => composerStore.update(readComposerState());
+				document.addEventListener("input", update, true);
+				document.addEventListener("focusin", update, true);
+				document.addEventListener("focusout", update, true);
+				const timer = setInterval(update, 500);
+				update();
+				return () => {
+					document.removeEventListener("input", update, true);
+					document.removeEventListener("focusin", update, true);
+					document.removeEventListener("focusout", update, true);
+					clearInterval(timer);
+				};
+			}, "dsh-mode-gate: composer tracking");
+
+			// Hide the native placeholder while the IDLE custom placeholder is mounted.
+			ctx.effect(() => {
+				if (typeof document === "undefined") return () => {};
+				const style = document.createElement("style");
+				style.dataset.plugin = "dsh-mode-gate";
+				style.textContent = "body.mode-gate-idle-composer textarea::placeholder{color:transparent !important;-webkit-text-fill-color:transparent !important;}";
+				document.head.appendChild(style);
+				return () => style.remove();
+			}, "dsh-mode-gate: placeholder css");
+
+			ctx.slots.inject("shell.overlay", () => ctx.slots.register({
+				name: "shell.overlay",
+				id: "mode-gate-idle-modal",
+				order: 20,
+				locale: NS,
+				inject: () => ({ sessions: ctx.get("sessions"), api, hostCtx: ctx })
+			}, IdleWorkflowModal));
+
+			ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
+				name: "conversation.session.header.actions",
+				id: "mode-gate-idle-toggle",
+				order: 60,
+				locale: NS,
+				inject: () => ({ sessions: ctx.get("sessions"), api })
+			}, ModeGateHeaderToggle));
+
+			ctx.slots.inject("conversation.input.overlay", () => ctx.slots.register({
+				name: "conversation.input.overlay",
+				id: "mode-gate-idle-placeholder",
+				order: 20,
+				locale: NS,
+				inject: () => ({ sessions: ctx.get("sessions"), api })
+			}, ComposerPlaceholder));
 		}
 
 		exports.NS = NS;

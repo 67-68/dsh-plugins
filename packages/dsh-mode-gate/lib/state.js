@@ -1,0 +1,197 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+/** Durable mode-gate state file. */
+export const STATE_FILE = join(homedir(), '.dsh', 'mode-gate-state.json');
+
+export const IDLE_WORKFLOW_ID = 'IDLE';
+export const IDLE_STATE_ID = 'IDLE';
+
+/** User-editable model catalog, persisted top-level in the state file. */
+export const DEFAULT_MODEL_CATALOG = [
+  {
+    id: 'deepseek-v4-flash',
+    name: 'DeepSeek-V4-Flash',
+    description: '快速轻量模型，适合简单、明确的机械任务。',
+    provider: 'deepseek-official',
+  },
+  {
+    id: 'deepseek-v4-pro',
+    name: 'DeepSeek-V4-Pro',
+    description: '旗舰模型，适合复杂分析、架构设计与高质量代码。',
+    provider: 'deepseek-official',
+  },
+];
+
+/** task_mode -> default model id. Per-task model_override can override these. */
+export const DEFAULT_TASK_MODES = {
+  simple: { model: 'deepseek-v4-flash' },
+  complex: { model: 'deepseek-v4-pro' },
+};
+
+export function normalizeModelCatalog(value) {
+  if (!Array.isArray(value)) return DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
+  const out = [];
+  const seen = new Set();
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    if (id.length === 0 || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      name: typeof entry.name === 'string' ? entry.name.trim() : id,
+      description: typeof entry.description === 'string' ? entry.description.trim() : '',
+      provider: typeof entry.provider === 'string' && entry.provider.trim() ? entry.provider.trim() : 'deepseek-official',
+    });
+  }
+  return out.length > 0 ? out : DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
+}
+
+export function normalizeTaskModes(value) {
+  const source = value && typeof value === 'object' ? value : DEFAULT_TASK_MODES;
+  const out = {};
+  for (const mode of ['simple', 'complex']) {
+    const entry = source[mode];
+    out[mode] = {
+      model: entry && typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : DEFAULT_TASK_MODES[mode].model,
+    };
+  }
+  return out;
+}
+
+function emptyStaticPlan() {
+  return { source: 'feature-intent.checklist', featureIntentFile: null, items: [], currentId: null, createdAt: 0 };
+}
+
+function emptyDynamicPlan() {
+  return { scope: 'state', stateId: null, items: [], updatedAt: 0 };
+}
+
+function emptyLoopMemory() {
+  return { iteration: 0, blocks: [], updatedAt: 0 };
+}
+
+/** Map a legacy phase/mode onto a v2 { workflowId, phase }. */
+export function migrateLegacyPhase(entry) {
+  const raw = String((entry && (entry.phase || entry.mode)) || '').trim().toUpperCase();
+  if (entry && typeof entry.workflowId === 'string' && entry.workflowId) {
+    return { workflowId: entry.workflowId, phase: raw || IDLE_STATE_ID, migrationNotice: null };
+  }
+  switch (raw) {
+    case 'PRESET_ACTION':
+      return { workflowId: 'simple-action', phase: 'PRESET_ACTION', migrationNotice: null };
+    case 'REQUIREMENT_RECOGNITION':
+      return { workflowId: 'create', phase: 'REQUIREMENT_RECOGNITION', migrationNotice: null };
+    case 'IMPLEMENT':
+      return {
+        workflowId: IDLE_WORKFLOW_ID,
+        phase: IDLE_STATE_ID,
+        migrationNotice: '旧会话处于已删除的 IMPLEMENT 阶段，已回到 IDLE。请重新选择 CREATE 工作流。',
+      };
+    default:
+      return { workflowId: IDLE_WORKFLOW_ID, phase: IDLE_STATE_ID, migrationNotice: null };
+  }
+}
+
+/** Normalize one raw session entry into the v2 shape. */
+export function normalizeSessionEntry(entry) {
+  const source = entry && typeof entry === 'object' ? entry : {};
+  const migrated = migrateLegacyPhase(source);
+  const goal = source.goal && typeof source.goal === 'object'
+    ? { iteration: 0, ...source.goal }
+    : null;
+  return {
+    workflowId: migrated.workflowId,
+    phase: migrated.phase,
+    mode: migrated.phase,
+    target: source.target && typeof source.target === 'object' ? source.target : null,
+    skills: Array.isArray(source.skills) ? source.skills.filter((s) => typeof s === 'string' && s.trim()) : [],
+    bash: Array.isArray(source.bash) ? source.bash.filter((s) => typeof s === 'string' && s.trim()) : [],
+    goal,
+    staticPlan: source.staticPlan && typeof source.staticPlan === 'object' ? source.staticPlan : emptyStaticPlan(),
+    dynamicPlan: source.dynamicPlan && typeof source.dynamicPlan === 'object' ? source.dynamicPlan : emptyDynamicPlan(),
+    loopMemory: source.loopMemory && typeof source.loopMemory === 'object' ? source.loopMemory : emptyLoopMemory(),
+    selectedModel: source.selectedModel && typeof source.selectedModel === 'object' ? source.selectedModel : null,
+    featureIntentFile: typeof source.featureIntentFile === 'string' ? source.featureIntentFile : null,
+    taskMode: typeof source.taskMode === 'string' ? source.taskMode : null,
+    requirementSummary: typeof source.requirementSummary === 'string' ? source.requirementSummary : null,
+    chosenPresetAction: typeof source.chosenPresetAction === 'string' ? source.chosenPresetAction : null,
+    presetActionTitle: typeof source.presetActionTitle === 'string' ? source.presetActionTitle : null,
+    presetActionContent: typeof source.presetActionContent === 'string' ? source.presetActionContent : null,
+    workspace: typeof source.workspace === 'string' ? source.workspace : null,
+    migrationNotice: migrated.migrationNotice || (typeof source.migrationNotice === 'string' ? source.migrationNotice : null),
+  };
+}
+
+export function loadStateStore() {
+  const base = {
+    version: 2,
+    sessions: {},
+    bashDenyList: undefined,
+    modelCatalog: normalizeModelCatalog(),
+    taskModes: normalizeTaskModes(),
+    workflowRegistryVersion: 1,
+  };
+  try {
+    if (!existsSync(STATE_FILE)) return base;
+    const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return base;
+    return {
+      version: 2,
+      sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
+      bashDenyList: parsed.bashDenyList,
+      modelCatalog: normalizeModelCatalog(parsed.modelCatalog),
+      taskModes: normalizeTaskModes(parsed.taskModes),
+      workflowRegistryVersion: parsed.workflowRegistryVersion || 1,
+    };
+  } catch (_err) {
+    return base;
+  }
+}
+
+export function saveStateStore(store) {
+  try {
+    mkdirSync(join(homedir(), '.dsh'), { recursive: true });
+    writeFileSync(STATE_FILE, JSON.stringify({ ...store, version: 2 }, null, 2));
+  } catch (err) {
+    console.log('[dsh-mode-gate] state save failed:', err && err.message);
+  }
+}
+
+/** Read the durable session state, normalized to v2. */
+export function readSessionEntry(sessionId) {
+  const store = loadStateStore();
+  const raw = sessionId !== void 0 ? store.sessions[sessionId] : void 0;
+  return normalizeSessionEntry(raw);
+}
+
+export function readState(agent) {
+  const sessionId = agent?.session?.id;
+  const entry = readSessionEntry(sessionId);
+  const store = loadStateStore();
+  return { ...entry, modelCatalog: store.modelCatalog, taskModes: store.taskModes };
+}
+
+export function writeState(agent, patch) {
+  const sessionId = agent?.session?.id;
+  if (sessionId === void 0) return;
+  const store = loadStateStore();
+  const current = normalizeSessionEntry(store.sessions[sessionId]);
+  const next = normalizeSessionEntry({ ...current, ...patch });
+  store.sessions[sessionId] = next;
+  saveStateStore(store);
+}
+
+export function formatCapabilities(state) {
+  return [
+    `当前工作流：${state.workflowId || IDLE_WORKFLOW_ID}`,
+    `当前状态：${state.phase || IDLE_STATE_ID}`,
+    `当前 Target：${state.target ? state.target.target : '未声明'}`,
+    `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
+    `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
+    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换阶段）、dev_tool_search / request_extra（申请额外 skill/bash）。',
+    '要申请额外 skill 或 bash：dev_tool_search({ skills: [...], bash: [...] })（或 request_extra 同参），会作为问题向用户申报。',
+  ].join('\n');
+}

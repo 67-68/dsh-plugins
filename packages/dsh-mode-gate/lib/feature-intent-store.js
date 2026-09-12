@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, extname, join, resolve, sep } from 'node:path';
+import { buildEntryMarkdown } from './plans.js';
 
 /**
  * Append-only store for raw feature-intent records.
@@ -91,6 +92,9 @@ export function createFeatureIntentStore(featureIntentDir) {
   /**
    * Append one raw record. When the file does not exist yet, `projectOverview`
    * is mandatory and becomes the opening project description.
+   *
+   * `entry` may be a plain string (legacy) or `{ userWords, understanding, checklist }`,
+   * rendered under the three canonical headings.
    */
   function append(name, entry, projectOverview) {
     ensureRoot();
@@ -106,7 +110,16 @@ export function createFeatureIntentStore(featureIntentDir) {
         `# ${resolved.name}\n\n## Project Overview\n\n${overview}\n`,
       );
     }
-    const record = typeof entry === 'string' ? entry.trim() : '';
+    let record = '';
+    if (entry && typeof entry === 'object') {
+      record = buildEntryMarkdown({
+        userWords: entry.userWords || entry.user_words,
+        understanding: entry.understanding || entry.agentUnderstanding,
+        checklist: entry.checklist,
+      });
+    } else {
+      record = typeof entry === 'string' ? entry.trim() : '';
+    }
     if (record.length === 0) throw new Error('feature intent 记录内容不能为空');
     appendFileSync(
       resolved.path,

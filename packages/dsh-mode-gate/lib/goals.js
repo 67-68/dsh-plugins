@@ -1,30 +1,61 @@
 import { parsePresetActionProtocol, parseRequirementProtocol, modelCatalogText } from './protocols.js';
+import {
+  extractEntryFields,
+  createStaticPlan,
+  advanceStaticPlan,
+  beginCurrentStaticItem,
+  staticPlanCurrent,
+} from './plans.js';
 
 /**
- * Built-in goals for the requirement loop. Each goal is a plain object
- * consumed by `createGoalEngine`.
+ * Built-in goal registry for mode-gate workflows.
  *
- * `env` contains:
- *   - featureIntents: createFeatureIntentStore() result
- *   - modelCatalog: user-editable model catalog
- *   - taskModes: simple/complex default model ids
- *   - presetActionSkills: [{ id, name, description, model, reasoningEffort, content }]
+ * A goal never hardcodes the next state. On completion it returns
+ *   { signal?, statePatch?, prompt? }
+ * and index.js resolves the state's declarative `transitions` against that
+ * signal plus the current static/dynamic plans.
  */
+
+function latestEntry(content) {
+  const text = String(content || '');
+  const parts = text.split(/\n---\n/);
+  return parts.length ? parts[parts.length - 1] : text;
+}
+
+function currentItemText(state) {
+  const item = staticPlanCurrent(state.staticPlan);
+  return item ? `当前 checklist goal：${item.text}（id: ${item.id}）` : '当前没有待完成的 checklist goal。';
+}
+
+function appendLoopMemory(state, item) {
+  const memory = state.loopMemory && typeof state.loopMemory === 'object'
+    ? state.loopMemory
+    : { iteration: 0, blocks: [], updatedAt: 0 };
+  const blocks = Array.isArray(memory.blocks) ? memory.blocks.slice(-7) : [];
+  if (item) {
+    blocks.push({
+      key: item.id,
+      text: item.text,
+      iteration: (state.goal && state.goal.iteration) || memory.iteration || 0,
+      stampedAt: Date.now(),
+    });
+  }
+  return { ...memory, blocks, updatedAt: Date.now() };
+}
+
 export function createBuiltinGoals() {
   return [
     {
-      id: 'preset-action-match',
-      phase: 'PRESET_ACTION',
+      id: 'preset-action.match',
       prompt: [
         '[目标] 探测 preset action',
         '先调用 list_preset_actions 查看可用 preset actions 的 id、说明和匹配条件。',
         '然后判断用户需求是否与某个 preset action 匹配：',
         '- 匹配：调用 submit_preset_action 并填写 skill_id。',
-        '- 不匹配：调用 submit_preset_action 并填写 no_match: true，将直接进入普通需求分解阶段。',
+        '- 不匹配：调用 submit_preset_action 并填写 no_match: true，将回到 IDLE。',
         '探测失败不需要重试，直接提交 no_match 即可。',
       ].join('\n'),
       allowedTools: ['list_preset_actions', 'submit_preset_action'],
-      allowedBash: [],
       requiredCalls: [{ tool: 'list_preset_actions', min: 1 }],
       submitTool: {
         name: 'submit_preset_action',
@@ -41,13 +72,12 @@ export function createBuiltinGoals() {
           return decision;
         },
       },
-      async onSubmit(parsed, env) {
+      async onSubmit(parsed) {
         if (parsed.kind === 'no-match') {
           return {
-            nextPhase: 'REQUIREMENT_RECOGNITION',
-            nextGoal: 'feature-intent-read',
-            prompt: '未命中 preset action，进入普通需求分解阶段。',
+            signal: { presetActionMatched: false },
             statePatch: { chosenPresetAction: null },
+            prompt: '未命中 preset action，回到 IDLE。',
           };
         }
         const skill = parsed.skill;
@@ -57,89 +87,71 @@ export function createBuiltinGoals() {
           ...(skill.reasoningEffort ? { reasoningEffort: skill.reasoningEffort } : {}),
         };
         return {
-          nextPhase: 'IMPLEMENT',
-          nextGoal: null,
-          prompt: [
-            `已命中 preset action "${skill.id}"，跳过需求分解阶段，进入实现阶段。`,
-            '',
-            '请按照下面注入的 preset action 内容执行，不要自行扩大任务范围。',
-            '',
-            '--- preset action skill ---',
-            skill.content,
-          ].join('\n'),
+          signal: { presetActionMatched: true },
           statePatch: {
             chosenPresetAction: skill.id,
+            presetActionTitle: skill.title,
+            presetActionContent: skill.content,
             selectedModel: model,
           },
+          prompt: `已命中 preset action "${skill.id}"。`,
         };
       },
     },
 
     {
-      id: 'feature-intent-read',
-      phase: 'REQUIREMENT_RECOGNITION',
-      prompt: [
-        '[目标] 至少阅读一个 feature intent',
-        '当前阶段只解锁 feature intent 阅读工具。系统会尝试自动读取一个 feature intent 作为起点；',
-        '你也可以用 list_feature_intents 查看全部，再用 get_feature_intent 阅读与你需求最相关的一个。',
-        '阅读完成后，系统会自动进入下一目标（追加 feature intent 记录 + 提交需求识别协议）。',
+      id: 'preset-action.execute',
+      prompt: (env, state) => [
+        '[目标] 执行 preset action',
+        '请严格按下面注入的 preset action 内容执行，不要自行扩大任务范围。',
+        '',
+        '--- preset action skill ---',
+        (state && state.presetActionContent) || '（未找到 preset action 内容）',
       ].join('\n'),
-      allowedTools: ['list_feature_intents', 'get_feature_intent'],
-      allowedBash: [],
-      requiredCalls: [{ tool: 'get_feature_intent', min: 1 }],
-      async onActivate(env) {
-        const intents = await env.featureIntents.list();
-        if (intents.length === 0) {
-          return {
-            prompt: [
-              '[目标] 至少阅读一个 feature intent',
-              '当前 feature intent 目录为空。请询问用户是否已有需求文档需要迁移，或让用户提供项目背景。',
-              `目录：${env.featureIntents.dir}`,
-            ].join('\n'),
-            statePatch: { featureIntentFile: null },
-          };
-        }
-        const preferred = intents.find((entry) => entry.name === 'mode-gate') || intents[0];
-        let content = '';
-        try {
-          content = env.featureIntents.get(preferred.name).content;
-        } catch (err) {
-          content = `（自动读取失败：${(err && err.message) || err}）`;
-        }
-        return {
-          prompt: [
-            '[目标] 至少阅读一个 feature intent',
-            `已自动读取 feature intent "${preferred.name}"，内容如下。请确认它是否匹配当前需求；若不匹配，用 list_feature_intents + get_feature_intent 读取更相关的文档。`,
-            '',
-            '--- feature intent 内容开始 ---',
-            content,
-            '--- feature intent 内容结束 ---',
-          ].join('\n'),
-          statePatch: { featureIntentFile: preferred.name },
-        };
+      allowedTools: ['submit_state'],
+      requiredCalls: [],
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
       },
-      async onComplete(env, state) {
-        const file = state.featureIntentFile || (state.goal && state.goal.featureIntentFile) || '';
-        return {
-          nextPhase: 'REQUIREMENT_RECOGNITION',
-          nextGoal: 'feature-intent-update',
-          prompt: `已阅读 feature intent${file ? ` "${file}"` : ''}。现在进入本阶段第二步：追加 feature intent 记录并提交需求识别协议。`,
-          statePatch: { featureIntentFile: file || null },
-        };
+      async onSubmit() {
+        return { signal: { goalCompleted: true }, prompt: 'preset action 执行完成。' };
       },
     },
 
     {
-      id: 'feature-intent-update',
-      phase: 'REQUIREMENT_RECOGNITION',
-      prompt: (env) => buildFeatureIntentUpdatePrompt(env.modelCatalog, env.taskModes),
+      id: 'project-experience.dump',
+      prompt: [
+        '[目标] 一次性读取项目基准',
+        '调用 read_project_experience 工具（省略 project 时会自动选择唯一项目，或在多个时列出候选）。',
+        '工具会一次性返回 intro / 系统拓扑 / 血泪法则 / 核心状态树四个文件的内容。',
+        '读完即可，不要在本状态写任何文件。',
+      ].join('\n'),
+      allowedTools: ['read_project_experience'],
+      requiredCalls: [{ tool: 'read_project_experience', min: 1 }],
+      async onComplete() {
+        return { signal: { goalCompleted: true }, prompt: '项目基准已读取，进入需求分解。' };
+      },
+    },
+
+    {
+      id: 'feature-intent.read-and-decompose',
+      prompt: (env) => [
+        '[目标] 读取 feature intent 并完成需求分解',
+        '1. 用 list_feature_intents / get_feature_intent 找到并阅读最相关的文档；',
+        '2. 用 update_feature_intent 一次写入三个 field：user_words（用户原话）、understanding（你的理解）、checklist（可验收节点数组）；',
+        '3. checklist 每一项必须是可验收的节点，例如「按钮在 xx 处出现」「点击按钮展示 xxxx 数据」；',
+        '4. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan。',
+        '本状态允许 bash，但禁止写文件。',
+        '',
+        modelCatalogText(env.modelCatalog, env.taskModes),
+      ].join('\n'),
       allowedTools: [
-        'list_feature_intents',
-        'get_feature_intent',
-        'update_feature_intent',
-        'submit_requirement_protocol',
+        'list_feature_intents', 'get_feature_intent', 'update_feature_intent',
+        'submit_requirement_protocol', 'bash', 'str_replace_editor',
       ],
-      allowedBash: [],
       requiredCalls: [{ tool: 'update_feature_intent', min: 1 }],
       submitTool: {
         name: 'submit_requirement_protocol',
@@ -154,38 +166,125 @@ export function createBuiltinGoals() {
         },
       },
       async onSubmit(parsed, env) {
+        const file = await env.featureIntents.get(parsed.featureIntentFile);
+        const fields = extractEntryFields(latestEntry(file.content));
+        const plan = createStaticPlan(fields.checklist, parsed.featureIntentFile);
         return {
-          nextPhase: 'IMPLEMENT',
-          nextGoal: null,
-          prompt: [
-            '需求识别协议已通过，进入实现阶段。',
-            `任务模式：${parsed.taskMode}`,
-            `选用模型：${parsed.model.provider}/${parsed.model.model}${parsed.model.reasoningEffort ? `（reasoning_effort=${parsed.model.reasoningEffort}）` : ''}`,
-            `feature intent：${parsed.featureIntentFile}`,
-            '',
-            '请开始实现该任务。',
-          ].join('\n'),
+          signal: { goalCompleted: true },
           statePatch: {
             selectedModel: parsed.model,
             featureIntentFile: parsed.featureIntentFile,
             taskMode: parsed.taskMode,
             requirementSummary: parsed.summary,
+            staticPlan: plan,
+            dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
           },
+          prompt: [
+            `需求识别协议已通过，任务模式：${parsed.taskMode}。`,
+            `checklist 已注册为 ${plan.items.length} 个 static goal。`,
+            plan.items.length ? plan.items.map((item) => `- ${item.id}: ${item.text}`).join('\n') : '（未解析到 checklist，请检查 update_feature_intent 的 checklist 字段）',
+          ].join('\n'),
+        };
+      },
+    },
+
+    {
+      id: 'create.research',
+      prompt: (env, state) => [
+        '[目标] 研究当前 checklist goal',
+        currentItemText(state),
+        '重新阅读 project-experience 三个文件（read_project_experience），围绕当前 goal 输出实现思路、涉及文件和风险。',
+        '产出研究结论后调用 submit_state 结束本状态。',
+      ].join('\n'),
+      allowedTools: ['read_project_experience', 'bash', 'str_replace_editor:view'],
+      requiredCalls: [],
+      async onActivate(env, state) {
+        return { statePatch: { staticPlan: beginCurrentStaticItem(state.staticPlan) } };
+      },
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit() {
+        return { signal: { goalCompleted: true }, prompt: '研究完成，进入执行。' };
+      },
+    },
+
+    {
+      id: 'create.execute',
+      prompt: (env, state) => [
+        '[目标] 执行当前 checklist goal',
+        currentItemText(state),
+        '只做本 goal 范围内的事；完成标准以验收文本为准。',
+        '完成后调用 submit_state 结束本状态，动态计划会被清空。',
+      ].join('\n'),
+      allowedTools: ['bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write'],
+      requiredCalls: [],
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit() {
+        return { signal: { goalCompleted: true }, prompt: '执行完成，进入调试。' };
+      },
+    },
+
+    {
+      id: 'create.debug',
+      prompt: (env, state) => [
+        '[目标] 验证当前 checklist goal',
+        currentItemText(state),
+        '先自行复现和修复。若无法解决，明确写出：复现步骤、期望结果、需要用户做什么，并请求用户协助。',
+        '验证通过后调用 submit_state 结束本状态。',
+      ].join('\n'),
+      allowedTools: ['bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write'],
+      requiredCalls: [],
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit() {
+        return { signal: { goalCompleted: true }, prompt: '调试完成，进入总结沉淀。' };
+      },
+    },
+
+    {
+      id: 'create.accumulate',
+      prompt: (env, state) => [
+        '[目标] 总结并沉淀项目经验',
+        currentItemText(state),
+        '用 update_project_experience 把本轮变化追加到 project-experience（intro / 系统拓扑 / 血泪法则 / 核心状态树）。',
+        'append 会直接写入；overwrite / diff 会作为问题提交给用户批准。',
+        '写入后调用 submit_state 结束本状态；引擎会自动推进到下一个 checklist goal。',
+      ].join('\n'),
+      allowedTools: ['update_project_experience', 'read_project_experience', 'bash', 'str_replace_editor:view'],
+      requiredCalls: [{ tool: 'update_project_experience', min: 1 }],
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit(parsed, env, state) {
+        const item = staticPlanCurrent(state.staticPlan);
+        const advanced = advanceStaticPlan(state.staticPlan);
+        const memory = appendLoopMemory(state, item);
+        return {
+          signal: { goalCompleted: true },
+          statePatch: {
+            staticPlan: advanced,
+            dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
+            loopMemory: memory,
+          },
+          prompt: item ? `已完成 checklist goal「${item.text}」。` : '本轮总结完成。',
         };
       },
     },
   ];
-}
-
-/** Generate the feature-intent-update prompt with the live model catalog. */
-export function buildFeatureIntentUpdatePrompt(modelCatalog, taskModes) {
-  const base = [
-    '[目标] 追加 feature intent 记录并提交需求识别协议',
-    '1. 调用 update_feature_intent 至少一次，把当前需求的原始记录与简单分析追加到 feature intent 文件末尾（不要直接编辑文件）。',
-    '2. 确认本次任务的任务模式与模型：',
-    modelCatalogText(modelCatalog, taskModes),
-    '3. 调用 submit_requirement_protocol 提交需求识别协议。',
-    '协议通过后会自动切换到实现阶段；协议校验失败会作为工具错误返回，请根据错误修正后重新提交。',
-  ].join('\n');
-  return base;
 }

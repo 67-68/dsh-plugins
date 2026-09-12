@@ -49,24 +49,58 @@ echo "==> Deploying dsh-plugins -> $DSH_HOME"
 for src in "$HERE"/plugins/*.mjs; do
   [ -e "$src" ] || continue
   name="$(basename "$src")"
-  ln -sfn "$src" "$WEB_DIR/$name"
+  if [ "$(readlink "$WEB_DIR/$name" 2>/dev/null || true)" = "$src" ]; then
+    echo "    plugin   $name (already linked)"
+    continue
+  fi
+  ln -sfn "$src" "$WEB_DIR/$name" 2>/dev/null || cp -f "$src" "$WEB_DIR/$name"
   echo "    plugin   $name"
 done
 
 # 2) cordis.patch.yml into the web profile dir.
 if [ -f "$HERE/profile/cordis.patch.yml" ]; then
-  ln -sfn "$HERE/profile/cordis.patch.yml" "$WEB_DIR/cordis.patch.yml"
-  echo "    patch    cordis.patch.yml"
+  if [ "$(readlink "$WEB_DIR/cordis.patch.yml" 2>/dev/null || true)" = "$HERE/profile/cordis.patch.yml" ]; then
+    echo "    patch    cordis.patch.yml (already linked)"
+  else
+    ln -sfn "$HERE/profile/cordis.patch.yml" "$WEB_DIR/cordis.patch.yml" 2>/dev/null || cp -f "$HERE/profile/cordis.patch.yml" "$WEB_DIR/cordis.patch.yml"
+    echo "    patch    cordis.patch.yml"
+  fi
 fi
 
 # 3b) Deploy ankifyd + ankify-ai-core into a user-level app share, so Anki and
 #     Raycast share one daemon and one core copy (no per-plugin vendoring).
 ANKIFY_AI_HOME="${ANKIFY_AI_HOME:-$HOME/.local/share/ankify-ai}"
 mkdir -p "$ANKIFY_AI_HOME/logs"
-cp "$HERE/ankifyd/ankifyd.py" "$ANKIFY_AI_HOME/ankifyd.py"
-rm -rf "$ANKIFY_AI_HOME/core"
-cp -R "$HERE/ankify-ai-core" "$ANKIFY_AI_HOME/core"
-echo "    ankifyd  $ANKIFY_AI_HOME/ankifyd.py (copied)"
+if cp "$HERE/ankifyd/ankifyd.py" "$ANKIFY_AI_HOME/ankifyd.py" 2>/dev/null; then
+  rm -rf "$ANKIFY_AI_HOME/core" 2>/dev/null || true
+  cp -R "$HERE/ankify-ai-core" "$ANKIFY_AI_HOME/core" 2>/dev/null || echo "    ankifyd  core copy skipped (permission)"
+  echo "    ankifyd  $ANKIFY_AI_HOME/ankifyd.py (copied)"
+else
+  echo "    ankifyd  copy skipped (permission); not fatal for mode-gate"
+fi
+
+# 3d) Deploy the Anki add-on into the user's Anki addons21 directory.
+#     Same user-level copy approach as ankifyd/core: Anki must load a real
+#     directory from addons21, not a symlink to the repo.
+#     Set ANKI_ADDONS_DIR to override auto-detection; if Anki is not installed,
+#     the step is skipped with a hint instead of failing the whole install.
+ANKI_ADDONS_DIR="${ANKI_ADDONS_DIR:-}"
+if [ -z "$ANKI_ADDONS_DIR" ]; then
+  case "$(uname -s)" in
+    Darwin) ANKI_ADDONS_DIR="$HOME/Library/Application Support/Anki2/addons21" ;;
+    Linux) ANKI_ADDONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Anki2/addons21" ;;
+  esac
+fi
+if [ -n "$ANKI_ADDONS_DIR" ] && [ -d "$ANKI_ADDONS_DIR" ]; then
+  rm -rf "$ANKI_ADDONS_DIR/ankify_ai_auditor" 2>/dev/null || true
+  if cp -R "$HERE/addons21/ankify_ai_auditor" "$ANKI_ADDONS_DIR/ankify_ai_auditor" 2>/dev/null; then
+    echo "    anki     $ANKI_ADDONS_DIR/ankify_ai_auditor (copied)"
+  else
+    echo "    anki     copy skipped (permission); not fatal for mode-gate"
+  fi
+else
+  echo "    anki     addons21 not found; set ANKI_ADDONS_DIR to deploy the Anki plugin (skipped)"
+fi
 
 
 # 3) Agent presets (one dir each) into .agent-presets.
@@ -78,9 +112,15 @@ for dir in "$HERE"/presets/*/; do
   [ -d "$dir" ] || continue
   name="$(basename "$dir")"
   # Replace an existing real dir or stale symlink with a fresh copy.
-  rm -rf "$PRESET_DIR/$name"
-  cp -R "$dir" "$PRESET_DIR/$name"
-  echo "    preset   $name (copied)"
+  if ! rm -rf "$PRESET_DIR/$name" 2>/dev/null; then
+    echo "    preset   $name (skipped: permission to replace existing dir)"
+    continue
+  fi
+  if cp -R "$dir" "$PRESET_DIR/$name" 2>/dev/null; then
+    echo "    preset   $name (copied)"
+  else
+    echo "    preset   $name (copy skipped: permission)"
+  fi
 done
 
 # 3c) Preset actions (one dir each, each containing SKILL.md) into
@@ -91,9 +131,12 @@ mkdir -p "$PRESET_ACTIONS_DIR"
 for dir in "$HERE"/preset-actions/*/; do
   [ -d "$dir" ] || continue
   name="$(basename "$dir")"
-  rm -rf "$PRESET_ACTIONS_DIR/$name"
-  cp -R "$dir" "$PRESET_ACTIONS_DIR/$name"
-  echo "    action   $name (copied)"
+  rm -rf "$PRESET_ACTIONS_DIR/$name" 2>/dev/null || true
+  if cp -R "$dir" "$PRESET_ACTIONS_DIR/$name" 2>/dev/null; then
+    echo "    action   $name (copied)"
+  else
+    echo "    action   $name (copy skipped: permission)"
+  fi
 done
 
 # 4) Docs (*.md, recursive) into DSH_HOME/DOCUMENT, preserving subdirs
@@ -102,8 +145,11 @@ while IFS= read -r src; do
   rel="${src#"$HERE"/document/}"
   dest="$DOC_DIR/$rel"
   mkdir -p "$(dirname "$dest")"
-  ln -sfn "$src" "$dest"
-  echo "    doc      $rel"
+  if [ "$(readlink "$dest" 2>/dev/null || true)" = "$src" ]; then
+    echo "    doc      $rel (already linked)"
+  else
+    ln -sfn "$src" "$dest" 2>/dev/null || echo "    doc      $rel (link skipped: permission)"
+  fi
 done < <(find "$HERE"/document -name '*.md' -type f)
 
 # 4b) Build the mermaid static asset if it is missing, so the cp -R below
@@ -128,9 +174,17 @@ for dir in "$HERE"/packages/*/; do
   [ -d "$dir" ] || continue
   name="$(basename "$dir")"
   # Replace an existing real dir or stale symlink with a fresh copy.
-  rm -rf "$NODE_MODULES_DIR/$name"
-  cp -R "$dir" "$NODE_MODULES_DIR/$name"
-  echo "    package  $name (copied)"
+  if rm -rf "$NODE_MODULES_DIR/$name" 2>/dev/null; then
+    if cp -R "$dir" "$NODE_MODULES_DIR/$name" 2>/dev/null; then
+      echo "    package  $name (copied)"
+    else
+      echo "    package  $name (copy skipped: permission)"
+    fi
+  elif cp -R "$dir/." "$NODE_MODULES_DIR/$name/" 2>/dev/null; then
+    echo "    package  $name (overwritten in place)"
+  else
+    echo "    package  $name (skipped: loaded by a running process; restart DSH then re-run install.sh)"
+  fi
 done
 
 # 6) External plugins declared in plugins/requirements.txt: one `source@version`

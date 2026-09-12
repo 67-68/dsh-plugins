@@ -1,718 +1,54 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+
 import { createFeatureIntentStore } from './feature-intent-store.js';
 import { createGoalEngine } from './goal-engine.js';
 import { createBuiltinGoals } from './goals.js';
+import { createWorkflowRegistry, expandHome, BUILTIN_WORKFLOW_DIR } from './workflows.js';
+import { createProjectExperienceStore, defaultProjectExperienceDir } from './project-experience.js';
+import {
+  createDynamicPlan,
+  staticPlanCurrent,
+  staticPlanPendingCount,
+} from './plans.js';
+import { resolveTransition } from './transitions.js';
+import {
+  IDLE_STATE_ID,
+  IDLE_WORKFLOW_ID,
+  formatCapabilities,
+  loadStateStore,
+  normalizeModelCatalog,
+  normalizeTaskModes,
+  readSessionEntry,
+  readState,
+  saveStateStore,
+  writeState,
+} from './state.js';
+import {
+  ALWAYS_ALLOWED,
+  ALLOWED_WITHOUT_TARGET,
+  KNOWN_WRITE_TOOLS,
+  toolDisposition,
+} from './permissions.js';
+import {
+  classifyCommand,
+  extractCommandVerbs,
+  matchBashDeny,
+  normalizeDenyList,
+  undeclaredBashVerbs,
+} from './bash.js';
 import { modelCatalogText } from './protocols.js';
 
-/**
- * mode-gate phases:
- * - PRESET_ACTION: probe preset actions; no-match falls through to requirement
- *   recognition, match skips straight to IMPLEMENT.
- * - REQUIREMENT_RECOGNITION: merged READ_ONLY + PLAN_ONLY permission plus the
- *   feature-intent reading / appending / protocol submission loop.
- * - IMPLEMENT: the former WRITE_ENABLED permission.
- */
-const PHASES = ['PRESET_ACTION', 'REQUIREMENT_RECOGNITION', 'IMPLEMENT'];
-const DEFAULT_PHASE = 'PRESET_ACTION';
-
-const LEGACY_MODE_TO_PHASE = {
-  READ_ONLY: 'REQUIREMENT_RECOGNITION',
-  PLAN_ONLY: 'REQUIREMENT_RECOGNITION',
-  WRITE_ENABLED: 'IMPLEMENT',
-};
-
-const STATE_FILE = join(homedir(), '.dsh', 'mode-gate-state.json');
-
-/** Default bash deny-list entries; overridable from the Web settings tab. */
-const DEFAULT_BASH_DENY_LIST = [
-  {
-    id: 'deny-web-fetch',
-    commands: ['curl', 'wget'],
-    reason: '禁止使用 curl/wget 抓取网页，请改用 read_url 工具',
-  },
-];
-
-/** User-editable model catalog, persisted top-level in the state file. */
-const DEFAULT_MODEL_CATALOG = [
-  {
-    id: 'deepseek-v4-flash',
-    name: 'DeepSeek-V4-Flash',
-    description: '快速轻量模型，适合简单、明确的机械任务。',
-    provider: 'deepseek-official',
-  },
-  {
-    id: 'deepseek-v4-pro',
-    name: 'DeepSeek-V4-Pro',
-    description: '旗舰模型，适合复杂分析、架构设计与高质量代码。',
-    provider: 'deepseek-official',
-  },
-];
-
-/** task_mode -> default model id. Per-task model_override can override these. */
-const DEFAULT_TASK_MODES = {
-  simple: { model: 'deepseek-v4-flash' },
-  complex: { model: 'deepseek-v4-pro' },
-};
-
-/** Harmless read-only bash built-ins that never need to be declared. */
-const ALWAYS_ALLOWED_BASH_VERBS = new Set(['echo', 'printf', 'pwd', 'cd', 'true', 'false']);
-
-/** Tools that are always allowed regardless of mode / declared target. */
-const ALWAYS_ALLOWED = new Set(['declare_target', 'switch_mode', 'skill_search', 'request_extra', 'dev_tool_search']);
-
-/** Tools allowed without a declared target (besides ALWAYS_ALLOWED). */
-const ALLOWED_WITHOUT_TARGET = new Set([
-  'ask_user_question', 'get_goal', 'todo_write', 'skill_search', 'request_extra', 'dev_tool_search',
+const CONTROL_TOOLS = new Set([
+  'declare_target', 'switch_mode', 'skill_search', 'skill_load', 'request_extra',
+  'dev_tool_search', 'submit_state', 'list_workflows', 'get_workflow_state', 'select_workflow',
 ]);
 
-/** Tools considered safe in READ_ONLY (and therefore PLAN_ONLY too). */
-const READ_ONLY_TOOLS = new Set([
-  'read', 'grep', 'glob', 'skill', 'skill_search', 'skill_load', 'read_image',
-  'web_search', 'list_agents', 'get_goal', 'job_list', 'job_output', 'ask_user_question',
-  'read_url', 'read_url_batch', 'read_url_links', 'read_url_site', 'dev_tool_search',
-  'list_feature_intents', 'get_feature_intent',
-]);
-
-const READ_ONLY_TOOL_GLOBS = ['cordis_inspect_*'];
-
-function matchesReadOnlyToolGlob(name) {
-  return READ_ONLY_TOOL_GLOBS.some((pattern) => {
-    const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
-    return re.test(name);
-  });
-}
-
-/** Tools considered planning-safe on top of READ_ONLY. */
-const PLAN_TOOLS = new Set(['todo_write', 'exit_plan_mode']);
-
-/** Phase-specific prompt lines. */
-const MODE_RULES = {
-  PRESET_ACTION: '- PRESET_ACTION：探测 preset action；只允许 list_preset_actions / submit_preset_action；bash 禁用。',
-  REQUIREMENT_RECOGNITION: '- REQUIREMENT_RECOGNITION：只读 + 规划 + feature intent 工具；bash 仅允许已声明的只读命令；禁止写文件。',
-  IMPLEMENT: '- IMPLEMENT：可写，但危险 bash 命令仍需人工授权；feature_intent 目录仍禁止直接写。',
-};
-
-/** Map a public phase to the permission level used by toolDisposition. */
-function permissionModeForPhase(phase) {
-  return phase === 'IMPLEMENT' ? 'WRITE_ENABLED' : 'PLAN_ONLY';
-}
-
-/** Tool names that are always considered writes when classified by name. */
-const KNOWN_WRITE_TOOLS = new Set([
-  'write', 'edit', 'create', 'apply_patch', 'patch', 'str_replace_editor',
-]);
-
-/**
- * Lightweight shell-command classifier.
- * Splits on top-level pipes / separators, tokenizes each simple command,
- * and classifies by verb and output-redirection targets.
- * Returns 'dangerous', 'mutating', or 'read-only'.
- */
-const MUTATING_VERBS = new Set([
-  'rm', 'mv', 'cp', 'install', 'ln', 'chmod', 'chown', 'chgrp',
-  'touch', 'mkdir', 'rmdir', 'tee', 'truncate',
-]);
-const DANGEROUS_VERBS = new Set(['sudo', 'mkfs', 'dd']);
-const MUTATING_GIT_SUBCOMMANDS = new Set(['add', 'commit', 'mv', 'rm']);
-const DANGEROUS_GIT_SUBCOMMANDS = new Set(['push', 'reset', 'clean']);
-const DOWNLOAD_VERBS = new Set(['curl', 'wget']);
-const SHELL_VERBS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
-const HARMLESS_WRITE_TARGETS = new Set(['&1', '&2']);
-
-/**
- * Shell reserved words. `do`/`then`/`else`/`elif` are skipped when they
- * prefix a body segment (the real command follows them); the other keywords
- * indicate a compound-command header like `for url in ...` and therefore a
- * segment with no simple command verb at all.
- */
-const COMPOUND_HEAD_KEYWORDS = new Set(['for', 'while', 'until', 'if', 'case', 'select', 'coproc', 'function']);
-const BODY_KEYWORDS = new Set(['do', 'then', 'else', 'elif']);
-const SHELL_KEYWORDS = new Set([...COMPOUND_HEAD_KEYWORDS, ...BODY_KEYWORDS, 'done', 'fi', 'esac', 'in']);
-
-function stripOuterQuotes(token) {
-  if (token.length >= 2 && ((token[0] === "'" && token[token.length - 1] === "'") || (token[0] === '"' && token[token.length - 1] === '"'))) {
-    return token.slice(1, -1);
-  }
-  return token;
-}
-
-function findParenEnd(command, openParenIndex) {
-  let depth = 1;
-  let quote = null;
-  let escaped = false;
-  for (let i = openParenIndex + 1; i < command.length; i += 1) {
-    const ch = command[i];
-    if (escaped) { escaped = false; continue; }
-    if (ch === '\\') { escaped = true; continue; }
-    if (quote !== null) {
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') { quote = ch; continue; }
-    if (ch === '(') { depth += 1; continue; }
-    if (ch === ')') {
-      depth -= 1;
-      if (depth === 0) return i;
-    }
-  }
-  return command.length - 1;
-}
-
-function findBacktickEnd(command, openIndex) {
-  let escaped = false;
-  for (let i = openIndex + 1; i < command.length; i += 1) {
-    const ch = command[i];
-    if (escaped) { escaped = false; continue; }
-    if (ch === '\\') { escaped = true; continue; }
-    if (ch === '`') return i;
-  }
-  return command.length - 1;
-}
-
-/** Locate a `<<`/`<<-` heredoc body. Returns null when no delimiter follows. */
-function readHeredocRange(command, opIndex) {
-  let p = opIndex + 2;
-  if (command[p] === '-') p += 1;
-  while (p < command.length && (command[p] === ' ' || command[p] === '\t')) p += 1;
-  const tokenStart = p;
-  while (p < command.length && !/[\s;|&<>]/.test(command[p])) p += 1;
-  if (p === tokenStart) return null;
-  const delimiter = stripOuterQuotes(command.slice(tokenStart, p));
-  if (!delimiter) return null;
-
-  const newline = command.indexOf('\n', opIndex);
-  if (newline === -1) {
-    return { bodyStart: command.length, bodyEnd: command.length - 1, scanResume: command.length };
-  }
-
-  const bodyStart = newline + 1;
-  let lineStart = bodyStart;
-  for (let pos = bodyStart; pos <= command.length; pos += 1) {
-    if (pos === command.length || command[pos] === '\n') {
-      let line = command.slice(lineStart, pos);
-      if (line.endsWith('\r')) line = line.slice(0, -1);
-      if (line.replace(/^\t+/, '') === delimiter) {
-        return { bodyStart, bodyEnd: lineStart - 1, scanResume: pos };
-      }
-      if (pos === command.length) break;
-      lineStart = pos + 1;
-    }
-  }
-  return { bodyStart, bodyEnd: command.length - 1, scanResume: command.length };
-}
-
-/** Mask heredoc bodies so their content is never parsed as shell segments. */
-function maskHeredocs(command) {
-  const chars = command.split('');
-  let quote = null;
-  let escaped = false;
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i];
-    if (escaped) { escaped = false; continue; }
-    if (ch === '\\') { escaped = true; continue; }
-    if (quote !== null) {
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') { quote = ch; continue; }
-    if (ch === '$' && command[i + 1] === '(') {
-      i = findParenEnd(command, i + 1);
-      continue;
-    }
-    if (ch === '`') {
-      i = findBacktickEnd(command, i);
-      continue;
-    }
-    if (ch === '<' && command[i + 1] === '<') {
-      const range = readHeredocRange(command, i);
-      if (range !== null) {
-        for (let j = range.bodyStart; j <= range.bodyEnd; j += 1) {
-          if (chars[j] !== '\n') chars[j] = ' ';
-        }
-        i = range.scanResume;
-      }
-    }
-  }
-  return chars.join('');
-}
-
-/** Return the inner text of every `$(...)` / backtick substitution in a word. */
-function commandSubstitutions(word) {
-  const substitutions = [];
-  for (let i = 0; i < word.length; i += 1) {
-    if (word[i] === '$' && word[i + 1] === '(') {
-      const end = findParenEnd(word, i + 1);
-      if (end > i + 2) substitutions.push(word.slice(i + 2, end));
-      i = end;
-    } else if (word[i] === '`') {
-      const end = findBacktickEnd(word, i);
-      if (end > i + 1) substitutions.push(word.slice(i + 1, end));
-      i = end;
-    }
-  }
-  return substitutions;
-}
-
-
-function splitShellSegments(command) {
-  const masked = maskHeredocs(String(command || ''));
-  const segments = [];
-  let current = '';
-  let quote = null;
-  let escaped = false;
-  const flush = () => {
-    const seg = current.trim();
-    if (seg.length > 0) segments.push(seg);
-    current = '';
-  };
-  for (let i = 0; i < masked.length; i += 1) {
-    const ch = masked[i];
-    if (escaped) { current += ch; escaped = false; continue; }
-    if (ch === '\\') { current += ch; escaped = true; continue; }
-    if (quote !== null) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
-    if (ch === '$' && masked[i + 1] === '(') {
-      const end = findParenEnd(masked, i + 1);
-      current += masked.slice(i, end + 1);
-      i = end;
-      continue;
-    }
-    if (ch === '`') {
-      const end = findBacktickEnd(masked, i);
-      current += masked.slice(i, end + 1);
-      i = end;
-      continue;
-    }
-    if (ch === '|' && masked[i + 1] === '|') { flush(); i += 1; continue; }
-    if (ch === '&' && masked[i + 1] === '&') { flush(); i += 1; continue; }
-    if (ch === '|') { flush(); continue; }
-    if (ch === ';') { flush(); continue; }
-    current += ch;
-  }
-  flush();
-  return segments;
-}
-
-function tokenizeSimpleCommand(segment) {
-  const tokens = [];
-  let current = '';
-  let quote = null;
-  let escaped = false;
-  const flush = () => {
-    if (current.length > 0) tokens.push(stripOuterQuotes(current));
-    current = '';
-  };
-  for (let i = 0; i < segment.length; i += 1) {
-    const ch = segment[i];
-    if (escaped) { current += ch; escaped = false; continue; }
-    if (ch === '\\') { current += ch; escaped = true; continue; }
-    if (quote !== null) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
-    if (ch === '$' && segment[i + 1] === '(') {
-      const end = findParenEnd(segment, i + 1);
-      current += segment.slice(i, end + 1);
-      i = end;
-      continue;
-    }
-    if (ch === '`') {
-      const end = findBacktickEnd(segment, i);
-      current += segment.slice(i, end + 1);
-      i = end;
-      continue;
-    }
-    if (ch === ' ' || ch === '\t') { flush(); continue; }
-    current += ch;
-  }
-  flush();
-  return tokens;
-}
-
-function redirectOpOf(token) {
-  return /^(?:(\d+|&)>>?|>>?|<<?|<<<|&>|&>>)$/.test(token) ? token : null;
-}
-
-function isHarmlessWriteTarget(target) {
-  if (target === void 0) return false;
-  const t = String(target).trim();
-  return HARMLESS_WRITE_TARGETS.has(t) || t.startsWith('/dev/');
-}
-
-/** First simple command word in a tokenized segment, ignoring shell syntax. */
-function firstCommandWord(tokens) {
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    const op = redirectOpOf(token);
-    if (op !== null) {
-      if (tokens[i + 1] !== void 0) i += 1;
-      continue;
-    }
-    if (token.includes('=')) continue;
-    const base = token.split('/').pop();
-    if (base === 'time') continue;
-    if (COMPOUND_HEAD_KEYWORDS.has(base)) return null;
-    if (BODY_KEYWORDS.has(base)) continue;
-    if (SHELL_KEYWORDS.has(base)) return null;
-    return base;
-  }
-  return null;
-}
-
-/** Worst safety classification among all command substitutions in `tokens`. */
-function worstSubstitutionKind(tokens) {
-  let worst = 'read-only';
-  for (const token of tokens) {
-    for (const inner of commandSubstitutions(token)) {
-      const kind = classifyCommand(inner);
-      if (kind === 'dangerous') return 'dangerous';
-      if (kind === 'mutating') worst = 'mutating';
-    }
-  }
-  return worst;
-}
-
-function analyzeSimpleCommand(tokens) {
-  let commandWord = null;
-  let commandWordIndex = -1;
-  const commandTokens = [];
-  let mutatingRedirect = false;
-  let suppressCommandWord = false;
-
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    const op = redirectOpOf(token);
-
-    if (op !== null) {
-      const target = tokens[i + 1];
-      if (op === '<' || op === '<<' || op === '<<<') {
-        if (target !== void 0) i += 1;
-        continue;
-      }
-      if (op.startsWith('2') && isHarmlessWriteTarget(target)) {
-        if (target !== void 0) i += 1;
-        continue;
-      }
-      if (!op.startsWith('2') && isHarmlessWriteTarget(target)) {
-        if (target !== void 0) i += 1;
-        continue;
-      }
-      mutatingRedirect = true;
-      if (target !== void 0) i += 1;
-      continue;
-    }
-
-    commandTokens.push(token);
-
-    if (commandWord === null && !suppressCommandWord) {
-      if (token.includes('=')) continue;
-      const base = token.split('/').pop();
-      if (base === 'time') continue;
-      if (COMPOUND_HEAD_KEYWORDS.has(base)) { suppressCommandWord = true; continue; }
-      if (BODY_KEYWORDS.has(base)) continue;
-      if (SHELL_KEYWORDS.has(base)) { suppressCommandWord = true; continue; }
-      commandWord = token;
-      commandWordIndex = commandTokens.length - 1;
-    }
-  }
-
-  const subKind = worstSubstitutionKind(commandTokens);
-
-  if (commandWord === null) return { kind: subKind };
-
-  const base = commandWord.split('/').pop();
-
-  if (DANGEROUS_VERBS.has(base)) return { kind: 'dangerous' };
-  if (base === 'chmod' && commandTokens.includes('-R') && commandTokens.includes('777')) return { kind: 'dangerous' };
-  if (base === 'rm' && commandTokens.includes('-rf') && commandTokens.includes('/')) return { kind: 'dangerous' };
-  if (MUTATING_VERBS.has(base)) return { kind: subKind === 'dangerous' ? 'dangerous' : 'mutating' };
-
-  if (base === 'git') {
-    const sub = commandTokens[commandWordIndex + 1];
-    if (DANGEROUS_GIT_SUBCOMMANDS.has(sub)) return { kind: 'dangerous' };
-    if (MUTATING_GIT_SUBCOMMANDS.has(sub)) return { kind: 'mutating' };
-  }
-
-  if (mutatingRedirect) return { kind: subKind === 'dangerous' ? 'dangerous' : 'mutating' };
-  return { kind: subKind };
-}
-
-function classifyCommand(command) {
-  const cmd = String(command || '');
-  const segments = splitShellSegments(cmd);
-
-  const pipeline = segments.map((segment) => firstCommandWord(tokenizeSimpleCommand(segment))).filter(Boolean).join('|');
-
-  const pipelineCommands = pipeline.split('|');
-  if (pipelineCommands.length > 1 && DOWNLOAD_VERBS.has(pipelineCommands[0]) && SHELL_VERBS.has(pipelineCommands[pipelineCommands.length - 1])) {
-    return 'dangerous';
-  }
-
-  for (const segment of segments) {
-    const result = analyzeSimpleCommand(tokenizeSimpleCommand(segment));
-    if (result.kind === 'dangerous') return 'dangerous';
-    if (result.kind === 'mutating') return 'mutating';
-  }
-
-  return 'read-only';
-}
-
-/** Return the command verb for each top-level shell segment, including verbs inside `$(...)`. */
-function extractCommandVerbs(command) {
-  const segments = splitShellSegments(String(command || ''));
-  const verbs = [];
-  for (const segment of segments) {
-    const tokens = tokenizeSimpleCommand(segment);
-    const outer = firstCommandWord(tokens);
-    if (outer !== null) verbs.push(outer);
-    for (const token of tokens) {
-      for (const inner of commandSubstitutions(token)) {
-        for (const verb of extractCommandVerbs(inner)) verbs.push(verb);
-      }
-    }
-  }
-  return [...new Set(verbs)];
-}
-
-/** Normalize a bash deny-list payload. `undefined` means "use the built-in default". */
-function normalizeDenyList(value) {
-  if (value === void 0) return DEFAULT_BASH_DENY_LIST.map((entry) => ({ ...entry, commands: [...entry.commands] }));
-  if (!Array.isArray(value)) return DEFAULT_BASH_DENY_LIST.map((entry) => ({ ...entry, commands: [...entry.commands] }));
-  const out = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== 'object') continue;
-    const commands = Array.isArray(entry.commands)
-      ? entry.commands.filter((c) => typeof c === 'string' && c.trim()).map((c) => c.trim())
-      : (typeof entry.command === 'string' && entry.command.trim() ? [entry.command.trim()] : []);
-    if (commands.length === 0) continue;
-    out.push({
-      id: typeof entry.id === 'string' && entry.id ? entry.id : `deny-${out.length + 1}`,
-      commands,
-      reason: typeof entry.reason === 'string' ? entry.reason : '',
-    });
-  }
-  return out;
-}
-
-function stringArray(value) {
-  return Array.isArray(value)
-    ? value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
-    : [];
-}
-
-function readBashDenyList() {
-  return loadStateStore().bashDenyList;
-}
-
-function saveBashDenyList(entries) {
-  const store = loadStateStore();
-  store.bashDenyList = normalizeDenyList(entries);
-  saveStateStore(store);
-  return store.bashDenyList;
-}
-
-function matchBashDeny(command, denyList) {
-  const verbs = extractCommandVerbs(command);
-  for (const entry of denyList) {
-    for (const banned of entry.commands) {
-      if (verbs.includes(banned)) return entry;
-    }
-  }
-  return null;
-}
-
-function undeclaredBashVerbs(command, declaredBash) {
-  const set = new Set(declaredBash);
-  return extractCommandVerbs(command).filter((verb) => !set.has(verb) && !ALWAYS_ALLOWED_BASH_VERBS.has(verb));
-}
-
-/**
- * Load the durable mode-gate state from `~/.dsh/mode-gate-state.json`.
- * The shape is `{ sessions: { [sessionId]: { mode, target, skills, bash } }, bashDenyList }`.
- * State is keyed by session id so a resumed session folds back to the
- * mode/target/capabilities it had; bashDenyList is global.
- * Session-log custom events are NOT used: the harness's persistence read path
- * only accepts its own known event types and refuses logs containing unknown
- * non-ignorable types (SessionFormatUnsupportedError).
- */
-function normalizeModelCatalog(value) {
-  if (!Array.isArray(value)) return DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
-  const out = [];
-  const seen = new Set();
-  for (const entry of value) {
-    if (!entry || typeof entry !== 'object') continue;
-    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
-    if (id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
-    out.push({
-      id,
-      name: typeof entry.name === 'string' ? entry.name.trim() : id,
-      description: typeof entry.description === 'string' ? entry.description.trim() : '',
-      provider: typeof entry.provider === 'string' && entry.provider.trim() ? entry.provider.trim() : 'deepseek-official',
-    });
-  }
-  return out.length > 0 ? out : DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
-}
-
-function normalizeTaskModes(value) {
-  const source = value && typeof value === 'object' ? value : DEFAULT_TASK_MODES;
-  const out = {};
-  for (const mode of ['simple', 'complex']) {
-    const entry = source[mode];
-    out[mode] = {
-      model: entry && typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : DEFAULT_TASK_MODES[mode].model,
-    };
-  }
-  return out;
-}
-
-function loadStateStore() {
-  try {
-    if (!existsSync(STATE_FILE)) {
-      return {
-        sessions: {},
-        bashDenyList: normalizeDenyList(),
-        modelCatalog: normalizeModelCatalog(),
-        taskModes: normalizeTaskModes(),
-      };
-    }
-    const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-    if (parsed && typeof parsed === 'object') {
-      return {
-        sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
-        bashDenyList: normalizeDenyList(parsed.bashDenyList),
-        modelCatalog: normalizeModelCatalog(parsed.modelCatalog),
-        taskModes: normalizeTaskModes(parsed.taskModes),
-      };
-    }
-    return {
-      sessions: {},
-      bashDenyList: normalizeDenyList(),
-      modelCatalog: normalizeModelCatalog(),
-      taskModes: normalizeTaskModes(),
-    };
-  } catch (_err) {
-    return {
-      sessions: {},
-      bashDenyList: normalizeDenyList(),
-      modelCatalog: normalizeModelCatalog(),
-      taskModes: normalizeTaskModes(),
-    };
-  }
-}
-
-function saveStateStore(store) {
-  try {
-    mkdirSync(join(homedir(), '.dsh'), { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify(store, null, 2));
-  } catch (err) {
-    console.log('[dsh-mode-gate] state save failed:', err && err.message);
-  }
-}
-
-function normalizePhase(value) {
-  const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
-  if (PHASES.includes(normalized)) return normalized;
-  if (LEGACY_MODE_TO_PHASE[normalized]) return LEGACY_MODE_TO_PHASE[normalized];
-  return DEFAULT_PHASE;
-}
-
-function readState(agent, fallbackPhase) {
-  const sessionId = agent?.session?.id;
-  const store = loadStateStore();
-  const entry = sessionId !== void 0 ? store.sessions[sessionId] : void 0;
-  const phase = normalizePhase((entry && (entry.phase || entry.mode)) || fallbackPhase || DEFAULT_PHASE);
-  return {
-    phase,
-    mode: phase,
-    target: entry && entry.target ? entry.target : null,
-    skills: stringArray(entry && entry.skills),
-    bash: stringArray(entry && entry.bash),
-    goal: entry && entry.goal ? entry.goal : null,
-    selectedModel: entry && entry.selectedModel ? entry.selectedModel : null,
-    featureIntentFile: entry && entry.featureIntentFile ? entry.featureIntentFile : null,
-    taskMode: entry && entry.taskMode ? entry.taskMode : null,
-    requirementSummary: entry && entry.requirementSummary ? entry.requirementSummary : null,
-    chosenPresetAction: entry && entry.chosenPresetAction ? entry.chosenPresetAction : null,
-    modelCatalog: store.modelCatalog,
-    taskModes: store.taskModes,
-  };
-}
-
-function writeState(agent, patch) {
-  const sessionId = agent?.session?.id;
-  if (sessionId === void 0) return;
-  const store = loadStateStore();
-  const current = store.sessions[sessionId] || { phase: DEFAULT_PHASE, target: null };
-  store.sessions[sessionId] = { ...current, ...patch };
-  saveStateStore(store);
-}
-
-function toolDisposition(name, mode) {
-  if (ALWAYS_ALLOWED.has(name)) return { kind: 'allow' };
-  if (mode === 'READ_ONLY') {
-    if (READ_ONLY_TOOLS.has(name) || matchesReadOnlyToolGlob(name)) return { kind: 'allow' };
-    return { kind: 'deny', reason: `当前模式为 READ_ONLY，工具 ${name} 不在只读白名单内。` };
-  }
-  if (mode === 'PLAN_ONLY') {
-    if (READ_ONLY_TOOLS.has(name) || matchesReadOnlyToolGlob(name) || PLAN_TOOLS.has(name)) return { kind: 'allow' };
-    return { kind: 'deny', reason: `当前模式为 PLAN_ONLY，工具 ${name} 不允许执行。` };
-  }
-  return { kind: 'allow' };
-}
-
-/** Decide a bash/pwsh command in the current mode. */
-function bashDisposition(command, mode, declaredBash, denyList) {
-  const deny = matchBashDeny(command, denyList);
-  if (deny) {
-    return { kind: 'deny', reason: deny.reason || `命令 ${deny.commands.join('/')} 已被禁止。` };
-  }
-
-  const missing = undeclaredBashVerbs(command, declaredBash);
-  if (missing.length) {
-    return {
-      kind: 'deny',
-      reason: `当前 bash 命令使用了未声明的命令动词：${missing.join(', ')}。完整命令：${command}。请调用 dev_tool_search（或 request_extra）申请额外 bash 命令，或在 declare_target 中补充声明。`,
-    };
-  }
-
-  const kind = classifyCommand(command);
-  if (mode === 'READ_ONLY' || mode === 'PLAN_ONLY') {
-    if (kind === 'read-only') return { kind: 'allow' };
-    return { kind: 'deny', reason: `当前模式为 ${mode}，禁止执行写入/危险命令：${command}` };
-  }
-  if (kind === 'dangerous') {
-    return { kind: 'ask', reason: `检测到危险命令，需要人工授权：${command}` };
-  }
-  return { kind: 'allow' };
-}
-
-function formatCapabilities(state) {
-  return [
-    `当前阶段：${state.phase || state.mode}`,
-    `当前 Target：${state.target ? state.target.target : '未声明'}`,
-    `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
-    `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
-    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换阶段）、dev_tool_search / request_extra（申请额外 skill/bash）。',
-    '要申请额外 skill 或 bash：dev_tool_search({ skills: [...], bash: [...] })（或 request_extra 同参），会作为问题向用户申报。',
-  ].join('\n');
-}
-
-/**
- * No-decorator Remote marker shim: feeds `Remote(name)` a hand-built method
- * context so the marker lands in typert's private WeakMap, exactly like the
- * TS decorator output would. Same helper as dsh-music-alert uses.
- */
+/** No-decorator Remote marker shim. */
 function markRemoteMethods(cls, methodNames) {
   const initializers = [];
   for (const name of methodNames) {
@@ -722,43 +58,106 @@ function markRemoteMethods(cls, methodNames) {
       static: false,
       private: false,
       access: { has: (o) => name in o, get: (o) => o[name] },
-      addInitializer: (fn) => {
-        initializers.push(fn);
-      },
+      addInitializer: (fn) => { initializers.push(fn); },
     });
   }
-  const proto = cls.prototype;
-  const probe = Object.create(proto);
+  const probe = Object.create(cls.prototype);
   for (const fn of initializers) fn.call(probe);
+}
+
+function readBashDenyList() {
+  return normalizeDenyList(loadStateStore().bashDenyList);
+}
+
+function pathLikeArgs(args) {
+  if (!args || typeof args !== 'object') return [];
+  const out = [];
+  for (const key of ['path', 'file_path', 'filePath', 'file', 'target', 'name']) {
+    if (typeof args[key] === 'string') out.push(args[key]);
+  }
+  return out;
+}
+
+function isFeatureIntentDirectWrite(name, args, dir) {
+  if (name === 'bash' || name === 'pwsh') {
+    const command = String((args && args.command) || '');
+    if (!command.includes(dir)) return false;
+    const kind = classifyCommand(command);
+    return kind === 'mutating' || kind === 'dangerous';
+  }
+  if (!KNOWN_WRITE_TOOLS.has(name) && name !== 'str_replace_editor') return false;
+  return pathLikeArgs(args).some((p) => p.includes(dir));
+}
+
+function workspaceOf(agent, fallback) {
+  const cwd = agent?.session?.header?.cwd;
+  return typeof cwd === 'string' && cwd.length > 0 ? cwd : fallback;
 }
 
 /** Remote service exposing durable mode-gate state and settings payloads. */
 class ModeGateGateway extends TypertRemoteService {
   static inject = [];
-  constructor(ctx) {
+  constructor(ctx, options) {
     super(ctx, 'modeGate');
+    this.options = options || {};
   }
   async getState(args) {
     const sessionId = args && args.sessionId;
+    const entry = readSessionEntry(sessionId);
     const store = loadStateStore();
-    const entry = typeof sessionId === 'string' ? store.sessions[sessionId] : void 0;
-    const phase = normalizePhase((entry && (entry.phase || entry.mode)) || DEFAULT_PHASE);
     return {
-      phase,
-      mode: phase,
-      target: entry && entry.target ? entry.target : null,
-      goal: entry && entry.goal ? entry.goal : null,
-      selectedModel: entry && entry.selectedModel ? entry.selectedModel : null,
-      featureIntentFile: entry && entry.featureIntentFile ? entry.featureIntentFile : null,
-      chosenPresetAction: entry && entry.chosenPresetAction ? entry.chosenPresetAction : null,
+      workflowId: entry.workflowId,
+      phase: entry.phase,
+      mode: entry.phase,
+      target: entry.target,
+      goal: entry.goal,
+      staticPlan: entry.staticPlan,
+      dynamicPlan: entry.dynamicPlan,
+      loopMemory: entry.loopMemory,
+      selectedModel: entry.selectedModel,
+      featureIntentFile: entry.featureIntentFile,
+      chosenPresetAction: entry.chosenPresetAction,
+      workspace: entry.workspace || null,
+      modelCatalog: store.modelCatalog,
     };
+  }
+  async getWorkflows(args) {
+    const sessionId = args && args.sessionId;
+    const entry = readSessionEntry(sessionId);
+    const registry = this.options.registryForWorkspace(entry.workspace || this.options.defaultWorkspace || null);
+    return {
+      workspace: entry.workspace || this.options.defaultWorkspace || null,
+      workflows: registry.listForModal().map((wf) => ({
+        id: wf.id,
+        label: wf.label,
+        description: wf.description,
+        ui: wf.ui || {},
+        startState: wf.startState,
+      })),
+    };
+  }
+  async selectWorkflow(args) {
+    const sessionId = args && args.sessionId;
+    const workflowId = args && args.workflowId;
+    const stateId = (args && args.stateId) || null;
+    const store = loadStateStore();
+    const entry = readSessionEntry(sessionId);
+    const registry = this.options.registryForWorkspace(entry.workspace || this.options.defaultWorkspace || null);
+    const wf = registry.get(workflowId);
+    if (!wf) return { ok: false, error: `未知工作流 ${String(workflowId)}` };
+    const start = stateId || wf.startState;
+    store.sessions[sessionId] = { ...entry, workflowId, phase: start, mode: start, goal: null, target: null };
+    saveStateStore(store);
+    return { ok: true, workflowId, state: start };
   }
   async getBashDenyList() {
     return { entries: readBashDenyList() };
   }
   async setBashDenyList(args) {
-    const entries = saveBashDenyList(args && args.entries);
-    return { entries };
+    const store = loadStateStore();
+    store.bashDenyList = normalizeDenyList(args && args.entries);
+    saveStateStore(store);
+    return { entries: store.bashDenyList };
   }
   async getModelCatalog() {
     return { entries: loadStateStore().modelCatalog };
@@ -780,13 +179,10 @@ class ModeGateGateway extends TypertRemoteService {
   }
 }
 markRemoteMethods(ModeGateGateway, [
-  'getState',
-  'getBashDenyList',
-  'setBashDenyList',
-  'getModelCatalog',
-  'setModelCatalog',
-  'getTaskModes',
-  'setTaskModes',
+  'getState', 'getWorkflows', 'selectWorkflow',
+  'getBashDenyList', 'setBashDenyList',
+  'getModelCatalog', 'setModelCatalog',
+  'getTaskModes', 'setTaskModes',
 ]);
 
 export default {
@@ -794,41 +190,49 @@ export default {
   inject: ['tools', 'systemPrompt', 'skills'],
 
   apply(ctx, config) {
-    const defaultPhase = PHASES.includes(config && config.defaultPhase)
-      ? config.defaultPhase
-      : DEFAULT_PHASE;
+    const log = (msg) => console.log(`[dsh-mode-gate] ${msg}`);
+    const cfg = config || {};
 
-    const expandHome = (path) => {
-      if (typeof path !== 'string' || path.length === 0) return path;
-      if (path === '~') return homedir();
-      if (path.startsWith('~/')) return join(homedir(), path.slice(2));
-      return path;
-    };
-
+    const globalDefaultIntentDir = join(homedir(), '.dsh', 'feature_intents');
     const featureIntentDir = expandHome(
-      typeof (config && config.featureIntentDir) === 'string' && config.featureIntentDir.trim()
-        ? config.featureIntentDir.trim()
-        : join(homedir(), '.dsh', 'DOCUMENT', 'feature_intents'),
+      typeof cfg.featureIntentDir === 'string' && cfg.featureIntentDir.trim()
+        ? cfg.featureIntentDir.trim()
+        : globalDefaultIntentDir,
     );
     const presetActionDir = expandHome(
-      typeof (config && config.presetActionDir) === 'string' && config.presetActionDir.trim()
-        ? config.presetActionDir.trim()
+      typeof cfg.presetActionDir === 'string' && cfg.presetActionDir.trim()
+        ? cfg.presetActionDir.trim()
         : join(homedir(), '.dsh', 'preset-actions'),
+    );
+    const defaultWorkspace = dirname(resolve(featureIntentDir));
+    const projectExperienceDir = expandHome(
+      typeof cfg.projectExperienceDir === 'string' && cfg.projectExperienceDir.trim()
+        ? cfg.projectExperienceDir.trim()
+        : (defaultProjectExperienceDir(featureIntentDir)),
+    );
+    const globalWorkflowDir = expandHome(
+      typeof cfg.workflowsDir === 'string' && cfg.workflowsDir.trim()
+        ? cfg.workflowsDir.trim()
+        : join(homedir(), '.dsh', 'workflows'),
     );
 
     const featureIntents = createFeatureIntentStore(featureIntentDir);
-    const log = (msg) => console.log(`[dsh-mode-gate] ${msg}`);
+    const projectExperience = createProjectExperienceStore(projectExperienceDir);
+    const workflowRegistry = createWorkflowRegistry({
+      builtinDir: BUILTIN_WORKFLOW_DIR,
+      globalDir: globalWorkflowDir,
+      workspaceDir: (workspace) => (workspace ? join(workspace, 'workflows') : null),
+      log,
+    });
+    const registryForWorkspace = (workspace) => workflowRegistry.forWorkspace(workspace || defaultWorkspace);
 
-    let presetActionSkills = [];
+    function registryFor(agent) {
+      return registryForWorkspace(workspaceOf(agent, defaultWorkspace));
+    }
 
+    // ── preset actions ───────────────────────────────────────────────────
     function parsePresetActionMeta(content) {
-      const meta = {
-        description: '',
-        match: '',
-        model: 'deepseek-v4-pro',
-        provider: 'deepseek-official',
-        reasoningEffort: '',
-      };
+      const meta = { description: '', match: '', model: 'deepseek-v4-pro', provider: 'deepseek-official', reasoningEffort: '' };
       if (typeof content !== 'string') return meta;
       const marker = /<!--\s*mode-gate(?:-json)?:\s*(\{[\s\S]*?\})\s*-->/.exec(content);
       if (marker) {
@@ -841,8 +245,8 @@ export default {
             if (typeof parsed.provider === 'string') meta.provider = parsed.provider.trim();
             if (typeof parsed.reasoning_effort === 'string') meta.reasoningEffort = parsed.reasoning_effort.trim();
           }
-        } catch (_err) {
-          log(`preset action 元数据 JSON 解析失败：${_err && _err.message}`);
+        } catch (err) {
+          log(`preset action 元数据 JSON 解析失败：${(err && err.message) || err}`);
         }
       }
       return meta;
@@ -869,12 +273,11 @@ export default {
         const meta = parsePresetActionMeta(content);
         const firstHeading = content.split(/\r?\n/).find((line) => /^#\s+/.test(line.trim()));
         const title = firstHeading ? firstHeading.trim().replace(/^#\s+/, '') : dirent.name;
-        const description = meta.description || `${title}（preset action）`;
         out.push({
           id: dirent.name,
           name: `preset-action-${dirent.name}`,
           title,
-          description,
+          description: meta.description || `${title}（preset action）`,
           match: meta.match,
           provider: meta.provider,
           model: meta.model,
@@ -886,232 +289,277 @@ export default {
       return out;
     }
 
-    function registerPresetActionSkills() {
-      for (const skill of presetActionSkills) {
-        try {
-          ctx.skills.register({
-            name: skill.name,
-            description: skill.description,
-            source: 'preset-action',
-            invocation: { modelInvocable: false, userInvocable: false },
-            content: skill.content,
-          });
-        } catch (err) {
-          log(`注册 preset action skill "${skill.name}" 失败：${(err && err.message) || err}`);
-        }
+    const presetActionSkills = collectPresetActionSkills();
+    for (const skill of presetActionSkills) {
+      try {
+        ctx.skills.register({
+          name: skill.name,
+          description: skill.description,
+          source: 'preset-action',
+          invocation: { modelInvocable: false, userInvocable: false },
+          content: skill.content,
+        });
+      } catch (err) {
+        log(`注册 preset action skill "${skill.name}" 失败：${(err && err.message) || err}`);
       }
     }
 
-    presetActionSkills = collectPresetActionSkills();
-    registerPresetActionSkills();
+    try {
+      ctx.skills.register({
+        name: 'project-experience',
+        description: '一次性读取项目 project-experience 的系统拓扑、血泪法则、核心状态树。',
+        source: 'mode-gate',
+        invocation: { modelInvocable: true, userInvocable: true },
+        content: [
+          '# project-experience',
+          '',
+          '调用 `read_project_experience` 工具一次性获取当前项目的 intro / 系统拓扑 / 血泪法则 / 核心状态树。',
+          '省略 `project` 参数时会自动选择唯一项目，或在多个项目时列出候选。',
+        ].join('\n'),
+      });
+    } catch (err) {
+      log(`注册 project-experience skill 失败：${(err && err.message) || err}`);
+    }
 
-    const goalEngine = createGoalEngine({
-      goals: createBuiltinGoals(),
-      log,
-    });
+    // ── goal engine ──────────────────────────────────────────────────────
+    const goalEngine = createGoalEngine({ goals: createBuiltinGoals(), log });
 
-    function envFor(agent) {
-      const state = readState(agent, defaultPhase);
+    function envFor(agent, state) {
       return {
         featureIntents,
-        modelCatalog: state.modelCatalog,
-        taskModes: state.taskModes,
+        projectExperience,
         presetActionSkills,
+        registry: registryFor(agent),
+        workspace: workspaceOf(agent, defaultWorkspace),
+        modelCatalog: state ? state.modelCatalog : loadStateStore().modelCatalog,
+        taskModes: state ? state.taskModes : loadStateStore().taskModes,
         agent,
         ctx,
+        log,
       };
     }
 
-    async function activateGoal(agent, goalId) {
-      const def = goalEngine.get(goalId);
-      if (!def) return { prompt: '', messages: [], statePatch: {} };
-      const result = await goalEngine.activate(goalId, envFor(agent));
-      const patch = { ...(result.statePatch || {}) };
-      if (def.phase) patch.phase = normalizePhase(def.phase);
-      writeState(agent, patch);
+    async function activateStateGoal(agent, workflowId, stateId) {
+      const state = readState(agent);
+      const registry = registryFor(agent);
+      const stateDef = registry.stateOf(workflowId, stateId);
+      const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
+      const basePatch = {
+        workflowId,
+        phase: stateId,
+        mode: stateId,
+        workspace: workspaceOf(agent, defaultWorkspace),
+        dynamicPlan: { scope: 'state', stateId, items: [], updatedAt: Date.now() },
+      };
+      if (!goalRef) {
+        writeState(agent, { ...basePatch, goal: null });
+        return { prompt: (stateDef && stateDef.prompt) || '', messages: [] };
+      }
+      const result = await goalEngine.activate(goalRef, envFor(agent, state), state);
+      writeState(agent, { ...basePatch, ...result.statePatch });
       return result;
     }
 
-    async function applyTransition(agent, transition) {
-      if (!transition) return null;
-      const patch = { ...(transition.statePatch || {}) };
-      if (transition.nextPhase) patch.phase = normalizePhase(transition.nextPhase);
-      if (transition.nextGoal) {
-        writeState(agent, patch);
-        return activateGoal(agent, transition.nextGoal);
+    /** Apply a raw goal result, resolve config transitions, activate the next state. */
+    async function completeGoal(agent, rawResult) {
+      const before = readState(agent);
+      const patch = { ...(rawResult.statePatch || {}) };
+      if (rawResult.prompt) {
+        patch.goal = { ...(before.goal || {}), prompt: rawResult.prompt, status: 'active' };
       }
-      patch.goal = null;
       writeState(agent, patch);
-      return transition;
-    }
-
-    async function saveDefaultModelSelection(model) {
-      const service = ctx.get('agentDefaultModel');
-      if (!service || typeof service.saveSelection !== 'function') return false;
-      try {
-        await service.saveSelection({
-          provider: model.provider || 'deepseek-official',
-          model: model.model,
-          ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}),
+      const state = readState(agent);
+      const registry = registryFor(agent);
+      const stateDef = registry.stateOf(state.workflowId, state.phase);
+      const wf = registry.get(state.workflowId);
+      const signal = rawResult.signal || {};
+      const { nextWorkflow, nextState, loopIncrement, complete } = resolveTransition({
+        state,
+        stateDef,
+        workflowDef: wf,
+        signal,
+      });
+      if (loopIncrement) {
+        const memory = state.loopMemory || { iteration: 0, blocks: [], updatedAt: 0 };
+        const iteration = (memory.iteration || 0) + 1;
+        writeState(agent, {
+          loopMemory: { ...memory, iteration, updatedAt: Date.now() },
+          goal: state.goal ? { ...state.goal, iteration } : null,
         });
-        return true;
-      } catch (err) {
-        log(`保存默认模型失败：${(err && err.message) || err}`);
-        return false;
       }
+      writeState(agent, {
+        workflowId: nextWorkflow,
+        phase: nextState,
+        mode: nextState,
+        goal: null,
+        dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
+      });
+      return activateStateGoal(agent, nextWorkflow, nextState);
     }
 
-    function promptWithSelectedModel(base, state) {
-      const model = state.selectedModel;
-      if (!model) return base;
-      return `${base}\n\n[mode-gate] 本次任务选定模型：${model.provider}/${model.model}${model.reasoningEffort ? `（reasoning_effort=${model.reasoningEffort}）` : ''}`;
+    async function submitGoalTool(agent, toolName, args) {
+      const state = readState(agent);
+      const result = await goalEngine.submit(toolName, args, state, envFor(agent, state));
+      if (!result.ok) throw new Error(result.reason);
+      await completeGoal(agent, result.result);
+      return result.result;
     }
 
+    function bashDecision(command, stateDef, state) {
+      const deny = matchBashDeny(command, readBashDenyList());
+      if (deny) return { kind: 'deny', reason: deny.reason || `命令 ${deny.commands.join('/')} 已被禁止。` };
+      const policy = (stateDef && stateDef.permissions && stateDef.permissions.bash) || 'declared';
+      if (policy === 'none') return { kind: 'deny', reason: '当前状态禁用 bash。' };
+      const kind = classifyCommand(command);
+      if (policy === 'unrestricted') {
+        return kind === 'dangerous' ? { kind: 'ask', reason: `检测到危险命令，需要人工授权：${command}` } : { kind: 'allow' };
+      }
+      if (policy === 'read-only') {
+        return kind === 'read-only'
+          ? { kind: 'allow' }
+          : { kind: 'deny', reason: `当前状态只允许只读 bash 命令：${command}` };
+      }
+      const missing = undeclaredBashVerbs(command, state.bash);
+      if (missing.length) {
+        return {
+          kind: 'deny',
+          reason: `当前 bash 命令使用了未声明的命令动词：${missing.join(', ')}。完整命令：${command}。请调用 dev_tool_search（或 request_extra）申请额外 bash 命令，或在 declare_target 中补充声明。`,
+        };
+      }
+      return kind === 'dangerous'
+        ? { kind: 'ask', reason: `检测到危险命令，需要人工授权：${command}` }
+        : { kind: 'allow' };
+    }
+
+    // ── system prompt ────────────────────────────────────────────────────
     ctx.systemPrompt.section({
       name: 'mode-gate:policy',
       order: 95,
       text: (assembleCtx) => {
         const agent = assembleCtx && assembleCtx.agent;
-        const state = readState(agent, defaultPhase);
-        const denyList = readBashDenyList();
-        const targetText = state.target ? state.target.target : '未声明';
-        const targetModeText = state.target && state.target.mode ? state.target.mode : '（未指定）';
-        const denyLines = denyList.length
-          ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n')
-          : '  （无）';
+        const state = readState(agent);
+        const registry = registryFor(agent);
+        const wf = registry.get(state.workflowId);
+        const stateDef = registry.stateOf(state.workflowId, state.phase);
         const goalDef = goalEngine.defFor(state);
-        const goalPrompt = state.goal && state.goal.prompt ? state.goal.prompt : (goalDef ? goalDef.prompt(envFor(agent)) : '');
+        const goalPrompt = state.goal && state.goal.prompt
+          ? state.goal.prompt
+          : (goalDef ? (typeof goalDef.prompt === 'function' ? goalDef.prompt(envFor(agent, state), state) : goalDef.prompt) : '');
+        const denyList = readBashDenyList();
         const lines = [
           '[mode-gate]',
-          `当前阶段：${state.phase}`,
-          `当前 Target：${targetText}`,
-          `Target 关联阶段：${targetModeText}`,
+          `当前工作流：${state.workflowId}${wf ? `（${wf.label}）` : ''}`,
+          `当前状态：${state.phase}${stateDef ? `（${stateDef.label}）` : ''}`,
+          `当前 Target：${state.target ? state.target.target : '未声明'}`,
           `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
           `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
           '规则：',
-          '- 每次行动前必须先调用 declare_target 声明 Target，并同时声明本次需要的 skills 和 bash 命令。',
-          MODE_RULES[state.phase] || MODE_RULES[DEFAULT_PHASE],
-          '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请，会作为问题向用户申报。不要花太多算力预判申请清单。',
-          '- 始终可用：skill_search（查看所有 skill）、switch_mode（请求切换阶段）、dev_tool_search / request_extra（申请额外 skill/bash）。',
+          '- 工作流状态下，每次行动前必须先调用 declare_target 声明 Target。',
+          '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请。',
+          '- 始终可用：skill_search、switch_mode、dev_tool_search / request_extra、submit_state。',
           '当前禁止的 bash 命令：',
-          denyLines,
+          denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n') : '  （无）',
         ];
-        if (state.goal && state.goal.status === 'active') {
-          lines.push('', '当前目标：', goalPrompt);
+        if (stateDef && stateDef.prompt && !state.goal) lines.push('', '当前状态说明：', stateDef.prompt);
+        if (state.goal && state.goal.status === 'active') lines.push('', '当前目标：', goalPrompt);
+        const plan = state.staticPlan;
+        if (plan && Array.isArray(plan.items) && plan.items.length > 0) {
+          const pending = staticPlanPendingCount(plan);
+          const current = staticPlanCurrent(plan);
+          lines.push('', `Checklist 进度：${plan.items.length - pending}/${plan.items.length} 完成`);
+          lines.push(...plan.items.map((item) => `  - [${item.status === 'completed' ? 'x' : ' '}] ${item.id}: ${item.text}`));
+          if (current) lines.push(`当前 checklist goal：${current.id}`);
         }
-        if (state.phase === 'REQUIREMENT_RECOGNITION' && state.goal && state.goal.id === 'feature-intent-update') {
-          lines.push('', modelCatalogText(state.modelCatalog, state.taskModes));
+        const dynamic = state.dynamicPlan;
+        if (dynamic && Array.isArray(dynamic.items) && dynamic.items.length > 0) {
+          lines.push('', '当前动态计划（本状态内有效，状态切换时清空）：');
+          lines.push(...dynamic.items.map((item) => `  - [${item.status === 'completed' ? 'x' : item.status === 'in_progress' ? '~' : ' '}] ${item.content}`));
         }
-        const base = lines.join('\n');
-        return promptWithSelectedModel(base, state);
+        const memory = state.loopMemory;
+        if (wf && wf.memory && Array.isArray(wf.memory.injectAtStates) && wf.memory.injectAtStates.includes(state.phase)
+          && memory && Array.isArray(memory.blocks) && memory.blocks.length > 0) {
+          lines.push('', `Loop Memory（iteration=${memory.iteration || 0}）：`);
+          lines.push(...memory.blocks.slice(-8).map((block) => `  - [${block.iteration}] ${block.text}${block.stamp ? `（${block.stamp}）` : ''}`));
+        }
+        if (state.migrationNotice) lines.push('', `迁移提示：${state.migrationNotice}`);
+        return lines.join('\n');
       },
     });
 
+    // ── tools ────────────────────────────────────────────────────────────
     ctx.tools.register(defineTool({
       name: 'declare_target',
-      description: '声明当前任务目标（Target），可选关联一个执行阶段，并同时声明本次需要的 skills 和 bash 命令。必须在其他工具调用之前使用。',
+      description: '声明当前任务目标（Target），并同时声明本次需要的 skills 和 bash 命令。工作流状态下必须在其他工具调用之前使用。',
       parameters: {
-        target: {
-          type: 'string',
-          required: true,
-          description: '任务目标/任务名，例如 "实现 mode-gate 插件" 或 "plan"。',
-        },
-        mode: {
-          type: 'string',
-          enum: [...PHASES],
-          description: '该目标预期执行的阶段。缺省则保持当前阶段。',
-        },
-        skills: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '本次任务需要使用的 skill 名称列表（未声明的 skill_load 会被拦截）。',
-        },
-        bash: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '本次任务需要使用的 bash 命令动词列表，例如 ["ls", "cat", "grep"]。',
-        },
+        target: { type: 'string', required: true, description: '任务目标/任务名。' },
+        mode: { type: 'string', description: '可选，预期状态 id。' },
+        skills: { type: 'array', items: { type: 'string' }, description: '本次需要的 skill 名称列表。' },
+        bash: { type: 'array', items: { type: 'string' }, description: '本次需要的 bash 命令动词列表。' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('declare_target 需要 agent 上下文');
-        const before = readState(agent, defaultPhase);
-        const skills = stringArray(args.skills);
-        const bash = stringArray(args.bash);
-        const target = { target: args.target, mode: args.mode };
-        const patch = { target, skills, bash };
-        const isFresh = !before.target && !before.goal;
-        if (isFresh) patch.phase = DEFAULT_PHASE;
-        writeState(agent, patch);
-        if (isFresh) {
-          await activateGoal(agent, 'preset-action-match');
+        const before = readState(agent);
+        const skills = Array.isArray(args.skills) ? args.skills.filter((s) => typeof s === 'string' && s.trim()) : [];
+        const bash = Array.isArray(args.bash) ? args.bash.filter((s) => typeof s === 'string' && s.trim()) : [];
+        writeState(agent, {
+          target: { target: args.target, mode: args.mode || before.phase },
+          skills,
+          bash,
+          workspace: workspaceOf(agent, defaultWorkspace),
+        });
+        const state = readState(agent);
+        const registry = registryFor(agent);
+        const stateDef = registry.stateOf(state.workflowId, state.phase);
+        let goalPrompt = '';
+        if (stateDef && stateDef.goal && (!state.goal || state.goal.status !== 'active')) {
+          const activated = await activateStateGoal(agent, state.workflowId, state.phase);
+          goalPrompt = activated && activated.prompt ? activated.prompt : '';
         }
-        const state = readState(agent, defaultPhase);
+        const refreshed = readState(agent);
         return [
-          `已声明 Target：${args.target}${args.mode ? `，关联阶段：${args.mode}` : ''}`,
-          `当前阶段：${state.phase}`,
-          `已声明 skills：${skills.length ? skills.join(', ') : '（无）'}`,
-          `已声明 bash 命令：${bash.length ? bash.join(', ') : '（无）'}`,
-        ].join('\n');
+          formatCapabilities(refreshed),
+          goalPrompt ? `\n当前目标提示：\n${goalPrompt}` : '',
+        ].join('\n').trim();
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'switch_mode',
-      description: '请求切换当前阶段（PRESET_ACTION / REQUIREMENT_RECOGNITION / IMPLEMENT）。切换需要用户批准，批准后立即生效。',
+      description: '请求切换工作流/状态。切换需要用户批准，批准后立即生效。',
       parameters: {
-        mode: {
-          type: 'string',
-          enum: [...PHASES],
-          required: true,
-          description: '目标阶段。',
-        },
-        reason: {
-          type: 'string',
-          description: '一句话说明为什么要切换阶段。',
-        },
+        workflow: { type: 'string', required: true, description: '目标工作流 id，例如 create / simple-action / IDLE。' },
+        state: { type: 'string', description: '目标状态 id；省略时使用工作流 startState。' },
+        reason: { type: 'string', description: '一句话说明为什么切换。' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('switch_mode 需要 agent 上下文');
-        writeState(agent, { phase: args.mode });
-        return `阶段已切换为 ${args.mode}`;
+        const registry = registryFor(agent);
+        const wf = registry.get(args.workflow);
+        if (!wf) throw new Error(`未知工作流 ${String(args.workflow)}`);
+        const stateId = args.state || wf.startState;
+        await activateStateGoal(agent, args.workflow, stateId);
+        return `已切换到 ${args.workflow} / ${stateId}`;
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'request_extra',
-      description: '查看或申请额外的 skill 和 bash 命令访问。无参数时返回当前已声明的 skills 和 bash 命令；带 skills/bash 参数时作为问题向用户申报，批准后立即生效。',
+      description: '查看或申请额外的 skill 和 bash 命令访问。带 skills/bash 参数时作为问题向用户申报。',
       parameters: {
-        skills: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '要申请的 skill 名称列表。',
-        },
-        bash: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '要申请的 bash 命令动词列表。',
-        },
+        skills: { type: 'array', items: { type: 'string' }, description: '要申请的 skill 名称列表。' },
+        bash: { type: 'array', items: { type: 'string' }, description: '要申请的 bash 命令动词列表。' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('request_extra 需要 agent 上下文');
-        const state = readState(agent, defaultPhase);
-        const requestedSkills = stringArray(args.skills);
-        const requestedBash = stringArray(args.bash);
+        const state = readState(agent);
+        const requestedSkills = Array.isArray(args.skills) ? args.skills.filter((s) => typeof s === 'string' && s.trim()) : [];
+        const requestedBash = Array.isArray(args.bash) ? args.bash.filter((s) => typeof s === 'string' && s.trim()) : [];
         if (requestedSkills.length || requestedBash.length) {
           const nextSkills = [...new Set([...state.skills, ...requestedSkills])];
           const nextBash = [...new Set([...state.bash, ...requestedBash])];
@@ -1123,73 +571,119 @@ export default {
     }));
 
     ctx.tools.register(defineTool({
-      name: 'list_preset_actions',
-      description: '列出所有 preset-action 候选 skill 的 id、说明与匹配条件。只有当前阶段为 PRESET_ACTION 时可用。',
+      name: 'list_workflows',
+      description: '列出当前工作区所有可用工作流及其按钮信息。',
       parameters: {},
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(_args, exec) {
+        const registry = registryFor(exec.agent);
+        return JSON.stringify({
+          workspace: workspaceOf(exec.agent, defaultWorkspace),
+          workflows: registry.listForModal().map((wf) => ({
+            id: wf.id, label: wf.label, description: wf.description, startState: wf.startState, ui: wf.ui || {},
+          })),
+        }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'get_workflow_state',
+      description: '读取当前会话的 mode-gate 工作流状态（workflow/state/target/checklist/dynamicPlan/loopMemory）。',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(_args, exec) {
+        const state = readState(exec.agent);
+        return JSON.stringify({
+          workflowId: state.workflowId,
+          phase: state.phase,
+          target: state.target,
+          goal: state.goal,
+          staticPlan: state.staticPlan,
+          dynamicPlan: state.dynamicPlan,
+          loopMemory: state.loopMemory,
+        }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'select_workflow',
+      description: '从 IDLE 选择并进入一个工作流（等价于 /mode <workflowId>）。',
+      parameters: {
+        workflow_id: { type: 'string', required: true, description: '工作流 id，例如 create / simple-action。' },
+        state: { type: 'string', description: '可选起始状态；省略时使用工作流 startState。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        if (agent === void 0) throw new Error('select_workflow 需要 agent 上下文');
+        const registry = registryFor(agent);
+        const wf = registry.get(args.workflow_id);
+        if (!wf) throw new Error(`未知工作流 ${String(args.workflow_id)}`);
+        const stateId = args.state || wf.startState;
+        writeState(agent, {
+          workflowId: args.workflow_id,
+          phase: stateId,
+          mode: stateId,
+          goal: null,
+          target: null,
+          workspace: workspaceOf(agent, defaultWorkspace),
+        });
+        return `已选择工作流 ${args.workflow_id}，起始状态 ${stateId}。请先调用 declare_target。`;
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'submit_state',
+      description: '结束当前状态/目标并交给引擎推进（用于研究、执行、调试、总结、preset action 执行）。',
+      parameters: {
+        summary: { type: 'string', description: '本状态完成了什么的一句话总结。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        if (agent === void 0) throw new Error('submit_state 需要 agent 上下文');
+        const result = await submitGoalTool(agent, 'submit_state', args || {});
+        const state = readState(agent);
+        return JSON.stringify({ ok: true, phase: state.phase, workflowId: state.workflowId, ...(result.prompt ? { prompt: result.prompt } : {}) }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'list_preset_actions',
+      description: '列出所有 preset-action 候选 skill 的 id、说明与匹配条件。',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute() {
         if (!presetActionSkills.length) return '（暂无 preset action）';
         return JSON.stringify(presetActionSkills.map((skill) => ({
-          id: skill.id,
-          name: skill.name,
-          title: skill.title,
-          description: skill.description,
-          match: skill.match,
-          model: skill.model,
-          reasoning_effort: skill.reasoningEffort,
-          content: skill.content,
+          id: skill.id, name: skill.name, title: skill.title, description: skill.description,
+          match: skill.match, model: skill.model, reasoning_effort: skill.reasoningEffort, content: skill.content,
         })), null, 2);
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'submit_preset_action',
-      description: '提交 preset-action 探测协议。命中时填写 skill_id；未命中时填写 no_match: true。未命中会直接进入普通需求分解阶段。',
+      description: '提交 preset-action 探测协议。命中时填写 skill_id；未命中时填写 no_match: true。',
       parameters: {
-        skill_id: {
-          type: 'string',
-          description: '命中的 preset action id（来自 list_preset_actions）。',
-        },
-        no_match: {
-          type: 'boolean',
-          description: '未命中任何 preset action 时填写 true。',
-        },
+        skill_id: { type: 'string', description: '命中的 preset action id。' },
+        no_match: { type: 'boolean', description: '未命中时填写 true。' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('submit_preset_action 需要 agent 上下文');
-        const state = readState(agent, defaultPhase);
-        const result = await goalEngine.submit('submit_preset_action', args, state, envFor(agent));
-        if (!result.ok) throw new Error(result.reason);
-        const transition = result.transition;
-        await applyTransition(agent, transition);
-        const selectedModel = transition.statePatch && transition.statePatch.selectedModel;
-        if (selectedModel) await saveDefaultModelSelection(selectedModel);
-        const saved = readState(agent, defaultPhase);
-        return JSON.stringify({
-          ok: true,
-          phase: saved.phase,
-          ...(selectedModel ? { selected_model: selectedModel } : {}),
-          ...(transition.prompt ? { prompt: transition.prompt } : {}),
-        }, null, 2);
+        const result = await submitGoalTool(agent, 'submit_preset_action', args || {});
+        const state = readState(agent);
+        return JSON.stringify({ ok: true, phase: state.phase, workflowId: state.workflowId, ...(result.prompt ? { prompt: result.prompt } : {}) }, null, 2);
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'list_feature_intents',
-      description: '列出 feature intent 目录下的所有需求意图文件（名称、标题、大小、修改时间）。',
+      description: '列出 feature intent 目录下的所有需求意图文件。',
       parameters: {},
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute() {
         const intents = await featureIntents.list();
         return JSON.stringify({ dir: featureIntents.dir, intents }, null, 2);
@@ -1199,257 +693,220 @@ export default {
     ctx.tools.register(defineTool({
       name: 'get_feature_intent',
       description: '读取指定的 feature intent 文件内容。',
-      parameters: {
-        name: {
-          type: 'string',
-          required: true,
-          description: 'feature intent 文件名（不带目录，可选 .md 后缀）。',
-        },
-      },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      parameters: { name: { type: 'string', required: true, description: 'feature intent 文件名（不带目录，可选 .md 后缀）。' } },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args) {
         const resolved = featureIntents.get(args.name);
-        return JSON.stringify({
-          name: resolved.name,
-          file: resolved.file,
-          path: resolved.path,
-          content: resolved.content,
-        }, null, 2);
+        return JSON.stringify({ name: resolved.name, file: resolved.file, path: resolved.path, content: resolved.content }, null, 2);
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'update_feature_intent',
-      description: '向指定 feature intent 文件追加一条原始需求记录（只在文件末尾 append，不重写）。若文件不存在则创建，创建时必须填写 project_overview。',
+      description: '向 feature intent 追加一条记录，包含三个 field：用户原话、Agent 理解、可验收 checklist。文件新建时会自动创建 project-experience 文件夹与 intro。',
       parameters: {
-        name: {
-          type: 'string',
-          required: true,
-          description: 'feature intent 文件名（不带目录，可选 .md 后缀）。',
-        },
-        entry: {
-          type: 'string',
-          required: true,
-          description: '要追加的原始需求记录与简单分析（日志式内容，不要精心排版的五段式文档）。',
-        },
-        project_overview: {
-          type: 'string',
-          description: '仅当目标文件不存在时必填：该项目的对应内容概述。',
-        },
+        name: { type: 'string', required: true, description: 'feature intent 文件名（不带目录，可选 .md 后缀）。' },
+        user_words: { type: 'string', required: true, description: '用户原话（尽量逐字保留）。' },
+        understanding: { type: 'string', required: true, description: 'Agent 对需求的理解与拆解。' },
+        checklist: { type: 'array', items: { type: 'string' }, required: true, description: '可验收节点，例如「按钮在 xx 处出现」。' },
+        project_overview: { type: 'string', description: '仅当文件不存在时必填：项目概述，同时写入 project-experience/intro.md。' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args) {
-        const result = featureIntents.append(args.name, args.entry, args.project_overview);
-        return JSON.stringify({
-          ok: true,
-          ...result,
-          message: `已追加到 ${result.file}${result.created ? '（新建文件）' : ''}`,
-        }, null, 2);
+        const checklist = Array.isArray(args.checklist) ? args.checklist.filter((s) => typeof s === 'string' && s.trim()) : [];
+        if (checklist.length === 0) throw new Error('checklist 不能为空，请提供至少一个可验收节点。');
+        const result = featureIntents.append(
+          args.name,
+          { userWords: args.user_words, understanding: args.understanding, checklist },
+          args.project_overview,
+        );
+        let project = null;
+        if (result.created) {
+          project = projectExperience.ensureProject(result.name, args.project_overview);
+        }
+        return JSON.stringify({ ok: true, ...result, project: project ? project.name : null, message: `已追加到 ${result.file}${result.created ? '（新建文件）' : ''}` }, null, 2);
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'submit_requirement_protocol',
-      description: '提交需求识别协议。只有当前阶段为 REQUIREMENT_RECOGNITION 且已追加过 feature intent 后可用。校验失败会返回错误，请修正后重试。',
+      description: '提交需求识别协议。通过后 checklist 会成为 CREATE 工作流的 staticPlan。',
       parameters: {
-        protocol: {
-          type: 'string',
-          required: true,
-          description: '固定为 requirement-recognition。',
-        },
-        version: {
-          type: 'number',
-          required: true,
-          description: '固定为 1。',
-        },
-        task_mode: {
-          type: 'string',
-          enum: ['simple', 'complex'],
-          required: true,
-          description: '任务模式：simple（默认 flash）/ complex（默认 pro）。',
-        },
-        model_override: {
-          type: 'object',
-          additionalProperties: true,
-          description: '可选。覆盖 task_mode 默认模型：{ provider, model, reasoning_effort }。',
-        },
-        feature_intent_file: {
-          type: 'string',
-          required: true,
-          description: '本次查看/追加过的 feature intent 文件名（不带目录，可选 .md 后缀）。',
-        },
-        summary: {
-          type: 'string',
-          required: true,
-          description: '一句话任务摘要。',
-        },
+        protocol: { type: 'string', required: true, description: '固定为 requirement-recognition。' },
+        version: { type: 'number', required: true, description: '固定为 1。' },
+        task_mode: { type: 'string', enum: ['simple', 'complex'], required: true, description: 'simple / complex。' },
+        model_override: { type: 'object', additionalProperties: true, description: '可选模型覆盖。' },
+        feature_intent_file: { type: 'string', required: true, description: '本次查看/追加过的 feature intent 文件名。' },
+        summary: { type: 'string', required: true, description: '一句话任务摘要。' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: (_args, value) => [{ type: 'text', text: String(value) }],
-      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('submit_requirement_protocol 需要 agent 上下文');
-        const state = readState(agent, defaultPhase);
-        const result = await goalEngine.submit('submit_requirement_protocol', args, state, envFor(agent));
-        if (!result.ok) throw new Error(result.reason);
-        const transition = result.transition;
-        const selectedModel = transition.statePatch && transition.statePatch.selectedModel;
-        const saved = await applyTransition(agent, transition);
-        if (selectedModel) {
-          await saveDefaultModelSelection(selectedModel);
-        }
+        const result = await submitGoalTool(agent, 'submit_requirement_protocol', args || {});
+        const state = readState(agent);
         return JSON.stringify({
           ok: true,
-          phase: (saved && saved.statePatch && saved.statePatch.phase) || 'IMPLEMENT',
-          selected_model: selectedModel,
-          ...(transition.prompt ? { prompt: transition.prompt } : {}),
+          phase: state.phase,
+          workflowId: state.workflowId,
+          staticPlan: state.staticPlan,
+          ...(result.prompt ? { prompt: result.prompt } : {}),
         }, null, 2);
       },
     }));
 
-    function hasFeatureIntentPath(value) {
-      const dir = featureIntents.dir;
-      if (typeof value === 'string') return value.includes(dir);
-      if (Array.isArray(value)) return value.some((item) => hasFeatureIntentPath(item));
-      if (value && typeof value === 'object') {
-        return Object.values(value).some((item) => hasFeatureIntentPath(item));
-      }
-      return false;
-    }
+    ctx.tools.register(defineTool({
+      name: 'read_project_experience',
+      description: '一次性读取 project-experience：intro、系统拓扑、血泪法则、核心状态树。省略 project 时自动选择唯一项目或列出候选。',
+      parameters: {
+        project: { type: 'string', description: '项目文件夹名，通常与 feature intent 同名。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args) {
+        const requested = typeof args.project === 'string' && args.project.trim() ? args.project.trim() : '';
+        let project = requested;
+        if (!project) {
+          const projects = projectExperience.listProjects();
+          if (projects.length === 0) throw new Error(`project-experience 目录为空：${projectExperience.root}。请先创建 feature intent 记录。`);
+          if (projects.length > 1) {
+            return JSON.stringify({ projects: projects.map((p) => p.project), hint: '存在多个项目，请指定 project 参数。' }, null, 2);
+          }
+          project = projects[0].project;
+        }
+        const result = projectExperience.readProject(project);
+        return JSON.stringify({ ...result, dir: result.dir, files: result.files }, null, 2);
+      },
+    }));
 
-    function isFeatureIntentDirectWrite(name, args) {
-      if (!hasFeatureIntentPath(args)) return false;
-      if (KNOWN_WRITE_TOOLS.has(name) || name === 'str_replace_editor') return true;
-      if (name === 'bash' || name === 'pwsh') {
-        const command = String((args && args.command) || '');
-        const kind = classifyCommand(command);
-        return kind === 'mutating' || kind === 'dangerous';
-      }
-      return false;
-    }
+    ctx.tools.register(defineTool({
+      name: 'update_project_experience',
+      description: '写入 project-experience。append 直接写入；overwrite / diff 会作为申请提交给用户批准。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件同名项目。' },
+        file: { type: 'string', required: true, description: 'intro / mapOfContent / antiPatterns / coreStateTree（或文件名）。' },
+        mode: { type: 'string', enum: ['append', 'overwrite', 'diff'], required: true, description: '写入模式。' },
+        content: { type: 'string', required: true, description: '要写入的内容。' },
+        reason: { type: 'string', description: 'overwrite/diff 时说明修改理由。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
+        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
+        if (args.mode === 'append') {
+          return JSON.stringify({ ok: true, ...projectExperience.append(project, args.file, args.content) }, null, 2);
+        }
+        return JSON.stringify({ ok: true, ...projectExperience.overwrite(project, args.file, args.content) }, null, 2);
+      },
+    }));
 
+    // ── mode command ─────────────────────────────────────────────────────
+    ctx.inject(['commands'], (commandCtx) => {
+      commandCtx.commands.register({
+        name: 'mode',
+        description: 'select a mode-gate workflow by id',
+        input: { hint: '<workflow-id>' },
+        recordInput: false,
+        handler: ({ agent, rawInput }) => {
+          const workflowId = String(rawInput || '').trim();
+          if (!workflowId) {
+            const registry = registryFor(agent);
+            const list = registry.listForModal().map((wf) => `- ${wf.id}: ${wf.label}`).join('\n');
+            return { kind: 'success', text: `可用工作流：\n${list}` };
+          }
+          const registry = registryFor(agent);
+          const wf = registry.get(workflowId);
+          if (!wf) return { kind: 'error', text: `未知工作流 ${workflowId}` };
+          writeState(agent, {
+            workflowId,
+            phase: wf.startState,
+            mode: wf.startState,
+            goal: null,
+            target: null,
+            workspace: workspaceOf(agent, defaultWorkspace),
+          });
+          try {
+            agent.steer(createUserMessage({
+              content: [{ type: 'text', text: `请开始 ${wf.label} 工作流（${workflowId} / ${wf.startState}）。先调用 declare_target。` }],
+              source: { kind: 'user' },
+            }));
+          } catch (err) {
+            log(`/mode steer 失败：${(err && err.message) || err}`);
+          }
+          return { kind: 'success', text: `已进入 ${wf.label}（${workflowId} / ${wf.startState}）。` };
+        },
+      });
+    });
+
+    // ── tool interception ────────────────────────────────────────────────
     ctx.on('tools/pre-execute', (exec, next) => {
       const name = exec.name;
-
       if (name === 'declare_target') return next();
 
       if (name === 'switch_mode') {
-        const mode = exec.arguments && exec.arguments.mode;
-        if (!PHASES.includes(mode)) {
-          return Promise.resolve({ kind: 'deny', reason: `无效阶段 ${String(mode)}，可选：${PHASES.join('/')}` });
-        }
-        const state = readState(exec.agent, defaultPhase);
-        if (state.goal && state.goal.status === 'active' && mode !== state.phase) {
-          return Promise.resolve({
-            kind: 'deny',
-            reason: `当前目标未完成（${state.goal.id}），不能切换到 ${mode}。请先完成当前目标或提交协议。`,
-          });
-        }
+        const registry = registryFor(exec.agent);
+        const workflow = exec.arguments && exec.arguments.workflow;
+        const wf = registry.get(workflow);
+        if (!wf) return Promise.resolve({ kind: 'deny', reason: `未知工作流 ${String(workflow)}` });
         return Promise.resolve({
           kind: 'ask',
-          reason: `是否允许把阶段切换到 ${mode}？${exec.arguments && exec.arguments.reason ? `原因：${exec.arguments.reason}` : ''}`,
+          reason: `是否允许切换到 ${workflow}${exec.arguments && exec.arguments.state ? ` / ${exec.arguments.state}` : ''}？${exec.arguments && exec.arguments.reason ? `原因：${exec.arguments.reason}` : ''}`,
         });
       }
 
       if (name === 'request_extra') {
-        const requestedSkills = stringArray(exec.arguments && exec.arguments.skills);
-        const requestedBash = stringArray(exec.arguments && exec.arguments.bash);
+        const requestedSkills = Array.isArray(exec.arguments && exec.arguments.skills) ? exec.arguments.skills : [];
+        const requestedBash = Array.isArray(exec.arguments && exec.arguments.bash) ? exec.arguments.bash : [];
         if (requestedSkills.length || requestedBash.length) {
-          const state = readState(exec.agent, defaultPhase);
-          const items = [
-            ...requestedSkills.map((s) => `skill: ${s}`),
-            ...requestedBash.map((b) => `bash: ${b}`),
-          ].join('、');
-          return Promise.resolve({
-            kind: 'ask',
-            reason: `是否授予以下额外访问？${items}（当前阶段 ${state.phase}，批准后立即生效）`,
-          });
+          const items = [...requestedSkills.map((s) => `skill: ${s}`), ...requestedBash.map((b) => `bash: ${b}`)].join('、');
+          return Promise.resolve({ kind: 'ask', reason: `是否授予以下额外访问？${items}` });
         }
         return next();
       }
 
       const agent = exec.agent;
-      const state = readState(agent, defaultPhase);
+      const state = readState(agent);
+      const registry = registryFor(agent);
+      const stateDef = registry.stateOf(state.workflowId, state.phase);
 
-      if (!state.target && !ALLOWED_WITHOUT_TARGET.has(name)) {
-        return Promise.resolve({
-          kind: 'deny',
-          reason: '尚未声明 Target。请先调用 declare_target 声明当前任务目标。',
-        });
-      }
-
-      if (isFeatureIntentDirectWrite(name, exec.arguments)) {
+      if (isFeatureIntentDirectWrite(name, exec.arguments, featureIntents.dir)) {
         return Promise.resolve({
           kind: 'deny',
           reason: 'feature_intent 文件禁止直接修改。请使用 update_feature_intent 工具在文件末尾追加记录。',
         });
       }
 
-      if (name === 'update_feature_intent' && state.phase !== 'REQUIREMENT_RECOGNITION') {
-        return Promise.resolve({
-          kind: 'deny',
-          reason: `update_feature_intent 只在 REQUIREMENT_RECOGNITION 阶段可用，当前阶段为 ${state.phase}。`,
-        });
-      }
-      if ((name === 'list_preset_actions' || name === 'submit_preset_action') && state.phase !== 'PRESET_ACTION') {
-        return Promise.resolve({
-          kind: 'deny',
-          reason: `${name} 只在 PRESET_ACTION 阶段可用，当前阶段为 ${state.phase}。`,
-        });
-      }
-      if (name === 'submit_requirement_protocol' && state.phase !== 'REQUIREMENT_RECOGNITION') {
-        return Promise.resolve({
-          kind: 'deny',
-          reason: `submit_requirement_protocol 只在 REQUIREMENT_RECOGNITION 阶段可用，当前阶段为 ${state.phase}。`,
-        });
-      }
-
-      if (state.goal && state.goal.status === 'active') {
-        const def = goalEngine.defFor(state);
-        if (def) {
-          const allowedTools = goalEngine.allowedToolSet(def);
-
-          if (name === 'bash' || name === 'pwsh') {
-            if (!def.allowedBash || def.allowedBash.length === 0) {
-              return Promise.resolve({
-                kind: 'deny',
-                reason: `当前目标「${def.id}」禁止使用 bash。请使用目标允许的工具：${[...allowedTools].join(', ')}`,
-              });
+      if (name === 'update_project_experience') {
+        const mode = exec.arguments && exec.arguments.mode;
+        if (mode === 'overwrite' || mode === 'diff') {
+          let summary = '';
+          try {
+            const project = (exec.arguments.project && exec.arguments.project.trim()) || state.featureIntentFile;
+            if (project) {
+              const d = projectExperience.diff(project, exec.arguments.file, exec.arguments.content);
+              summary = `（将删除约 ${d.removed} 行、新增约 ${d.added} 行）`;
             }
-            const command = String((exec.arguments && exec.arguments.command) || '');
-            const missing = undeclaredBashVerbs(command, state.bash);
-            const unallowed = extractCommandVerbs(command).filter((verb) => !def.allowedBash.includes(verb));
-            if (missing.length || unallowed.length) {
-              return Promise.resolve({
-                kind: 'deny',
-                reason: `当前目标「${def.id}」只允许 bash 动词：${def.allowedBash.join(', ') || '（无）'}。命令：${command}`,
-              });
-            }
-          }
-
-          if (name !== 'bash' && name !== 'pwsh') {
-            if (!allowedTools.has(name)) {
-              return Promise.resolve({
-                kind: 'deny',
-                reason: `当前目标「${def.id}」未完成，只允许工具：${[...allowedTools].join(', ')}。你尝试调用 ${name}。`,
-              });
-            }
-            return next();
-          }
+          } catch (_err) { /* preview is best-effort */ }
+          return Promise.resolve({
+            kind: 'ask',
+            reason: `是否允许 ${mode} 修改 project-experience/${exec.arguments.file}？${summary}${exec.arguments.reason ? `原因：${exec.arguments.reason}` : ''}`,
+          });
         }
+      }
+
+      if (!stateDef || state.workflowId === IDLE_WORKFLOW_ID) {
+        // IDLE is intentionally unrestricted; only the global guards above apply.
+        return next();
+      }
+
+      if (!state.target && !CONTROL_TOOLS.has(name) && !ALLOWED_WITHOUT_TARGET.has(name)) {
+        return Promise.resolve({ kind: 'deny', reason: '尚未声明 Target。请先调用 declare_target 声明当前任务目标。' });
       }
 
       if (name === 'bash' || name === 'pwsh') {
         const command = String((exec.arguments && exec.arguments.command) || '');
-        const decision = bashDisposition(command, permissionModeForPhase(state.phase), state.bash, readBashDenyList());
+        const decision = bashDecision(command, stateDef, state);
         return decision.kind === 'allow' ? next() : Promise.resolve(decision);
       }
 
@@ -1461,53 +918,56 @@ export default {
             reason: `skill "${requested}" 未声明。请先用 skill_search 查看，再用 dev_tool_search（或 request_extra）申请额外 skill。`,
           });
         }
-        const decision = toolDisposition(name, permissionModeForPhase(state.phase));
-        return decision.kind === 'allow' ? next() : Promise.resolve(decision);
       }
 
-      if (name === 'str_replace_editor') {
-        const permissionMode = permissionModeForPhase(state.phase);
-        if (permissionMode === 'READ_ONLY' || permissionMode === 'PLAN_ONLY') {
-          if (exec.arguments && exec.arguments.command === 'view') return next();
-          return Promise.resolve({
-            kind: 'deny',
-            reason: `当前阶段为 ${state.phase}，str_replace_editor 仅允许 view 命令。`,
-          });
-        }
-        return next();
+      const decision = toolDisposition(name, stateDef.permissions || {});
+      if (decision.kind === 'deny') return Promise.resolve(decision);
+
+      if (name === 'str_replace_editor' && stateDef.permissions && stateDef.permissions.write === false) {
+        if (exec.arguments && exec.arguments.command === 'view') return next();
+        return Promise.resolve({ kind: 'deny', reason: `当前状态 ${state.phase} 禁止写工具 str_replace_editor。` });
       }
 
-      if (KNOWN_WRITE_TOOLS.has(name)) {
-        const permissionMode = permissionModeForPhase(state.phase);
-        if (permissionMode === 'READ_ONLY' || permissionMode === 'PLAN_ONLY') {
-          return Promise.resolve({ kind: 'deny', reason: `当前阶段为 ${state.phase}，禁止写工具 ${name}。` });
-        }
-        return next();
-      }
-
-      const decision = toolDisposition(name, permissionModeForPhase(state.phase));
-      return decision.kind === 'allow' ? next() : Promise.resolve(decision);
+      return next();
     });
 
+    // ── post-execute: auto complete + dynamic plan mirror ────────────────
     ctx.on('tools/post-execute', async (exec, result, next) => {
       const decision = await next();
       try {
         const agent = exec && exec.agent;
         const name = exec && exec.name;
-        if (!agent || !name) return decision;
-        const state = readState(agent, defaultPhase);
-        if (!state.goal || state.goal.status !== 'active') return decision;
+        if (!agent || !name || (result && result.isError === true)) return decision;
+        const state = readState(agent);
+
+        if (name === 'todo_write' && exec.arguments && Array.isArray(exec.arguments.todos)) {
+          const dynamicPlan = createDynamicPlan(exec.arguments.todos, state.phase);
+          const patch = { dynamicPlan };
+          if (state.staticPlan && Array.isArray(state.staticPlan.items)) {
+            let changed = false;
+            const items = state.staticPlan.items.map((item) => {
+              if (item.status === 'completed') return item;
+              const match = exec.arguments.todos.find((t) => t && t.content === item.text && t.status === 'completed');
+              if (!match) return item;
+              changed = true;
+              return { ...item, status: 'completed', completedAt: Date.now() };
+            });
+            if (changed) {
+              const next = staticPlanCurrent({ ...state.staticPlan, items });
+              patch.staticPlan = { ...state.staticPlan, items, currentId: next ? next.id : null };
+            }
+          }
+          writeState(agent, patch);
+        }
+
         const def = goalEngine.defFor(state);
         if (!def) return decision;
-        if (result && result.isError === true) return decision;
-
         const recorded = goalEngine.recordCall(state, name);
-        if (recorded !== state) writeState(agent, recorded);
-
-        const after = readState(agent, defaultPhase);
+        if (recorded !== state) writeState(agent, { goal: recorded.goal });
+        const after = readState(agent);
         if (goalEngine.isAutoCompleted(after, def)) {
-          const transition = await goalEngine.autoComplete(after, envFor(agent));
-          if (transition) await applyTransition(agent, transition);
+          const raw = await goalEngine.autoComplete(after, envFor(agent, after));
+          if (raw) await completeGoal(agent, raw);
         }
       } catch (err) {
         log(`post-execute 目标推进失败：${(err && err.message) || err}`);
@@ -1515,19 +975,14 @@ export default {
       return decision;
     });
 
-    // Best-effort per-agent model override: when a preset action / protocol
-    // selects a model for the session, agent/request is patched for that
-    // session when the harness routes a request through this agent. If the
-    // session has already logged its selection, the request remains on the old
-    // model; saveDefaultModelSelection above already persisted the new default
-    // for future sessions and the prompt tells the user how to switch.
+    // ── per-agent model override ─────────────────────────────────────────
     ctx.on('agent/created', ({ agent }) => {
       try {
         const agentCtx = agent && agent.ctx;
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
           const resolved = await next();
-          const state = readState(agent, defaultPhase);
+          const state = readState(agent);
           const selected = state.selectedModel;
           if (!selected) return resolved;
           return {
@@ -1542,7 +997,6 @@ export default {
       }
     });
 
-    // Remote service consumed by the Web settings/footer to read durable state.
-    new ModeGateGateway(ctx);
+    new ModeGateGateway(ctx, { registryForWorkspace, defaultWorkspace });
   },
 };

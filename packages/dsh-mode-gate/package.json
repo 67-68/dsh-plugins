@@ -1,7 +1,7 @@
 {
   "name": "dsh-mode-gate",
-  "description": "Protocol-driven requirement loop: PRESET_ACTION -> REQUIREMENT_RECOGNITION -> IMPLEMENT with goal engine, feature-intent tools, preset-action skills and model switching",
-  "version": "0.1.0",
+  "description": "Multi-workflow mode gate: IDLE / SIMPLE-ACTION / CREATE flat state machine with goal engine, workflow registry, feature-intent checklist plans, project-experience and model switching",
+  "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -26,12 +26,13 @@
   },
   "license": "MIT",
   "files": [
-    "lib/index.js",
-    "lib/client.js"
+    "lib",
+    "workflows"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-invariants": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-api-remotes": ">=0.1.0-rc.8 <0.2.0",

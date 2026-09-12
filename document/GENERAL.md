@@ -11,14 +11,21 @@
 - 遇到“卡住”先判断是否根本没开始执行（例如命令里前面的 `mkdir`/`cd` 都没生效），不要先怀疑脚本算法慢
 
 ## DSH mode-gate 使用契约
-- 新 session 必须先 `declare_target` 才能行动；声明后自动进入 `PRESET_ACTION` 探测阶段
-- 需求循环：`PRESET_ACTION` -> `REQUIREMENT_RECOGNITION`（读 feature intent + append + 提交协议）-> `IMPLEMENT`；未完成当前目标时，目标外的工具（含 bash）会被拦截
+- 会话初始为 `IDLE`（完成态），由 UI modal 选择工作流；点击工作流等价于 `/mode <workflowId>`
+- 工作流状态下先 `declare_target`；IDLE 后端不限制，只靠 UI 遮罩
+- 内置工作流：
+  - `SIMPLE-ACTION`：`PRESET_ACTION -> ACTION_EXECUTE -> IDLE`
+  - `CREATE`：`BASE_READ -> REQUIREMENT_RECOGNITION -> (RESEARCH -> EXECUTE -> DEBUG -> ACCUMULATION)*n -> IDLE`
+- `IMPLEMENT` 已删除；CREATE 的 feature-intent checklist 会变成 staticPlan goals，全部完成才回 IDLE
+- dynamicPlan 每个状态独立、状态切换时清空；loopMemory 每轮重新注入（幂等）
 - `declare_target` 时同时声明本次需要的 `skills` 和 `bash` 命令；未声明的 `skill_load` / bash 命令会被拦截
-- 不要花太多算力预判申请清单：需要额外 skill 或 bash 时直接调用 `dev_tool_search`（或 `request_extra`）申请，它会作为问题向用户申报
+- 纯只读命令（`ls`、`cat`、`head`、`tail`、`grep`、`find`、`sed -n`、`awk`、`wc`、`sort`、`uniq` 等）在所有状态放行，无需声明
+- 不要花太多算力预判申请清单：需要额外 skill 或 bash 时直接调用 `dev_tool_search`（或 `request_extra`）申请
 - 网页阅读禁止 `curl` / `wget`，统一用 `read_url` 系列工具
-- 始终可用：`skill_search`（查看所有 skill）、`switch_mode`（请求切换阶段）、`dev_tool_search` / `request_extra`（申请额外访问）
-- feature_intent 目录禁止直接写，只能用 `update_feature_intent` 追加
-- 插件代码在 `packages/dsh-mode-gate`；修改后运行 `install.sh` 同步
+- 始终可用：`skill_search`、`switch_mode`、`dev_tool_search` / `request_extra`、`submit_state`
+- feature_intent 目录禁止直接写，只能用 `update_feature_intent` 追加；一次写入三个 field：`user_words` / `understanding` / `checklist`
+- project-experience（`<workspace>/project-experience/{project}/`）用 `read_project_experience` 读取、`update_project_experience` 写入；append 直接写，overwrite/diff 会走用户审批
+- 插件代码在 `packages/dsh-mode-gate`；修改后运行 `install.sh` 同步。运行中的 DSH 会锁住 `profiles/node_modules`，需先退出 DSH 再同步
 
 ## 阶段性发言契约
 - 干活时不要连续只调用工具；每完成一个阶段或关键结果，用 1-2 句话向用户说明「已完成什么 + 下一步做什么」
@@ -27,6 +34,5 @@
 
 ## 模式经验系统
 
-- 每个模式的经验存在 `~/.dsh/DOCUMENT/{mode}.md`，会话开始自动注入该模式对应的文件
-- 本文件 `GENERAL.md` 会注入到所有模式
-- 查看完整文档与索引：加载 `mode-experience` skill
+- `GENERAL.md` 与 `{mode}.md` 现在只作为 persona / 经验文本注入（mode-experience 已瘦身，不再拆 skill、不再注册索引 skill）
+- 项目级知识改用 project-experience：`<workspace>/project-experience/{project}/`，由 dsh-mode-gate 的 `read_project_experience` / `update_project_experience` 管理

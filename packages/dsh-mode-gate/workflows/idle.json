@@ -1,0 +1,29 @@
+{
+  "id": "IDLE",
+  "label": "完成",
+  "description": "项目/对话的初始与完成态。等待用户选择工作流或自由聊天。",
+  "kind": "idle",
+  "startState": "IDLE",
+  "ui": {
+    "showInIdleModal": false,
+    "order": 0
+  },
+  "states": [
+    {
+      "id": "IDLE",
+      "label": "空闲",
+      "description": "没有活跃工作流",
+      "permissions": {
+        "write": true,
+        "bash": "unrestricted",
+        "tools": "*"
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": null,
+      "prompt": "当前处于 IDLE 完成态。不要主动调用工具；等待用户选择工作流或输入消息。",
+      "transitions": []
+    }
+  ]
+}

@@ -14,15 +14,14 @@
         docDir: '/Users/a67_68/projects/dsh-plugins/document'
         promoteGatedModes: ['anchored-architect']
 
-    # Mode gate: protocol-driven requirement loop. Phases:
-    # PRESET_ACTION -> REQUIREMENT_RECOGNITION -> IMPLEMENT.
-    # The host half registers the phase/feature-intent/protocol tools and the
-    # goal engine; the browser half renders the settings tab (phases, model
-    # catalog, task-mode defaults, bash deny-list).
+    # Mode gate: flat multi-workflow state machine (IDLE / SIMPLE-ACTION /
+    # CREATE). The host half registers the workflow registry, goal engine,
+    # feature-intent/project-experience tools and tool interception; the browser
+    # half renders the IDLE workflow modal, composer placeholder, header toggle
+    # and the settings tab.
     - id: mode-gate
       name: 'dsh-mode-gate'
       config:
-        defaultPhase: PRESET_ACTION
         featureIntentDir: '/Users/a67_68/projects/documentation/feature_intents'
         presetActionDir: '~/.dsh/preset-actions'
 

@@ -1,0 +1,203 @@
+{
+  "id": "create",
+  "label": "CREATE",
+  "description": "写新功能：基准阅读 → 需求分解 → 研究/执行/调试/总结循环，直到 checklist 全部完成。",
+  "kind": "workflow",
+  "startState": "BASE_READ",
+  "ui": {
+    "showInIdleModal": true,
+    "order": 20,
+    "buttonLabel": "CREATE：写新功能",
+    "buttonDescription": "读取项目基准与 feature intent，按 checklist goal 迭代实现"
+  },
+  "onComplete": {
+    "workflow": "IDLE",
+    "state": "IDLE"
+  },
+  "memory": {
+    "key": "loopMemory",
+    "scope": "workflow-instance",
+    "enabled": true,
+    "injectAtStates": ["RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION"],
+    "stampField": "iteration",
+    "compactAt": ["ACCUMULATION.exit"],
+    "maxBytes": 8192
+  },
+  "staticPlan": {
+    "source": "feature-intent.checklist",
+    "goalTemplate": {
+      "idPrefix": "checklist",
+      "acceptance": "$item",
+      "status": "pending"
+    },
+    "enterAt": "REQUIREMENT_RECOGNITION.exit",
+    "advanceOn": "ACCUMULATION.exit",
+    "completion": "all-goals-completed"
+  },
+  "dynamicPlan": {
+    "scope": "state",
+    "mirrorTool": "todo_write",
+    "allowAgentEdit": true,
+    "clearOn": ["state.exit", "goal.completed"]
+  },
+  "states": [
+    {
+      "id": "BASE_READ",
+      "label": "了解项目基准",
+      "description": "一次性读取 project-experience 的系统拓扑、血泪法则、核心状态树。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": ["read_project_experience", "skill_load", "skill_search", "bash", "str_replace_editor:view"]
+      },
+      "model": {
+        "reasoningEffort": "high"
+      },
+      "goal": {
+        "ref": "project-experience.dump"
+      },
+      "prompt": "找到本项目的 project-experience 文件夹，一次性 dump 系统拓扑、血泪法则、核心状态树三个文件。",
+      "transitions": [
+        {
+          "when": { "type": "goal.completed" },
+          "to": { "workflow": "$self", "state": "REQUIREMENT_RECOGNITION" }
+        }
+      ]
+    },
+    {
+      "id": "REQUIREMENT_RECOGNITION",
+      "label": "需求分解",
+      "description": "读取 feature intent；写入用户原话/理解/checklist，并把 checklist 注册为 staticPlan。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": [
+          "list_feature_intents",
+          "get_feature_intent",
+          "update_feature_intent",
+          "submit_requirement_protocol",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view",
+          "todo_write"
+        ]
+      },
+      "model": {
+        "reasoningEffort": "high"
+      },
+      "goal": {
+        "ref": "feature-intent.read-and-decompose"
+      },
+      "prompt": "读取 feature intent 后，用 update_feature_intent 一次写入三个 field：用户原话、你的理解、可验收 checklist。checklist 会注册为本工作流的 staticPlan。",
+      "transitions": [
+        {
+          "when": { "type": "goal.completed" },
+          "to": { "workflow": "$self", "state": "RESEARCH" }
+        }
+      ]
+    },
+    {
+      "id": "RESEARCH",
+      "label": "研究",
+      "description": "重新阅读 project-experience 三个文件，为当前 checklist goal 输出实现思路与风险。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": ["read_project_experience", "skill_load", "skill_search", "bash", "str_replace_editor:view", "todo_write"]
+      },
+      "model": {
+        "reasoningEffort": "high"
+      },
+      "goal": {
+        "ref": "create.research",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "重新阅读 project-experience 三个文件，围绕当前 checklist goal 产出实现思路、涉及文件和风险。",
+      "transitions": [
+        {
+          "when": { "type": "goal.completed" },
+          "to": { "workflow": "$self", "state": "EXECUTE" }
+        }
+      ]
+    },
+    {
+      "id": "EXECUTE",
+      "label": "执行",
+      "description": "执行当前 checklist goal，只做本 goal 范围内的事。",
+      "permissions": {
+        "write": true,
+        "bash": "declared",
+        "tools": "*"
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "create.execute",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "执行当前 checklist goal。完成标准以 goal 的验收文本为准；不要顺手改无关模块。",
+      "transitions": [
+        {
+          "when": { "type": "goal.completed" },
+          "to": { "workflow": "$self", "state": "DEBUG" }
+        }
+      ]
+    },
+    {
+      "id": "DEBUG",
+      "label": "调试",
+      "description": "验证当前 goal 的验收标准；能自己修就修，不能修则请求用户协助。",
+      "permissions": {
+        "write": true,
+        "bash": "declared",
+        "tools": "*"
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "create.debug",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "验证当前 checklist goal 的验收标准。能自行修复就修复；无法解决时，把复现步骤和需要用户做什么写清楚，请求用户协助。",
+      "transitions": [
+        {
+          "when": { "type": "goal.completed" },
+          "to": { "workflow": "$self", "state": "ACCUMULATION" }
+        }
+      ]
+    },
+    {
+      "id": "ACCUMULATION",
+      "label": "总结沉淀",
+      "description": "把本轮经验追加到 project-experience；若需覆盖既有内容，走 diff 申请等用户批准。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": ["update_project_experience", "read_project_experience", "skill_load", "bash", "str_replace_editor:view"]
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "create.accumulate",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "用 update_project_experience 把本轮变化追加到 project-experience。如需修改既有内容，提出 diff 或全量覆盖申请，等待用户批准。",
+      "transitions": [
+        {
+          "when": { "type": "staticPlan.pending", "op": ">", "value": 0 },
+          "to": { "workflow": "$self", "state": "RESEARCH" },
+          "loop": { "increment": "iteration" }
+        },
+        {
+          "when": { "type": "staticPlan.pending", "op": "==", "value": 0 },
+          "to": { "workflow": "IDLE", "state": "IDLE" },
+          "complete": true
+        }
+      ]
+    }
+  ]
+}
