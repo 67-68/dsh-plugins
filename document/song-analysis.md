@@ -99,6 +99,8 @@ analysis/bin/song-analyze open <audio> [--out-dir <output/xxx>]
 - 全屏播放页（歌词页）右下角「歌曲解析」按钮打开面板。
 - 主进程模块：`app/src/infra/songAnalysis/`，IPC 通道前缀 `@infra/song-analysis/*`。
 - `runAnalysis` 仅对本地歌曲可用（需要 `musicItem.localPath`）；结果读取 `analysis/output/*/analysis.json` 与 `report.md`。
+- 面板「设置」可以填 LLM 接口地址、模型、API Key 与 Genius Token，保存在 Electron `userData/song-analysis-config.json`；主进程 spawn CLI 时注入 `SONG_ANALYZE_LLM_*` / `GENIUS_ACCESS_TOKEN`。
+- 改完设置后可以点「重新生成报告」只重写 `report.md`（走 `song-analyze report <out_dir>`），不必重跑拆轨/结构。
 - Sonic Visualiser 不做内嵌，由主进程 spawn 子进程；面板按钮状态与子进程 `exit` 事件同步，用户手动关闭 SV 后按钮会自动回到关闭态。
 
 #### [troubleshooting] 已知问题
