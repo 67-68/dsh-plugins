@@ -1,5 +1,6 @@
 """从 Anki collection 抽取 note 元数据，并按 action 写回。"""
 
+from . import cloze_adapter
 from . import transaction_log
 
 
@@ -33,6 +34,39 @@ def _set_field(note, key, value):
         return True
     except Exception:
         return False
+
+
+def _field_names(note):
+    try:
+        return list(note.keys())
+    except Exception:
+        return list(_fields_map(note).keys())
+
+
+def _normalize_cloze_fields(note, fields, valid=None):
+    """把 AI 可能给出的通用 front/back/items 转成 Cloze note 的 Text 字段。"""
+    fields = dict(fields or {})
+    valid = list(valid) if valid is not None else _field_names(note)
+    if any(key in valid for key in fields):
+        if "Overlapping" in valid and "Overlapping" not in fields:
+            fields["Overlapping"] = cloze_adapter.DEFAULT_OVERLAPPING_OPTIONS
+        return fields
+
+    items = fields.get("cloze_items") or fields.get("items")
+    if isinstance(items, list) and items:
+        return cloze_adapter.make_cloze_note_fields(items)
+
+    front = fields.get("front") or fields.get("Front")
+    back = fields.get("back") or fields.get("Back")
+    if front:
+        parsed = cloze_adapter.parse_cloze_list_markdown(str(front))
+        if parsed:
+            return cloze_adapter.make_cloze_note_fields(parsed)
+        if back:
+            return cloze_adapter.make_cloze_note_fields([front, back])
+        return cloze_adapter.make_cloze_note_fields([front])
+
+    return fields
 
 
 def _deck_name(col, did):
@@ -74,6 +108,8 @@ def extract_payloads_from_nids(nids):
         fields = _fields_map(note)
         cards = list(note.cards())
         model = _note_type(note)
+        model_name = model.get("name") or "Unknown"
+        note_kind = "cloze" if cloze_adapter.is_cloze_note_type(model_name, fields) else "basic"
 
         lapses = sum(int(getattr(c, "lapses", 0) or 0) for c in cards)
         reps = sum(int(getattr(c, "reps", 0) or 0) for c in cards)
@@ -104,7 +140,8 @@ def extract_payloads_from_nids(nids):
         payload = {
             "guid": note.guid,
             "id": note.id,
-            "model": model.get("name") or "Unknown",
+            "model": model_name,
+            "note_kind": note_kind,
             "fields": fields,
             "tags": list(note.tags or []),
             "decks": decks,
@@ -170,7 +207,11 @@ def _suspend_cards(note, col):
 
 def _apply_modify(action, cfg, col):
     note = col.get_note(action["nid"])
-    for key, value in (action.get("fields") or {}).items():
+    fields = action.get("fields") or {}
+    model_name = (_note_type(note) or {}).get("name") or ""
+    if cloze_adapter.is_cloze_note_type(model_name, _fields_map(note)):
+        fields = _normalize_cloze_fields(note, fields)
+    for key, value in fields.items():
         _set_field(note, key, value)
     col.update_note(note)
     if action.get("reset_scheduling"):
@@ -198,10 +239,15 @@ def _apply_split(action, cfg, col, split_indices=None):
                 if not item.get("applied") and not item.get("discarded"):
                     target_items.append((i, item))
 
+    model_name = model.get("name") or ""
+    is_cloze = cloze_adapter.is_cloze_note_type(model_name, _fields_map(note))
     new_note_ids = []
     for index, item in target_items:
         new_note = col.new_note(model)
-        for key, value in (item.get("fields") or {}).items():
+        item_fields = item.get("fields") or {}
+        if is_cloze:
+            item_fields = _normalize_cloze_fields(note, item_fields, _field_names(note))
+        for key, value in item_fields.items():
             _set_field(new_note, key, value)
         tags = list(item.get("tags") or [])
         if not tags:

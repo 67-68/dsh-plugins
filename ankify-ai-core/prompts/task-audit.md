@@ -24,3 +24,10 @@
 9. 如果 note 语义不完整、无法判断，宁可不调用任何工具。
 
 输出：通过 function calling 返回工具调用；keep 的 note 不产生工具调用。
+
+Cloze / Cloze (overlapping) 特殊规则：
+- 如果 note 的 model 名包含 Cloze，或字段中包含 `Text` 且内容含 `{{cN::...}}`，按 cloze note 处理，不要把它改造成普通 Front/Back 卡。
+- cloze note 通常有 `Text` 和 `Overlapping` 两个字段（具体以输入 fields 为准）；修改时必须沿用原字段名，不要新增 Front/Back。
+- `Text` 中的 `{{c1::...}}`、`{{c2::...}}` 是 Anki 原生 cloze 语法。保持所有 `{{cN::...}}` 原样；不要删除、重编号或改写成 Markdown。
+- 对 4-8 项的有限列表，优先在 `Text` 中按顺序排列连续 cloze：每个条目一行 `{{c1::item1}}`、`{{c2::item2}}`…… 如需保持上下文，可保留共同的说明行，但每个 cloze 的编号要递增。
+- 如果 `Overlapping` 字段存在且为空，可保留原值；除非用户明确要求，不要随意清空。

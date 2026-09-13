@@ -5,7 +5,7 @@
 职责：
 - 唯一持有 ankify-ai-core（policy / prompts / schemas / examples）
 - 唯一持有 OpenAI 兼容 API 配置（endpoint / key / models / retries）
-- 对外暴露三个能力：/v1/classify、/v1/ankify、/v1/audit
+- 对外暴露三个能力：/v1/classify、/v1/ankify（image / bulk-text / simple-cards）、/v1/audit
 
 消费端：
 - Anki 插件：只调用 /v1/audit，把返回 actions 渲染到 UI 并写回 Anki。
@@ -35,6 +35,8 @@ DEFAULT_HOME = "~/.local/share/ankify-ai"
 TYPE_ENUM = {"A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"}
 COMPLEXITY_ENUM = {"atomic", "structural", "mixed"}
 PIPELINE_ENUM = {"single-pass", "two-pass"}
+ANKIFY_MODES = ("image", "bulk-text", "simple-cards")
+CARD_FORMATS = ("basic", "cloze-list")
 
 # macOS 上 urllib 默认会走系统代理；本地 mock/自建服务需要显式绕开。
 _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -225,10 +227,72 @@ def build_classify_messages(core_dir: str, body):
     return system, user
 
 
+def _highlight_format_hint(background: str) -> str:
+    """从背景中提取用户给出的划线/高亮格式示例，返回给模型的说明。"""
+    if not background:
+        return ""
+    has_star = "**" in background
+    has_highlight = "==" in background
+    hints = []
+    if has_star:
+        hints.append("`**...**`")
+    if has_highlight:
+        hints.append("`==...==`")
+    if not hints:
+        return ""
+    return (
+        "用户背景中出现了 %s 格式。请把它视为制卡范围规则："
+        "被这些标记包围的片段才是核心制卡目标，标记外的文字只作为上下文；"
+        "如果输入中没有出现该标记，则把全部输入视为制卡材料。"
+    ) % " 或 ".join(hints)
+
+
+def build_ankify_mode_instruction(mode: str, background: str) -> str:
+    if mode == "image":
+        return (
+            "当前模式：image（图片 Ankify）。"
+            "背景/上下文按字面意义使用，说明图片来源或复习范围；不要把背景本身当作考题。"
+        )
+    if mode == "bulk-text":
+        hint = _highlight_format_hint(background)
+        if hint:
+            return "当前模式：bulk-text（批量划线文本 Ankify）。" + hint
+        return (
+            "当前模式：bulk-text（批量划线文本 Ankify）。"
+            "如果用户使用 **...** 或 ==...== 标出了重点片段，只对标记内片段制卡；"
+            "没有标记时，按 policy 对全文做拆分制卡。"
+        )
+    if mode == "simple-cards":
+        return (
+            "当前模式：simple-cards（批量简单卡片 Ankify）。"
+            "输入的每一行是一条已有卡片的 front，用户不会提供 back。"
+            "背景/上下文字段用于说明需要的 back 类型（例如：词汇释义、题目答案、定义、日期等），"
+            "不是普通来源背景。请根据 front、上下文和背景指定的 back 类型推断最小信息的 back；"
+            "不要输出 front 或 back 为空的卡片。"
+        )
+    raise ValueError("未知 ankify mode：%s" % mode)
+
+
+def _resolve_ankify_mode(body) -> str:
+    kind = str(body.get("kind") or "text").strip()
+    mode = str(body.get("mode") or "").strip()
+    if not mode:
+        mode = "image" if kind == "image" else "bulk-text"
+    if mode not in ANKIFY_MODES:
+        raise ValueError("mode 必须是 %s 之一" % " / ".join(ANKIFY_MODES))
+    if kind == "image" and mode != "image":
+        raise ValueError("kind=image 时 mode 必须是 image")
+    if kind != "image" and mode == "image":
+        raise ValueError("mode=image 时 kind 必须是 image")
+    return mode
+
+
 def build_ankify_messages(core_dir: str, body):
-    kind = body.get("kind") or "text"
+    kind = str(body.get("kind") or "text").strip()
+    mode = _resolve_ankify_mode(body)
     background = _format_background(body.get("background") or "")
     system = build_system_prompt(core_dir, "task-ankify.md")
+    instruction = build_ankify_mode_instruction(mode, background)
 
     if kind == "image":
         base64 = body.get("image_base64") or ""
@@ -236,9 +300,10 @@ def build_ankify_messages(core_dir: str, body):
             raise ValueError("image_base64 为空")
         mime_type = body.get("mime_type") or "image/png"
         user_text = (
-            "背景/上下文（用户提供）：%s\n\n"
+            "%s\n\n背景/上下文（用户提供）：%s\n\n"
             "用户提供的是一张图片。请先识别图片中的文字，"
-            "再按照系统要求清洗为 Anki 卡片 JSON。" % background
+            "再按照系统要求清洗为 Anki 卡片 JSON。"
+            % (instruction, background)
         )
         user = [
             {"type": "text", "text": user_text},
@@ -250,15 +315,21 @@ def build_ankify_messages(core_dir: str, body):
     if not text:
         raise ValueError("text 为空")
     classify = body.get("classify")
+    title = "以下是需要制卡的文本" if mode == "bulk-text" else "以下是批量简单卡片输入（每行一条 front）"
     if classify:
         user = (
-            "背景/上下文（用户提供）：%s\n\n"
+            "%s\n\n背景/上下文（用户提供）：%s\n\n"
             "这是 two-pass 模式的第二轮。第一轮分类结果如下：\n%s\n\n"
-            "以下是需要制卡的文本：\n---\n%s\n---"
-            % (background, json.dumps(classify, ensure_ascii=False, indent=2), text)
+            "%s：\n---\n%s\n---"
+            % (instruction, background, json.dumps(classify, ensure_ascii=False, indent=2), title, text)
         )
     else:
-        user = "背景/上下文（用户提供）：%s\n\n以下是需要制卡的文本：\n---\n%s\n---" % (background, text)
+        user = "%s\n\n背景/上下文（用户提供）：%s\n\n%s：\n---\n%s\n---" % (
+            instruction,
+            background,
+            title,
+            text,
+        )
     return system, user
 
 
@@ -378,14 +449,112 @@ def _check_type(value, where: str):
 def validate_card(card, where: str):
     if not isinstance(card, dict):
         raise ValueError("%s: 卡片不是对象" % where)
+    card_format = card.get("format") or "basic"
+    if card_format not in CARD_FORMATS:
+        raise ValueError("%s: format 必须是 basic / cloze-list" % where)
+    _check_type(card.get("type"), where)
+
+    if card_format == "cloze-list":
+        items = card.get("cloze_items")
+        if not isinstance(items, list) or not items:
+            raise ValueError("%s: cloze-list 缺少非空 cloze_items 数组" % where)
+        if len(items) > 8:
+            raise ValueError("%s: cloze-list 列表项不能超过 8 个" % where)
+        for index, item in enumerate(items):
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("%s: cloze_items[%s] 为空或不是字符串" % (where, index))
+        return True
+
     front = card.get("front")
     back = card.get("back")
     if not isinstance(front, str) or not front.strip():
         raise ValueError("%s: front 为空" % where)
     if not isinstance(back, str) or not back.strip():
         raise ValueError("%s: back 为空" % where)
-    _check_type(card.get("type"), where)
     return True
+
+
+_PRIMARY_SEPARATOR_RE = re.compile(r"[;；,，、]")
+_AND_SEPARATOR_RE = re.compile(r"\s+and\s+")
+_BULLET_PREFIX_RE = re.compile(r"^\s*[-*+•]\s*")
+
+
+def _split_finite_list_items(text):
+    """把明显是有限列表的答案拆成 4-8 个 item。
+
+    支持：
+    - 逗号/分号/顿号分隔：common defense, external representation, ...
+    - 换行列表：``- item`` / ``* item`` / ``• item``
+    """
+    if not isinstance(text, str):
+        return []
+    text = text.strip()
+    if not text:
+        return []
+
+    raw_lines = [_BULLET_PREFIX_RE.sub("", line).strip() for line in text.splitlines()]
+    lines = [line for line in raw_lines if line]
+    if len(lines) >= 4:
+        candidates = lines
+    else:
+        candidates = _PRIMARY_SEPARATOR_RE.split(text)
+        if len(candidates) < 4:
+            candidates = _AND_SEPARATOR_RE.split(text)
+
+    items = [item.strip(" \t\r\n.。;；,，、") for item in candidates]
+    items = [item for item in items if item]
+    if not (4 <= len(items) <= 8):
+        return []
+    if any(len(item) > 60 for item in items):
+        return []
+    return items
+
+
+def _maybe_convert_finite_list(card):
+    """模型偶尔会把有限列表塞进 back；这里兜底转成 cloze-list。"""
+    if not isinstance(card, dict):
+        return card
+    if card.get("format") not in (None, "basic"):
+        return card
+
+    items = _split_finite_list_items(card.get("back"))
+    if not items:
+        return card
+
+    front = (card.get("front") or "").strip()
+    extra = (card.get("extra") or "").strip()
+    converted = {
+        "format": "cloze-list",
+        "front": front,
+        "cloze_items": items,
+        "type": card.get("type") or "B1",
+        "tags": card.get("tags") or [],
+    }
+    if extra:
+        converted["extra"] = extra
+    return converted
+
+
+def _normalize_pipeline(value):
+    """模型偶尔会把 pipeline 写成 single_pass / single / TE 等；这里做兼容归一化。
+
+    pipeline 只用于描述生成流程，前端不会据此改变卡片语义，因此对未知值采用
+    single-pass 兜底，避免因为一个描述字段导致整批卡片 400。
+    """
+    if not isinstance(value, str):
+        return "single-pass"
+    normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "single": "single-pass",
+        "singlepass": "single-pass",
+        "single-pass": "single-pass",
+        "one-pass": "single-pass",
+        "two": "two-pass",
+        "twopass": "two-pass",
+        "two-pass": "two-pass",
+        "double-pass": "two-pass",
+    }
+    return aliases.get(normalized, "single-pass")
 
 
 def validate_ankify_result(obj):
@@ -394,10 +563,9 @@ def validate_ankify_result(obj):
     cards = obj.get("cards")
     if not isinstance(cards, list) or not cards:
         raise ValueError("ankify 结果 cards 为空或不是数组")
-    pipeline = obj.get("pipeline")
-    if pipeline not in PIPELINE_ENUM:
-        raise ValueError("ankify 结果 pipeline 不是 single-pass/two-pass")
-    for index, card in enumerate(cards):
+    obj["pipeline"] = _normalize_pipeline(obj.get("pipeline"))
+    obj["cards"] = [_maybe_convert_finite_list(card) for card in cards]
+    for index, card in enumerate(obj["cards"]):
         validate_card(card, "cards[%s]" % index)
     return obj
 
@@ -419,7 +587,7 @@ def validate_classify_result(obj):
 
 
 def parse_audit_response(response, notes):
-    """把 OpenAI 响应解析为 action 列表；keep 不产生 action。"""
+    """把 OpenAI 响应解析为 action 列表；keep 也会生成可展示的 action。"""
     message = _response_message(response)
     actions = []
     guid_index = {payload["guid"]: payload for payload in notes}
@@ -499,6 +667,27 @@ def parse_audit_response(response, notes):
                     "applied": False,
                 }
             )
+
+    addressed = {action["guid"] for action in actions}
+    for payload in notes:
+        guid = payload.get("guid")
+        if not guid or guid in addressed:
+            continue
+        actions.append(
+            {
+                "action": "keep",
+                "guid": guid,
+                "nid": payload["id"],
+                "original": payload,
+                "fields": None,
+                "type_hint": None,
+                "reason": "模型认为符合制卡规范，保持原样。",
+                "reset_scheduling": False,
+                "new_notes": None,
+                "tags": None,
+                "applied": False,
+            }
+        )
     return actions
 
 
@@ -593,6 +782,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "service_version": SERVICE_VERSION,
                 "core_version": core_version(self.server.core_dir),
                 "models": (self.server.cfg.get("models") or {}),
+                "modes": list(ANKIFY_MODES),
+                "card_formats": list(CARD_FORMATS),
                 "port": self.server.cfg.get("port", DEFAULT_PORT),
             },
         )
@@ -638,8 +829,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             model=model,
         )
         actions = parse_audit_response(response, notes)
-        addressed = {a["guid"] for a in actions}
-        self._send_json(200, {"actions": actions, "keep_count": max(len(notes) - len(addressed), 0)})
+        keep_count = sum(1 for action in actions if action.get("action") == "keep")
+        self._send_json(200, {"actions": actions, "keep_count": keep_count})
 
     def log_message(self, format, *args):
         self._log("%s - %s" % (self.address_string(), format % args))
@@ -651,7 +842,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 def build_server(cfg, core_dir, log_file=None):
     host = cfg.get("host") or DEFAULT_HOST
-    port = int(cfg.get("port") or DEFAULT_PORT)
+    port_value = cfg.get("port")
+    port = int(port_value) if port_value is not None and str(port_value).strip() != "" else DEFAULT_PORT
     server = AnkifydServer((host, port), ApiHandler, cfg, core_dir, log_file)
     return server
 

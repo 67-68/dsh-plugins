@@ -48,6 +48,13 @@ const CONTROL_TOOLS = new Set([
   'dev_tool_search', 'submit_state', 'list_workflows', 'get_workflow_state', 'select_workflow',
 ]);
 
+function firstLine(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const line = value.split(/\r?\n/)[0].trim();
+  return line.replace(/^\[目标\]\s*/, '') || line;
+}
+
 /** No-decorator Remote marker shim. */
 function markRemoteMethods(cls, methodNames) {
   const initializers = [];
@@ -148,6 +155,17 @@ class ModeGateGateway extends TypertRemoteService {
     const start = stateId || wf.startState;
     store.sessions[sessionId] = { ...entry, workflowId, phase: start, mode: start, goal: null, target: null };
     saveStateStore(store);
+    const agent = this.options.getAgent ? this.options.getAgent(sessionId) : null;
+    if (agent && typeof agent.steer === 'function') {
+      try {
+        agent.steer(createUserMessage({
+          content: [{ type: 'text', text: `请开始 ${wf.label} 工作流（${workflowId} / ${start}）。先调用 declare_target。` }],
+          source: { kind: 'user' },
+        }));
+      } catch (err) {
+        console.log('[dsh-mode-gate] selectWorkflow steer failed:', err && err.message);
+      }
+    }
     return { ok: true, workflowId, state: start };
   }
   async getBashDenyList() {
@@ -225,6 +243,8 @@ export default {
       log,
     });
     const registryForWorkspace = (workspace) => workflowRegistry.forWorkspace(workspace || defaultWorkspace);
+    /** sessionId -> live Agent, used by the Remote selectWorkflow to wake the agent. */
+    const agents = new Map();
 
     function registryFor(agent) {
       return registryForWorkspace(workspaceOf(agent, defaultWorkspace));
@@ -352,11 +372,13 @@ export default {
         dynamicPlan: { scope: 'state', stateId, items: [], updatedAt: Date.now() },
       };
       if (!goalRef) {
-        writeState(agent, { ...basePatch, goal: null });
-        return { prompt: (stateDef && stateDef.prompt) || '', messages: [] };
+        const prompt = (stateDef && stateDef.prompt) || `当前状态：${stateId}`;
+        writeState(agent, { ...basePatch, goal: null, target: { target: prompt, mode: stateId } });
+        return { prompt, messages: [] };
       }
       const result = await goalEngine.activate(goalRef, envFor(agent, state), state);
-      writeState(agent, { ...basePatch, ...result.statePatch });
+      const targetText = result.prompt || (stateDef && stateDef.prompt) || stateId;
+      writeState(agent, { ...basePatch, ...result.statePatch, target: { target: targetText, mode: stateId } });
       return result;
     }
 
@@ -398,11 +420,36 @@ export default {
     }
 
     async function submitGoalTool(agent, toolName, args) {
-      const state = readState(agent);
-      const result = await goalEngine.submit(toolName, args, state, envFor(agent, state));
+      const before = readState(agent);
+      const result = await goalEngine.submit(toolName, args, before, envFor(agent, before));
       if (!result.ok) throw new Error(result.reason);
       await completeGoal(agent, result.result);
+      const after = readState(agent);
+      if (toolName === 'submit_requirement_protocol' || (toolName === 'submit_state' && before.phase === 'ACCUMULATION')) {
+        syncStaticPlanToDshTodos(agent, after);
+      }
       return result.result;
+    }
+
+    function syncStaticPlanToDshTodos(agent, state) {
+      const plan = state && state.staticPlan;
+      if (!plan || !Array.isArray(plan.items) || plan.items.length === 0) return false;
+      const session = agent && agent.session;
+      if (!session || typeof session.append !== 'function') return false;
+      const current = staticPlanCurrent(plan);
+      const todos = plan.items.map((item) => ({
+        content: item.text,
+        status: item.status === 'completed'
+          ? 'completed'
+          : (current && item.id === current.id ? 'in_progress' : 'pending'),
+      }));
+      try {
+        session.append('todo/write', { todos });
+        return true;
+      } catch (err) {
+        log(`同步 DSH todo 失败：${(err && err.message) || err}`);
+        return false;
+      }
     }
 
     function bashDecision(command, stateDef, state) {
@@ -450,7 +497,7 @@ export default {
           '[mode-gate]',
           `当前工作流：${state.workflowId}${wf ? `（${wf.label}）` : ''}`,
           `当前状态：${state.phase}${stateDef ? `（${stateDef.label}）` : ''}`,
-          `当前 Target：${state.target ? state.target.target : '未声明'}`,
+          `当前 Target：${state.target && state.target.target ? firstLine(state.target.target) : '未声明'}`,
           `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
           `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
           '规则：',
@@ -472,7 +519,8 @@ export default {
         }
         const dynamic = state.dynamicPlan;
         if (dynamic && Array.isArray(dynamic.items) && dynamic.items.length > 0) {
-          lines.push('', '当前动态计划（本状态内有效，状态切换时清空）：');
+          const goalLabel = dynamic.goalId ? `（goal: ${dynamic.goalId}）` : '';
+          lines.push('', `当前动态计划${goalLabel}（本状态内有效，状态切换时清空）：`);
           lines.push(...dynamic.items.map((item) => `  - [${item.status === 'completed' ? 'x' : item.status === 'in_progress' ? '~' : ' '}] ${item.content}`));
         }
         const memory = state.loopMemory;
@@ -516,8 +564,14 @@ export default {
         if (stateDef && stateDef.goal && (!state.goal || state.goal.status !== 'active')) {
           const activated = await activateStateGoal(agent, state.workflowId, state.phase);
           goalPrompt = activated && activated.prompt ? activated.prompt : '';
+        } else if (state.goal && state.goal.status === 'active' && state.goal.prompt) {
+          goalPrompt = state.goal.prompt;
         }
-        const refreshed = readState(agent);
+        let refreshed = readState(agent);
+        if (goalPrompt) {
+          writeState(agent, { target: { target: goalPrompt, mode: refreshed.phase } });
+          refreshed = readState(agent);
+        }
         return [
           formatCapabilities(refreshed),
           goalPrompt ? `\n当前目标提示：\n${goalPrompt}` : '',
@@ -904,6 +958,17 @@ export default {
         return Promise.resolve({ kind: 'deny', reason: '尚未声明 Target。请先调用 declare_target 声明当前任务目标。' });
       }
 
+      const activeGoalDef = goalEngine.defFor(state);
+      if (state.goal && state.goal.status === 'active' && activeGoalDef) {
+        const allowed = goalEngine.allowedToolSet(activeGoalDef);
+        if (!allowed.has(name)) {
+          return Promise.resolve({
+            kind: 'deny',
+            reason: `当前目标 "${activeGoalDef.id}" 进行中，只允许：${[...allowed].join(', ')}。${name} 不在其中；请先完成当前目标或调用 submit_state。`,
+          });
+        }
+      }
+
       if (name === 'bash' || name === 'pwsh') {
         const command = String((exec.arguments && exec.arguments.command) || '');
         const decision = bashDecision(command, stateDef, state);
@@ -937,11 +1002,12 @@ export default {
       try {
         const agent = exec && exec.agent;
         const name = exec && exec.name;
-        if (!agent || !name || (result && result.isError === true)) return decision;
+        if (!agent || !name) return decision;
         const state = readState(agent);
 
-        if (name === 'todo_write' && exec.arguments && Array.isArray(exec.arguments.todos)) {
-          const dynamicPlan = createDynamicPlan(exec.arguments.todos, state.phase);
+        if (name === 'todo_write' && result && result.isError !== true && exec.arguments && Array.isArray(exec.arguments.todos)) {
+          const currentGoal = state.staticPlan ? staticPlanCurrent(state.staticPlan) : null;
+          const dynamicPlan = createDynamicPlan(exec.arguments.todos, state.phase, currentGoal);
           const patch = { dynamicPlan };
           if (state.staticPlan && Array.isArray(state.staticPlan.items)) {
             let changed = false;
@@ -962,8 +1028,16 @@ export default {
 
         const def = goalEngine.defFor(state);
         if (!def) return decision;
-        const recorded = goalEngine.recordCall(state, name);
-        if (recorded !== state) writeState(agent, { goal: recorded.goal });
+        // Only read_project_experience counts a failed call as a valid attempt
+        // (empty project-experience must still allow BASE_READ to submit_state).
+        // Other required calls (todo_write, update_feature_intent, ...) must
+        // actually succeed before submit_state will accept them.
+        const countErrorCall = name === 'read_project_experience';
+        if (!(result && result.isError === true) || countErrorCall) {
+          const recorded = goalEngine.recordCall(state, name);
+          if (recorded !== state) writeState(agent, { goal: recorded.goal });
+        }
+        if (result && result.isError === true) return decision;
         const after = readState(agent);
         if (goalEngine.isAutoCompleted(after, def)) {
           const raw = await goalEngine.autoComplete(after, envFor(agent, after));
@@ -978,25 +1052,31 @@ export default {
     // ── per-agent model override ─────────────────────────────────────────
     ctx.on('agent/created', ({ agent }) => {
       try {
+        if (agent && agent.session && agent.session.id !== void 0) agents.set(agent.session.id, agent);
         const agentCtx = agent && agent.ctx;
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
-          const resolved = await next();
           const state = readState(agent);
           const selected = state.selectedModel;
-          if (!selected) return resolved;
-          return {
-            ...resolved,
-            provider: selected.provider || resolved.provider,
-            model: selected.model || resolved.model,
-            ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}),
-          };
+          const stateDef = registryFor(agent).stateOf(state.workflowId, state.phase);
+          const phaseModel = stateDef && stateDef.model ? stateDef.model : null;
+          if (phaseModel) {
+            if (phaseModel.provider) _payload.provider = phaseModel.provider;
+            if (phaseModel.model) _payload.model = phaseModel.model;
+            if (phaseModel.reasoningEffort) _payload.reasoningEffort = phaseModel.reasoningEffort;
+          }
+          if (selected) {
+            if (selected.provider) _payload.provider = selected.provider;
+            if (selected.model) _payload.model = selected.model;
+            if (selected.reasoningEffort) _payload.reasoningEffort = selected.reasoningEffort;
+          }
+          return next();
         });
       } catch (err) {
         log(`安装 agent/request 覆盖失败：${(err && err.message) || err}`);
       }
     });
 
-    new ModeGateGateway(ctx, { registryForWorkspace, defaultWorkspace });
+    new ModeGateGateway(ctx, { registryForWorkspace, defaultWorkspace, getAgent: (sessionId) => agents.get(sessionId) });
   },
 };

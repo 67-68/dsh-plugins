@@ -127,11 +127,17 @@ export function createBuiltinGoals() {
         '[目标] 一次性读取项目基准',
         '调用 read_project_experience 工具（省略 project 时会自动选择唯一项目，或在多个时列出候选）。',
         '工具会一次性返回 intro / 系统拓扑 / 血泪法则 / 核心状态树四个文件的内容。',
-        '读完即可，不要在本状态写任何文件。',
+        '如果 project-experience 目录为空或读取失败，把该情况写进总结并调用 submit_state 继续，不要在本状态写任何文件。',
       ].join('\n'),
       allowedTools: ['read_project_experience'],
       requiredCalls: [{ tool: 'read_project_experience', min: 1 }],
-      async onComplete() {
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit() {
         return { signal: { goalCompleted: true }, prompt: '项目基准已读取，进入需求分解。' };
       },
     },
@@ -140,19 +146,24 @@ export function createBuiltinGoals() {
       id: 'feature-intent.read-and-decompose',
       prompt: (env) => [
         '[目标] 读取 feature intent 并完成需求分解',
-        '1. 用 list_feature_intents / get_feature_intent 找到并阅读最相关的文档；',
-        '2. 用 update_feature_intent 一次写入三个 field：user_words（用户原话）、understanding（你的理解）、checklist（可验收节点数组）；',
-        '3. checklist 每一项必须是可验收的节点，例如「按钮在 xx 处出现」「点击按钮展示 xxxx 数据」；',
-        '4. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan。',
-        '本状态允许 bash，但禁止写文件。',
+        '1. 用 list_feature_intents 查看全部 feature intent；可能存在多个，用 get_feature_intent 阅读与本次任务最相关的那个；',
+        '2. 用 read / grep / glob / web_search / read_url / bash（只读）调研代码库，确保写出的 checklist 是可验收的节点；',
+        '3. 用 update_feature_intent 一次写入三个 field：user_words（用户原话）、understanding（你的理解）、checklist（可验收节点数组）；',
+        '4. checklist 每一项必须是可验收的节点，例如「按钮在 xx 处出现」「点击按钮展示 xxxx 数据」；',
+        '5. 如需记录需求分解期间的调研任务，可调用 todo_write；',
+        '6. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
+        '本状态允许只读 bash 和只读调研工具，但禁止写文件。',
         '',
         modelCatalogText(env.modelCatalog, env.taskModes),
       ].join('\n'),
       allowedTools: [
         'list_feature_intents', 'get_feature_intent', 'update_feature_intent',
-        'submit_requirement_protocol', 'bash', 'str_replace_editor',
+        'submit_requirement_protocol', 'read', 'grep', 'glob', 'web_search',
+        'read_url', 'read_url_batch', 'read_url_links', 'read_url_site',
+        'read_image', 'list_agents', 'get_goal', 'job_list', 'job_output',
+        'ask_user_question', 'todo_write', 'bash', 'str_replace_editor',
       ],
-      requiredCalls: [{ tool: 'update_feature_intent', min: 1 }],
+      requiredCalls: [{ tool: 'list_feature_intents', min: 1 }, { tool: 'update_feature_intent', min: 1 }],
       submitTool: {
         name: 'submit_requirement_protocol',
         async parse(args, env) {
@@ -193,11 +204,18 @@ export function createBuiltinGoals() {
       prompt: (env, state) => [
         '[目标] 研究当前 checklist goal',
         currentItemText(state),
-        '重新阅读 project-experience 三个文件（read_project_experience），围绕当前 goal 输出实现思路、涉及文件和风险。',
-        '产出研究结论后调用 submit_state 结束本状态。',
+        '1. 先调用 read_project_experience 读取项目经验（intro / 系统拓扑 / 血泪法则 / 核心状态树）；',
+        '2. 再用 read / grep / glob / web_search / read_url / bash（只读）充分调研当前 goal 的实现思路、涉及文件和风险；',
+        '3. 调研清楚后，调用 todo_write 写出本 goal 的完整 dynamic plan（第一项 in_progress，只放本 goal 的任务，不要放其他 goal 的任务）；',
+        '4. 调用 submit_state 结束研究。',
       ].join('\n'),
-      allowedTools: ['read_project_experience', 'bash', 'str_replace_editor:view'],
-      requiredCalls: [],
+      allowedTools: [
+        'read_project_experience', 'read', 'grep', 'glob', 'web_search',
+        'read_url', 'read_url_batch', 'read_url_links', 'read_url_site',
+        'read_image', 'list_agents', 'get_goal', 'job_list', 'job_output',
+        'ask_user_question', 'todo_write', 'bash', 'str_replace_editor',
+      ],
+      requiredCalls: [{ tool: 'read_project_experience', min: 1 }, { tool: 'todo_write', min: 1 }],
       async onActivate(env, state) {
         return { statePatch: { staticPlan: beginCurrentStaticItem(state.staticPlan) } };
       },
@@ -218,9 +236,15 @@ export function createBuiltinGoals() {
         '[目标] 执行当前 checklist goal',
         currentItemText(state),
         '只做本 goal 范围内的事；完成标准以验收文本为准。',
+        '用 todo_write 维护本 goal 的 dynamic plan：开始一项标记 in_progress，完成一项立即标记 completed。',
         '完成后调用 submit_state 结束本状态，动态计划会被清空。',
       ].join('\n'),
-      allowedTools: ['bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write'],
+      allowedTools: [
+        'bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write',
+        'read', 'grep', 'glob', 'web_search', 'read_url', 'read_url_batch',
+        'read_url_links', 'read_url_site', 'read_image', 'list_agents',
+        'get_goal', 'job_list', 'job_output',
+      ],
       requiredCalls: [],
       submitTool: {
         name: 'submit_state',
@@ -239,9 +263,15 @@ export function createBuiltinGoals() {
         '[目标] 验证当前 checklist goal',
         currentItemText(state),
         '先自行复现和修复。若无法解决，明确写出：复现步骤、期望结果、需要用户做什么，并请求用户协助。',
+        '验证过程中用 todo_write 更新本 goal 的 dynamic plan（完成/新增/修改任务）。',
         '验证通过后调用 submit_state 结束本状态。',
       ].join('\n'),
-      allowedTools: ['bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write'],
+      allowedTools: [
+        'bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write',
+        'ask_user_question', 'read', 'grep', 'glob', 'web_search', 'read_url',
+        'read_url_batch', 'read_url_links', 'read_url_site', 'read_image',
+        'list_agents', 'get_goal', 'job_list', 'job_output',
+      ],
       requiredCalls: [],
       submitTool: {
         name: 'submit_state',
@@ -263,7 +293,7 @@ export function createBuiltinGoals() {
         'append 会直接写入；overwrite / diff 会作为问题提交给用户批准。',
         '写入后调用 submit_state 结束本状态；引擎会自动推进到下一个 checklist goal。',
       ].join('\n'),
-      allowedTools: ['update_project_experience', 'read_project_experience', 'bash', 'str_replace_editor:view'],
+      allowedTools: ['update_project_experience', 'read_project_experience', 'bash', 'str_replace_editor'],
       requiredCalls: [{ tool: 'update_project_experience', min: 1 }],
       submitTool: {
         name: 'submit_state',

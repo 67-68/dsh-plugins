@@ -116,9 +116,9 @@ window.__ModuleLoader__.load({
 
 		const PHASES = ["IDLE", "BASE_READ", "REQUIREMENT_RECOGNITION", "RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION", "PRESET_ACTION", "ACTION_EXECUTE"];
 
-		/** Fresh IDLE state used before the first Remote read resolves. */
+		/** Fresh IDLE state used before the first Remote read resolves (`__loaded` guards auto-switching). */
 		function idleState() {
-			return { workflowId: "IDLE", phase: "IDLE", target: null, goal: null, selectedModel: null };
+			return { workflowId: "IDLE", phase: "IDLE", target: null, goal: null, selectedModel: null, __loaded: false };
 		}
 
 		/** Read the durable mode-gate state for the current session via the Remote service. */
@@ -144,7 +144,7 @@ window.__ModuleLoader__.load({
 						const result = await api().getState({ sessionId: sessionKey });
 						if (!current) return;
 						if (result && result.ok && result.value) {
-							setState(result.value);
+							setState({ ...result.value, __loaded: true });
 						} else if (current) {
 							setState(idleState());
 						}
@@ -548,14 +548,14 @@ window.__ModuleLoader__.load({
 		})();
 
 		const composerStore = (() => {
-			let state = { focused: false, hasText: false };
+			let state = { focused: false, hasText: false, text: "" };
 			const listeners = new Set();
 			const emit = () => { for (const listener of listeners) listener(); };
 			return {
 				subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
 				getSnapshot: () => state,
 				update: (next) => {
-					if (next.focused !== state.focused || next.hasText !== state.hasText) {
+					if (next.focused !== state.focused || next.hasText !== state.hasText || next.text !== state.text) {
 						state = next;
 						emit();
 					}
@@ -564,14 +564,16 @@ window.__ModuleLoader__.load({
 		})();
 
 		function readComposerState() {
-			if (typeof document === "undefined") return { focused: false, hasText: false };
+			if (typeof document === "undefined") return { focused: false, hasText: false, text: "" };
 			const el = document.querySelector("[data-composer-seat] textarea")
 				|| document.querySelector("textarea[aria-haspopup]")
 				|| document.querySelector("textarea");
-			if (!el) return { focused: false, hasText: false };
+			if (!el) return { focused: false, hasText: false, text: "" };
+			const value = typeof el.value === "string" ? el.value : "";
 			return {
 				focused: document.activeElement === el,
-				hasText: Boolean(el.value && el.value.trim().length > 0),
+				hasText: value.trim().length > 0,
+				text: value,
 			};
 		}
 
@@ -613,77 +615,229 @@ window.__ModuleLoader__.load({
 			return !state.workflowId || state.workflowId === "IDLE";
 		}
 
-		/** Full-screen modal covering the conversation but not header/composer. */
-		function IdleWorkflowModal(props) {
-			const { sessions, api, hostCtx } = props;
-			const isIdle = useIsIdle(sessions, api);
+		/** IDLE + "the durable state has actually been read at least once". */
+		function useIdleStatus(sessions, api) {
+			const state = useModeGateState(sessions, api);
+			return {
+				idle: !state.workflowId || state.workflowId === "IDLE",
+				loaded: Boolean(state.__loaded),
+			};
+		}
+
+		/** Prefer the focused/visible composer textarea over cached hidden ones. */
+		function findComposerTextarea() {
+			if (typeof document === "undefined") return null;
+			const all = Array.from(document.querySelectorAll("[data-composer-seat] textarea, [data-input-scroll] textarea"));
+			if (all.length === 0) return null;
+			const focused = all.find((el) => document.activeElement === el);
+			if (focused) return focused;
+			const visible = all.filter((el) => el.offsetParent !== null);
+			return visible[visible.length - 1] || all[all.length - 1] || null;
+		}
+
+		/** Switch a session to a workflow: the /mode command first, the direct Remote write second. */
+		async function switchWorkflow(options) {
+			const { sessionId, workflowId, getCommands, api } = options;
+			if (typeof sessionId !== "string" || typeof workflowId !== "string") return false;
+			const face = typeof getCommands === "function" ? getCommands() : null;
+			if (face && typeof face.execute === "function") {
+				try {
+					const outcome = await face.execute(sessionId, `/mode ${workflowId}`);
+					if (outcome === undefined || (outcome && outcome.kind !== "error")) return true;
+				} catch (_err) { /* fall through to the direct state write */ }
+			}
+			try {
+				const result = await api().selectWorkflow({ sessionId, workflowId });
+				return !(result && result.ok === false);
+			} catch (_err) {
+				return false;
+			}
+		}
+
+		/** Send the live composer draft as the next message (no-op without the input face). */
+		function submitDraft(inputActions) {
+			if (inputActions && typeof inputActions.submit === "function") {
+				try { inputActions.submit(); return true; } catch (_err) { return false; }
+			}
+			return false;
+		}
+
+		/** Best-effort return to the 对话 tab once the header (and its tab ring) is back. */
+		function activateChatView() {
+			const click = () => {
+				if (typeof document === "undefined") return;
+				for (const tab of document.querySelectorAll("[role=\"tab\"]")) {
+					if (tab.textContent && tab.textContent.includes("对话")) { tab.click(); return; }
+				}
+			};
+			click();
+			for (const delay of [150, 500, 1200]) setTimeout(click, delay);
+		}
+
+		/** Workflow button list shared by the tab view and the hero dock. */
+		function WorkflowChooser(props) {
+			const { workflows, disabled, busy, onPick, compact } = props;
+			if (!Array.isArray(workflows) || workflows.length === 0) {
+				return react.createElement("div", {
+					style: { color: "var(--dsw-alias-label-tertiary)", fontSize: compact ? 12 : 13, textAlign: "center", padding: "8px 0" },
+				}, "（未加载到工作流定义，请确认当前会话已绑定工作区）");
+			}
+			const blocked = Boolean(disabled) || Boolean(busy);
+			return react.createElement("div", {
+				style: {
+					display: "flex", flexDirection: compact ? "row" : "column", flexWrap: "wrap",
+					gap: compact ? 8 : 10, width: "100%",
+				},
+			}, ...workflows.map((wf) => {
+				const label = (wf.ui && wf.ui.buttonLabel) || wf.label || wf.id;
+				const description = (wf.ui && wf.ui.buttonDescription) || wf.description || "";
+				return react.createElement("button", {
+					key: wf.id,
+					type: "button",
+					disabled: blocked,
+					title: blocked ? "请先在输入框写下你的需求，再选择工作流" : description,
+					onClick: () => { if (!blocked) onPick(wf.id); },
+					style: {
+						flex: compact ? "0 1 auto" : "none",
+						textAlign: "left",
+						cursor: blocked ? "not-allowed" : "pointer",
+						opacity: blocked ? 0.45 : 1,
+						border: "1px solid var(--dsw-alias-border-l2)",
+						background: "var(--dsw-alias-bg-module-platform)",
+						color: "var(--dsw-alias-label-primary)",
+						borderRadius: 12,
+						padding: compact ? "8px 12px" : "14px 16px",
+						display: "flex", flexDirection: "column", gap: 2,
+					},
+				},
+					react.createElement("span", { style: { fontWeight: 600, fontSize: compact ? 13 : 15 } }, label),
+					!compact && react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, description)
+				);
+			}));
+		}
+
+		/** IDLE workflow chooser as a sibling view of 对话/轨迹. */
+		function IdleWorkflowView(props) {
+			const { sessions, api, getCommands, inputActions, useInput } = props;
 			const { workflows, sessionId } = useWorkflows(sessions, api);
-			const composer = useComposerState();
-			const hidden = useIdleModalHidden();
-			const [box, setBox] = react.useState({ top: 44, bottom: 120 });
-
-			react.useEffect(() => {
-				const measure = () => {
-					if (typeof document === "undefined") return;
-					const header = document.querySelector('[data-slot="conversation.session.header"]');
-					const seat = document.querySelector("[data-composer-seat]");
-					const top = header ? header.getBoundingClientRect().bottom : 44;
-					const bottom = seat ? Math.max(0, window.innerHeight - seat.getBoundingClientRect().top) : 120;
-					setBox({ top, bottom });
-				};
-				measure();
-				window.addEventListener("resize", measure);
-				const timer = setInterval(measure, 1000);
-				return () => { window.removeEventListener("resize", measure); clearInterval(timer); };
-			}, []);
-
-			const visible = isIdle && !hidden && !(composer.focused && composer.hasText);
-			if (!visible) return null;
+			/* Draft source: the framework session kit first, DOM polling as the backstop. */
+			const polled = useComposerState();
+			const liveDraft = typeof useInput === "function" ? useInput((state) => state.draft) : null;
+			const draft = typeof liveDraft === "string" ? liveDraft : polled.text;
+			const hasText = draft.trim().length > 0;
+			const [busy, setBusy] = react.useState(false);
 
 			const run = async (workflowId) => {
-				modalStore.set(true);
+				if (busy || !hasText) return;
+				setBusy(true);
 				try {
-					const commands = hostCtx && hostCtx.get ? hostCtx.get("remote.commands") : undefined;
-					if (commands && typeof commands.execute === "function" && typeof sessionId === "string") {
-						await commands.execute(sessionId, `/mode ${workflowId}`);
-						return;
-					}
-				} catch (_err) { /* fall through to direct state write */ }
-				try { await api().selectWorkflow({ sessionId, workflowId }); } catch (_err) { /* surfaced by refresh */ }
+					await switchWorkflow({ sessionId, workflowId, getCommands, api });
+					submitDraft(inputActions);
+					activateChatView();
+				} finally {
+					setBusy(false);
+				}
 			};
 
 			return react.createElement("div", {
 				style: {
-					position: "fixed", left: 0, right: 0, top: box.top, bottom: box.bottom,
-					zIndex: 40, display: "flex", alignItems: "center", justifyContent: "center",
-					background: "color-mix(in srgb, var(--dsw-alias-bg-base) 88%, transparent)",
-					backdropFilter: "blur(2px)", overflow: "auto", padding: 24,
+					height: "100%", width: "100%", overflowY: "auto",
+					padding: "28px 32px", display: "flex", flexDirection: "column",
+					alignItems: "center", justifyContent: "center", gap: 12,
 				},
-			}, react.createElement("div", {
-				style: { width: "100%", maxWidth: 720, display: "flex", flexDirection: "column", gap: 12 },
 			},
-				react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 18, fontWeight: 600 } }, "选择一个工作流开始"),
-				react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, marginBottom: 4 } }, "或者直接在下方输入框聊天；点击工作流等价于 /mode <id>。"),
-				...(workflows.length > 0 ? workflows.map((wf) => react.createElement("button", {
-					key: wf.id,
-					onClick: () => run(wf.id),
-					style: {
-						textAlign: "left", cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)",
-						background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
-						borderRadius: 12, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 4,
-					},
-				},
-					react.createElement("span", { style: { fontWeight: 600, fontSize: 15 } }, (wf.ui && wf.ui.buttonLabel) || wf.label),
-					react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, (wf.ui && wf.ui.buttonDescription) || wf.description || ""),
-				)) : react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)" } }, "（未加载到工作流定义）")),
-			));
+				react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 20, fontWeight: 600 } }, "选择一个工作流开始"),
+				react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, textAlign: "center" } }, "在下方输入框写下需求，再点工作流：会自动切到该工作流并把这段内容发出去。"),
+				react.createElement("div", { style: { width: "100%", maxWidth: 680 } },
+					react.createElement(WorkflowChooser, { workflows, disabled: !hasText, busy, onPick: run })
+				),
+				!hasText && react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, "输入框为空时按钮不可点击。")
+			);
 		}
 
-		/** Header-right button that toggles the IDLE modal. */
-		function ModeGateHeaderToggle(props) {
-			const { sessions, api } = props;
+		/** Hero-phase (blank session) chooser pinned above the composer card. */
+		function IdleWorkflowDock(props) {
+			const { sessions, api, getCommands, inputActions, input } = props;
 			const isIdle = useIsIdle(sessions, api);
+			const { workflows, sessionId } = useWorkflows(sessions, api);
 			const hidden = useIdleModalHidden();
+			const polled = useComposerState();
+			const [busy, setBusy] = react.useState(false);
+			/* Hero only: with a real view ring the 工作流 tab owns this chooser. */
+			const blank = Boolean(props.session && props.session.blank);
+			const draft = input && typeof input.draft === "string" ? input.draft : polled.text;
+			if (!blank || !isIdle || hidden) return null;
+			const hasText = draft.trim().length > 0;
+
+			const run = async (workflowId) => {
+				if (busy || !hasText) return;
+				setBusy(true);
+				try {
+					await switchWorkflow({ sessionId, workflowId, getCommands, api });
+					submitDraft(inputActions);
+				} finally {
+					setBusy(false);
+				}
+			};
+
+			return react.createElement("div", {
+				style: {
+					width: "min(calc(var(--dsh-composer-card-max-width, 780px) + 2 * var(--dsh-composer-side-clearance, 16px)), 100%)",
+					alignSelf: "center", boxSizing: "border-box",
+					padding: "0 var(--dsh-composer-side-clearance, 16px)",
+					display: "flex", flexDirection: "column", gap: 6,
+				},
+			},
+				react.createElement("div", {
+					style: { display: "flex", alignItems: "baseline", gap: 8, color: "var(--dsw-alias-label-secondary)", fontSize: 13, paddingLeft: 2 },
+				},
+					react.createElement("span", { style: { fontWeight: 600, color: "var(--dsw-alias-label-primary)" } }, "选择一个工作流开始"),
+					react.createElement("span", null, hasText ? "点击后会切换工作流，并把你输入的内容发出去。" : "先写点需求，按钮才会亮起。")
+				),
+				react.createElement(WorkflowChooser, { workflows, disabled: !hasText, busy, onPick: run })
+			);
+		}
+		/**
+		 * Header-right controls. Besides the show/hide button, this component
+		 * activates the IDLE workflow tab (via `setView` when the seat supplies it,
+		 * otherwise a DOM tab click) and hands the view back to 对话 as soon as the
+		 * session leaves IDLE. The hero phase has no tab ring, so the chooser there
+		 * rides `conversation.input.dock` instead.
+		 */
+		function ModeGateHeaderControls(props) {
+			const { sessions, api, setView } = props;
+			const status = useIdleStatus(sessions, api);
+			const isIdle = status.idle;
+			const hidden = useIdleModalHidden();
+			const prevShown = react.useRef(null);
+
+			react.useEffect(() => {
+				const show = isIdle && status.loaded && !hidden;
+				const activate = (label) => {
+					if (typeof setView === "function") {
+						setView(label === "工作流" ? "mode-gate-idle" : "chat");
+						return;
+					}
+					if (typeof document === "undefined") return;
+					const tabs = document.querySelectorAll('[role="tab"]');
+					for (const tab of tabs) {
+						if (tab.textContent && tab.textContent.includes(label)) { tab.click(); return; }
+					}
+				};
+				if (show) {
+					// Retry: the view slot may register a tick after this controller mounts.
+					activate("工作流");
+					const t1 = setTimeout(() => activate("工作流"), 150);
+					const t2 = setTimeout(() => activate("工作流"), 600);
+					const t3 = setTimeout(() => activate("工作流"), 1400);
+					prevShown.current = true;
+					return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+				}
+				if (prevShown.current === true) activate("对话");
+				prevShown.current = false;
+				return undefined;
+			}, [isIdle, status.loaded, hidden, setView]);
+
 			if (!isIdle) return null;
 			return react.createElement("button", {
 				onClick: () => modalStore.toggle(),
@@ -698,15 +852,38 @@ window.__ModuleLoader__.load({
 
 		/** IDLE-only custom placeholder rendered inside the composer input. */
 		function ComposerPlaceholder(props) {
-			const { sessions, api } = props;
+			const { sessions, api, useInput } = props;
 			const isIdle = useIsIdle(sessions, api);
-			const composer = useComposerState();
+			const polled = useComposerState();
+			const liveDraft = typeof useInput === "function" ? useInput((state) => state.draft) : null;
+			const composer = { hasText: typeof liveDraft === "string" ? liveDraft.trim().length > 0 : polled.hasText };
+
 			react.useEffect(() => {
 				if (typeof document === "undefined") return undefined;
-				if (isIdle) document.body.classList.add("mode-gate-idle-composer");
-				else document.body.classList.remove("mode-gate-idle-composer");
-				return () => document.body.classList.remove("mode-gate-idle-composer");
+				const restore = () => {
+					const el = findComposerTextarea();
+					if (el && el.dataset.modeGatePlaceholder !== undefined) {
+						el.setAttribute("placeholder", el.dataset.modeGatePlaceholder);
+						delete el.dataset.modeGatePlaceholder;
+					}
+					document.body.classList.remove("mode-gate-idle-composer");
+				};
+				const apply = () => {
+					if (!isIdle) { restore(); return; }
+					document.body.classList.add("mode-gate-idle-composer");
+					const el = findComposerTextarea();
+					if (!el) return;
+					if (!el.dataset.modeGatePlaceholder) {
+						el.dataset.modeGatePlaceholder = el.getAttribute("placeholder") || "";
+					}
+					if (el.getAttribute("placeholder") !== "") el.setAttribute("placeholder", "");
+				};
+				apply();
+				// The composer textarea can be re-created on session switches.
+				const timer = setInterval(apply, 500);
+				return () => { clearInterval(timer); restore(); };
 			}, [isIdle]);
+
 			if (!isIdle || composer.hasText) return null;
 			return react.createElement("div", {
 				style: {
@@ -749,11 +926,26 @@ window.__ModuleLoader__.load({
 				inject: () => ({ sessions: ctx.get("sessions"), api })
 			}, ModeGateFooterAction));
 
-			// Track the composer textarea so the IDLE modal can yield when the
-			// user starts typing (focus + non-empty draft).
+			// Track the focused composer textarea so the IDLE modal can yield when
+			// the user starts typing (focus + non-empty draft).
 			ctx.effect(() => {
 				if (typeof document === "undefined") return () => {};
-				const update = () => composerStore.update(readComposerState());
+				let active = null;
+				const update = (event) => {
+					const target = event && event.target;
+					if (target && target.tagName === "TEXTAREA") active = target;
+					const el = active || findComposerTextarea();
+					if (!el) {
+						composerStore.update({ focused: false, hasText: false, text: "" });
+						return;
+					}
+					const value = typeof el.value === "string" ? el.value : "";
+					composerStore.update({
+						focused: document.activeElement === el,
+						hasText: value.trim().length > 0,
+						text: value,
+					});
+				};
 				document.addEventListener("input", update, true);
 				document.addEventListener("focusin", update, true);
 				document.addEventListener("focusout", update, true);
@@ -777,21 +969,34 @@ window.__ModuleLoader__.load({
 				return () => style.remove();
 			}, "dsh-mode-gate: placeholder css");
 
-			ctx.slots.inject("shell.overlay", () => ctx.slots.register({
-				name: "shell.overlay",
-				id: "mode-gate-idle-modal",
-				order: 20,
+			// IDLE workflow chooser as a sibling view of 对话/轨迹. The header
+			// controls auto-switch to it while the session is IDLE.
+			ctx.slots.inject("conversation.view", () => ctx.slots.register({
+				name: "conversation.view",
+				id: "mode-gate-idle",
+				order: -1,
 				locale: NS,
-				inject: () => ({ sessions: ctx.get("sessions"), api, hostCtx: ctx })
-			}, IdleWorkflowModal));
+				label: () => "工作流",
+				inject: () => ({ sessions: ctx.get("sessions"), api, getCommands: () => ctx.get("remote.commands") })
+			}, IdleWorkflowView));
+
+			// Hero (blank session) has no view ring: the same chooser rides the input
+			// dock above the composer card so the first message can pick a workflow.
+			ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({
+				name: "conversation.input.dock",
+				id: "mode-gate-idle-dock",
+				order: 5,
+				locale: NS,
+				inject: () => ({ sessions: ctx.get("sessions"), api, getCommands: () => ctx.get("remote.commands") })
+			}, IdleWorkflowDock));
 
 			ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
 				name: "conversation.session.header.actions",
 				id: "mode-gate-idle-toggle",
 				order: 60,
 				locale: NS,
-				inject: () => ({ sessions: ctx.get("sessions"), api })
-			}, ModeGateHeaderToggle));
+				inject: (sessionId, actions) => ({ sessions: ctx.get("sessions"), api, setView: actions && actions.setView })
+			}, ModeGateHeaderControls));
 
 			ctx.slots.inject("conversation.input.overlay", () => ctx.slots.register({
 				name: "conversation.input.overlay",

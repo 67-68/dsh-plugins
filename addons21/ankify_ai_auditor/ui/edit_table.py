@@ -9,12 +9,14 @@ from aqt.qt import (
 )
 
 HEADERS = ["动作", "原 Front", "原 Back", "新 Front", "新 Back", "类型", "标签", "理由"]
+CLOZE_HEADERS = ["动作", "原 Text", "原 Overlapping", "新 Text", "新 Overlapping", "类型", "标签", "理由"]
 EDITABLE_COLUMNS = {3, 4, 5, 6}
 TRIM_LIMIT = 40
 
 COLOR_APPLIED = QColor("#1e3a5f")
 COLOR_DISCARDED = QColor("#c99700")
 COLOR_MIXED = QColor("#2e7d32")
+COLOR_KEEP = QColor("#6b7280")
 
 
 def _enum(container_name, member_name, fallback):
@@ -72,6 +74,7 @@ class AuditTableModel(QAbstractTableModel):
         self.tid = tid
         self.view_mode = "card"  # card | note
         self.rows = []
+        self.headers = HEADERS
         self.refresh()
 
     # -- 视图切换 --
@@ -83,6 +86,8 @@ class AuditTableModel(QAbstractTableModel):
 
     # -- 状态计算 --
     def _action_status(self, action):
+        if action["action"] == "keep":
+            return "keep"
         if action["action"] == "modify":
             if action.get("discarded"):
                 return "discarded"
@@ -111,6 +116,8 @@ class AuditTableModel(QAbstractTableModel):
             return COLOR_DISCARDED
         if status == "mixed":
             return COLOR_MIXED
+        if status == "keep":
+            return COLOR_KEEP
         return None
 
     def _is_editable_row(self, row):
@@ -126,6 +133,8 @@ class AuditTableModel(QAbstractTableModel):
             return
 
         actions = task.get("actions") or []
+        has_cloze = any((action.get("original") or {}).get("note_kind") == "cloze" for action in actions)
+        self.headers = CLOZE_HEADERS if has_cloze else HEADERS
         for action_index, action in enumerate(actions):
             original_fields = (action.get("original") or {}).get("fields") or {}
             keys = list(original_fields.keys())
@@ -134,6 +143,27 @@ class AuditTableModel(QAbstractTableModel):
             orig_front = original_fields.get(front_field, "") if front_field else ""
             orig_back = original_fields.get(back_field, "") if back_field else ""
             reason = action.get("reason") or ""
+
+            if action["action"] == "keep":
+                original = action.get("original") or {}
+                self.rows.append(
+                    Row(
+                        action_index=action_index,
+                        split_index=None,
+                        kind="保留",
+                        front_field=front_field,
+                        back_field=back_field,
+                        orig_front=orig_front,
+                        orig_back=orig_back,
+                        front="",
+                        back="",
+                        type_hint="",
+                        tags=", ".join(original.get("tags") or []),
+                        reason=reason,
+                        status="keep",
+                    )
+                )
+                continue
 
             if self.view_mode == "note":
                 if action["action"] == "modify":
@@ -230,7 +260,7 @@ class AuditTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        return len(HEADERS)
+        return len(self.headers)
 
     def _cell_text(self, row, col):
         if col == 0:
@@ -308,8 +338,8 @@ class AuditTableModel(QAbstractTableModel):
     def headerData(self, section, orientation, role=ROLE_DISPLAY):
         if role != ROLE_DISPLAY:
             return None
-        if orientation == HORIZONTAL and 0 <= section < len(HEADERS):
-            return HEADERS[section]
+        if orientation == HORIZONTAL and 0 <= section < len(self.headers):
+            return self.headers[section]
         return None
 
     # -- 把编辑结果写回 action --

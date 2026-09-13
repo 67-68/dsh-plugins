@@ -68,6 +68,8 @@ class TaskManager:
             "created_notes": 0,
             "created_cards": 0,
             "actions": [],
+            "errors": [],
+            "last_error": None,
             "queue": queue.Queue(),
             "cfg": cfg,
         }
@@ -140,11 +142,14 @@ class TaskManager:
                 result = ankifyd_client.audit(batch)
                 actions = result.get("actions") or []
                 keep_count = int(result.get("keep_count") or 0)
-            except Exception:
+            except Exception as exc:
+                message = str(exc) or exc.__class__.__name__
                 actions = []
                 with self._lock:
                     task["failed"] += len(batch)
                     task["processed"] += len(batch)
+                    task["last_error"] = message
+                    task["errors"].append({"batch_start": start, "batch_size": len(batch), "error": message})
                 continue
 
             with self._lock:
@@ -161,7 +166,10 @@ class TaskManager:
 
         with self._lock:
             if not task.get("cancel_requested"):
-                task["status"] = "done"
+                if task["failed"] and task["failed"] >= task["total"]:
+                    task["status"] = "error"
+                else:
+                    task["status"] = "done"
         task["queue"].put(None)
         self._emit_main_thread(self._update_browser_actions)
 

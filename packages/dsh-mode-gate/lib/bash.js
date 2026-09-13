@@ -486,9 +486,13 @@ function matchBashDeny(command, denyList) {
 
 /** Extra write-capable flags on otherwise read-only verbs. */
 function commandHasWriteGuard(command) {
-  for (const [verb, flags] of Object.entries(READ_ONLY_VERB_GUARDS)) {
-    if (!extractCommandVerbs(command).includes(verb)) continue;
-    if (flags.some((flag) => hasStandaloneFlag(command, flag))) return true;
+  for (const segment of splitShellSegments(String(command || ''))) {
+    const tokens = tokenizeSimpleCommand(segment);
+    const base = firstCommandWord(tokens);
+    if (!base) continue;
+    const flags = READ_ONLY_VERB_GUARDS[base];
+    if (!flags) continue;
+    if (flags.some((flag) => tokens.includes(flag))) return true;
   }
   return false;
 }

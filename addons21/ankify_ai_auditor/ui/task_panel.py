@@ -137,7 +137,11 @@ class TaskPanel(QDialog):
         status = task["status"]
         total = task["total"] or 1
         processed = task["processed"]
-        self.status_label.setText("状态：%s    已跑 %s / %s 张笔记" % (status, processed, task["total"]))
+        status_text = "状态：%s    已跑 %s / %s 张笔记" % (status, processed, task["total"])
+        last_error = task.get("last_error")
+        if last_error and status in ("error", "done"):
+            status_text += "\n错误：%s" % last_error
+        self.status_label.setText(status_text)
         self.progress.setRange(0, total)
         self.progress.setValue(processed)
         self.stats_label.setText(

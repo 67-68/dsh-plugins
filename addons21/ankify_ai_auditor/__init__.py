@@ -107,17 +107,24 @@ def _selected_payloads(browser):
 
 def _on_clean(browser):
     payloads = _selected_payloads(browser)
+    _debug("_on_clean selected payloads=%s" % len(payloads))
     if not payloads:
+        _debug("_on_clean aborted: no selected notes (or all filtered)")
+        from aqt.utils import tooltip
+
+        tooltip("Ankify AI: 没有可清洗的笔记（请先选中笔记；已加锁/排除的会跳过）", parent=browser)
         return
     from . import ankifyd_client
     from . import config as config_mod
 
     error = ankifyd_client.preflight_error()
     if error:
+        _debug("_on_clean preflight error: %s" % error)
         _notify_preflight_error(browser, error)
         return
     cfg = config_mod.get_config()
-    TM.start_batch(payloads, cfg)
+    tid = TM.start_batch(payloads, cfg)
+    _debug("_on_clean started task=%s payloads=%s" % (tid, len(payloads)))
 
 
 def _on_open_task(browser):

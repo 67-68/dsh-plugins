@@ -33,19 +33,37 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             }
             payload = {"choices": [{"message": {"role": "assistant", "content": json.dumps(result, ensure_ascii=False)}}]}
         elif "task-ankify" in system:
-            result = {
-                "cards": [
-                    {
-                        "front": "1848 年 2 月 24 日，国王路易·菲利普做了什么？",
-                        "back": "宣布退位",
-                        "type": "A4",
-                        "tags": ["history"],
-                        "extra": "",
-                    }
-                ],
-                "pipeline": "single-pass",
-                "source_summary": "1848 二月革命",
-            }
+            user_content = body.get("messages", [{}, {}])[1].get("content", "")
+            if isinstance(user_content, list):
+                user_content = " ".join(part.get("text", "") for part in user_content if isinstance(part, dict))
+            if "cloze-test" in str(user_content):
+                result = {
+                    "cards": [
+                        {
+                            "format": "cloze-list",
+                            "cloze_items": ["item1", "item2", "item3"],
+                            "type": "B1",
+                            "tags": ["history"],
+                            "extra": "连续 cloze 列表",
+                        }
+                    ],
+                    "pipeline": "single-pass",
+                    "source_summary": "有限列表",
+                }
+            else:
+                result = {
+                    "cards": [
+                        {
+                            "front": "1848 年 2 月 24 日，国王路易·菲利普做了什么？",
+                            "back": "宣布退位",
+                            "type": "A4",
+                            "tags": ["history"],
+                            "extra": "",
+                        }
+                    ],
+                    "pipeline": "single-pass",
+                    "source_summary": "1848 二月革命",
+                }
             payload = {"choices": [{"message": {"role": "assistant", "content": json.dumps(result, ensure_ascii=False)}}]}
         elif body.get("tools"):
             tool_args = {
@@ -134,6 +152,7 @@ class AnkifydE2ETest(unittest.TestCase):
             result = json.loads(response.read().decode("utf-8"))
         self.assertTrue(result["ok"])
         self.assertEqual(result["service"], "ankifyd")
+        self.assertIn("bulk-text", result["modes"])
 
     def test_audit_returns_actions(self):
         notes = [
@@ -156,11 +175,101 @@ class AnkifydE2ETest(unittest.TestCase):
         self.assertEqual(result["actions"][0]["nid"], 1)
         self.assertEqual(result["actions"][0]["original"]["guid"], "guid-1")
 
+    def test_audit_keep_is_returned_as_action(self):
+        notes = [
+            {
+                "guid": "keep-guid",
+                "id": 42,
+                "model": "Basic",
+                "fields": {"Front": "好卡", "Back": "好答案"},
+                "tags": [],
+                "decks": [],
+                "card_templates": [],
+                "review": {"card_count": 1, "max_interval": 21, "avg_ease": 2.5, "lapses": 0, "reps": 5, "leech": False},
+            }
+        ]
+        response = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": []}}]}
+        actions = ankifyd.parse_audit_response(response, notes)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action"], "keep")
+        self.assertEqual(actions[0]["guid"], "keep-guid")
+
     def test_ankify_returns_cards(self):
         body = {"kind": "text", "text": "1848 年 2 月 24 日，国王路易·菲利普宣布退位。", "background": "历史"}
         result = post_json(self.base + "/v1/ankify", body, self.cfg["token"])
         self.assertEqual(len(result["cards"]), 1)
         self.assertEqual(result["cards"][0]["type"], "A4")
+
+    def test_ankify_bulk_text_cloze_list(self):
+        body = {
+            "kind": "text",
+            "mode": "bulk-text",
+            "text": "cloze-test: 有限列表按顺序排列",
+            "background": "**重点** 之外的文字只是上下文",
+        }
+        result = post_json(self.base + "/v1/ankify", body, self.cfg["token"])
+        self.assertEqual(result["cards"][0]["format"], "cloze-list")
+        self.assertEqual(result["cards"][0]["cloze_items"], ["item1", "item2", "item3"])
+
+    def test_ankify_simple_cards_mode(self):
+        body = {"kind": "text", "mode": "simple-cards", "text": "apple", "background": "词汇释义"}
+        result = post_json(self.base + "/v1/ankify", body, self.cfg["token"])
+        self.assertEqual(result["cards"][0]["type"], "A4")
+
+    def test_invalid_mode_rejected(self):
+        body = {"kind": "text", "mode": "image", "text": "abc"}
+        try:
+            post_json(self.base + "/v1/ankify", body, self.cfg["token"])
+            self.fail("should have raised")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 400)
+
+    def test_cloze_card_validation(self):
+        ankifyd.validate_card(
+            {"format": "cloze-list", "cloze_items": ["a", "b"], "type": "B1"},
+            "test",
+        )
+        with self.assertRaises(ValueError):
+            ankifyd.validate_card(
+                {"format": "cloze-list", "cloze_items": ["a"] * 9, "type": "B1"},
+                "test",
+            )
+
+    def test_finite_list_back_converted_to_cloze_list(self):
+        result = ankifyd.validate_ankify_result(
+            {
+                "cards": [
+                    {
+                        "front": "What was the motivation of the Declaration of Heidelberg?",
+                        "back": "common defense, external representation, national representation, removal of inter and outer danger",
+                        "type": "B1",
+                        "extra": "",
+                    }
+                ],
+                "pipeline": "single-pass",
+            }
+        )
+        card = result["cards"][0]
+        self.assertEqual(card["format"], "cloze-list")
+        self.assertEqual(
+            card["cloze_items"],
+            [
+                "common defense",
+                "external representation",
+                "national representation",
+                "removal of inter and outer danger",
+            ],
+        )
+        self.assertEqual(card["front"], "What was the motivation of the Declaration of Heidelberg?")
+
+    def test_invalid_pipeline_normalized(self):
+        result = ankifyd.validate_ankify_result(
+            {
+                "cards": [{"front": "q", "back": "a", "type": "A1"}],
+                "pipeline": "TE",
+            }
+        )
+        self.assertEqual(result["pipeline"], "single-pass")
 
     def test_classify_returns_types(self):
         body = {"text": "1848 年 2 月 24 日，国王路易·菲利普宣布退位。", "background": "历史"}

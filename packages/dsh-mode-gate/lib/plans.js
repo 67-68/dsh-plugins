@@ -111,11 +111,14 @@ export function advanceStaticPlan(plan) {
   return { ...plan, items, currentId: next ? next.id : null };
 }
 
-export function createDynamicPlan(todos, stateId) {
+export function createDynamicPlan(todos, stateId, goal = null) {
   const list = Array.isArray(todos) ? todos : [];
+  const currentGoal = goal && typeof goal === 'object' ? goal : null;
   return {
     scope: 'state',
     stateId: stateId || null,
+    goalId: currentGoal ? currentGoal.id : null,
+    goalText: currentGoal ? currentGoal.text : null,
     items: list
       .filter((item) => item && typeof item.content === 'string' && item.content.trim())
       .map((item, index) => ({

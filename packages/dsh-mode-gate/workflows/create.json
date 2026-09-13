@@ -18,9 +18,16 @@
     "key": "loopMemory",
     "scope": "workflow-instance",
     "enabled": true,
-    "injectAtStates": ["RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION"],
+    "injectAtStates": [
+      "RESEARCH",
+      "EXECUTE",
+      "DEBUG",
+      "ACCUMULATION"
+    ],
     "stampField": "iteration",
-    "compactAt": ["ACCUMULATION.exit"],
+    "compactAt": [
+      "ACCUMULATION.exit"
+    ],
     "maxBytes": 8192
   },
   "staticPlan": {
@@ -38,7 +45,10 @@
     "scope": "state",
     "mirrorTool": "todo_write",
     "allowAgentEdit": true,
-    "clearOn": ["state.exit", "goal.completed"]
+    "clearOn": [
+      "state.exit",
+      "goal.completed"
+    ]
   },
   "states": [
     {
@@ -48,7 +58,13 @@
       "permissions": {
         "write": false,
         "bash": "read-only",
-        "tools": ["read_project_experience", "skill_load", "skill_search", "bash", "str_replace_editor:view"]
+        "tools": [
+          "read_project_experience",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view"
+        ]
       },
       "model": {
         "reasoningEffort": "high"
@@ -59,15 +75,20 @@
       "prompt": "找到本项目的 project-experience 文件夹，一次性 dump 系统拓扑、血泪法则、核心状态树三个文件。",
       "transitions": [
         {
-          "when": { "type": "goal.completed" },
-          "to": { "workflow": "$self", "state": "REQUIREMENT_RECOGNITION" }
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "REQUIREMENT_RECOGNITION"
+          }
         }
       ]
     },
     {
       "id": "REQUIREMENT_RECOGNITION",
       "label": "需求分解",
-      "description": "读取 feature intent；写入用户原话/理解/checklist，并把 checklist 注册为 staticPlan。",
+      "description": "调研代码库与 feature intent；写入用户原话/理解/checklist，并把 checklist 注册为 staticPlan。",
       "permissions": {
         "write": false,
         "bash": "read-only",
@@ -76,11 +97,25 @@
           "get_feature_intent",
           "update_feature_intent",
           "submit_requirement_protocol",
+          "read",
+          "grep",
+          "glob",
+          "web_search",
+          "read_url",
+          "read_url_batch",
+          "read_url_links",
+          "read_url_site",
+          "read_image",
+          "list_agents",
+          "get_goal",
+          "job_list",
+          "job_output",
+          "ask_user_question",
+          "todo_write",
           "skill_load",
           "skill_search",
           "bash",
-          "str_replace_editor:view",
-          "todo_write"
+          "str_replace_editor:view"
         ]
       },
       "model": {
@@ -89,22 +124,48 @@
       "goal": {
         "ref": "feature-intent.read-and-decompose"
       },
-      "prompt": "读取 feature intent 后，用 update_feature_intent 一次写入三个 field：用户原话、你的理解、可验收 checklist。checklist 会注册为本工作流的 staticPlan。",
+      "prompt": "先调研再写：用 list_feature_intents / get_feature_intent 阅读相关 feature intent，并用 read/grep/glob/web_search/read_url/bash（只读）调研代码库。然后用 update_feature_intent 一次写入三个 field：用户原话、你的理解、可验收 checklist。最后用 submit_requirement_protocol 提交协议。",
       "transitions": [
         {
-          "when": { "type": "goal.completed" },
-          "to": { "workflow": "$self", "state": "RESEARCH" }
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "RESEARCH"
+          }
         }
       ]
     },
     {
       "id": "RESEARCH",
       "label": "研究",
-      "description": "重新阅读 project-experience 三个文件，为当前 checklist goal 输出实现思路与风险。",
+      "description": "重新阅读 project-experience，为当前 checklist goal 调研，并产出本 goal 的 dynamic plan。",
       "permissions": {
         "write": false,
         "bash": "read-only",
-        "tools": ["read_project_experience", "skill_load", "skill_search", "bash", "str_replace_editor:view", "todo_write"]
+        "tools": [
+          "read_project_experience",
+          "read",
+          "grep",
+          "glob",
+          "web_search",
+          "read_url",
+          "read_url_batch",
+          "read_url_links",
+          "read_url_site",
+          "read_image",
+          "list_agents",
+          "get_goal",
+          "job_list",
+          "job_output",
+          "ask_user_question",
+          "todo_write",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view"
+        ]
       },
       "model": {
         "reasoningEffort": "high"
@@ -113,11 +174,16 @@
         "ref": "create.research",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "重新阅读 project-experience 三个文件，围绕当前 checklist goal 产出实现思路、涉及文件和风险。",
+      "prompt": "重新阅读 project-experience，围绕当前 checklist goal 用只读工具充分调研，然后 todo_write 出本 goal 的 dynamic plan（第一项 in_progress），最后 submit_state。",
       "transitions": [
         {
-          "when": { "type": "goal.completed" },
-          "to": { "workflow": "$self", "state": "EXECUTE" }
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "EXECUTE"
+          }
         }
       ]
     },
@@ -140,8 +206,13 @@
       "prompt": "执行当前 checklist goal。完成标准以 goal 的验收文本为准；不要顺手改无关模块。",
       "transitions": [
         {
-          "when": { "type": "goal.completed" },
-          "to": { "workflow": "$self", "state": "DEBUG" }
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "DEBUG"
+          }
         }
       ]
     },
@@ -164,8 +235,13 @@
       "prompt": "验证当前 checklist goal 的验收标准。能自行修复就修复；无法解决时，把复现步骤和需要用户做什么写清楚，请求用户协助。",
       "transitions": [
         {
-          "when": { "type": "goal.completed" },
-          "to": { "workflow": "$self", "state": "ACCUMULATION" }
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "ACCUMULATION"
+          }
         }
       ]
     },
@@ -176,7 +252,13 @@
       "permissions": {
         "write": false,
         "bash": "read-only",
-        "tools": ["update_project_experience", "read_project_experience", "skill_load", "bash", "str_replace_editor:view"]
+        "tools": [
+          "update_project_experience",
+          "read_project_experience",
+          "skill_load",
+          "bash",
+          "str_replace_editor:view"
+        ]
       },
       "model": {
         "reasoningEffort": "low"
@@ -188,13 +270,29 @@
       "prompt": "用 update_project_experience 把本轮变化追加到 project-experience。如需修改既有内容，提出 diff 或全量覆盖申请，等待用户批准。",
       "transitions": [
         {
-          "when": { "type": "staticPlan.pending", "op": ">", "value": 0 },
-          "to": { "workflow": "$self", "state": "RESEARCH" },
-          "loop": { "increment": "iteration" }
+          "when": {
+            "type": "staticPlan.pending",
+            "op": ">",
+            "value": 0
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "RESEARCH"
+          },
+          "loop": {
+            "increment": "iteration"
+          }
         },
         {
-          "when": { "type": "staticPlan.pending", "op": "==", "value": 0 },
-          "to": { "workflow": "IDLE", "state": "IDLE" },
+          "when": {
+            "type": "staticPlan.pending",
+            "op": "==",
+            "value": 0
+          },
+          "to": {
+            "workflow": "IDLE",
+            "state": "IDLE"
+          },
           "complete": true
         }
       ]

@@ -11,9 +11,11 @@
 //   - v0 / v3 事件结构不同，但 user/message 与 assistant/message 的
 //     content 结构一致，因此用同一套提取逻辑
 //   - 工具 import_session 的输出进入模型上下文，完成“背景注入”
-//   - 斜杠命令 /import 只做用户侧展示（DSH 命令是 log-only，不进模型）
+//   - 斜杠命令 /import 读取转录后通过 agent.followup 作为一条用户消息
+//     排队给当前 agent，模型下一次运行一定看得到（DSH 命令本身 log-only）
 
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
@@ -230,6 +232,38 @@ function renderImportResult(value) {
   return v.transcript || '(空转录)'
 }
 
+/** 把转录包装成一条明确的“背景注入”用户消息文本。 */
+function wrapBackground(text) {
+  return '# 导入的旧会话背景\n\n以下是用户通过 /import 注入的历史对话记录，只作为背景知识理解；除非用户明确要求，不要逐字复述或主动延续其中未完成的工作。\n\n' + text
+}
+
+/** 构造并发送一条 user-role 背景消息；返回是否成功。 */
+function queueBackground(agent, background) {
+  if (!agent || typeof agent.followup !== 'function') return false
+  const message = Object.freeze({
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text: background }],
+    source: { kind: 'plugin', plugin: 'dsh-session-converter' },
+  })
+  agent.followup(message)
+  return true
+}
+
+/** 生成不会在句子中间截断的预览（头 20 行 + 尾 10 行）。 */
+function makePreview(text, headLines = 20, tailLines = 10) {
+  const lines = text.split('\n')
+  if (lines.length <= headLines + tailLines) return text
+  const omitted = lines.length - headLines - tailLines
+  return [
+    ...lines.slice(0, headLines),
+    '',
+    `…（中间省略 ${omitted} 行，完整内容已注入）…`,
+    '',
+    ...lines.slice(-tailLines),
+  ].join('\n')
+}
+
 // ── 查找目标会话 ────────────────────────────────────────────────────────────
 
 function findSession(index, zstd, includeReasoning, query) {
@@ -276,34 +310,57 @@ export function apply(ctx, config = {}) {
   const getIndex = () => buildSessionIndex(cfg.sessionsDir)
 
   ctx.effect(() => () => {
-    // 无全局可变状态，无需清理；保留 dispose 槽位以便后续加缓存。
+    // 无全局可变状态；保留 dispose 槽位。
   })
 
   // 斜杠命令：用户命令平面（DSH 命令是 log-only，不进模型上下文）。
-  // 不带参数时列出可导入会话；带 session id / 关键词时直接显示该会话转录。
+  // 不带参数时列出可导入会话；带 session id / 关键词时读取转录并作为
+  // 一条 user-role 背景消息 followup 给当前 agent，模型下一次运行一定看得到。
   try {
     ctx.commands.register({
       name: 'import',
-      description: '列出可导入的旧版 DSH 会话；带会话 ID 时直接显示该会话的对话转录（用户可复制）',
-      input: { hint: '可选：会话 ID 或标题关键词' },
+      description: '把旧版 DSH 会话作为背景注入当前会话；不带参数列出可导入会话；末尾加 --reasoning 可包含模型思考',
+      input: { hint: '会话 ID / 标题关键词 [--reasoning]' },
       handler: (invocation) => {
         try {
           const raw = invocation && typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
+          const agent = invocation && invocation.agent
           const index = getIndex()
+
+          // 解析 --reasoning 开关：/import <query> --reasoning
+          let includeReasoning = cfg.includeReasoning
+          let query = raw
           if (raw) {
-            const found = findSession(index, zstd, cfg.includeReasoning, raw)
-            if (!found) return Promise.resolve({ kind: 'error', text: `没有找到匹配 "${raw}" 的会话。` })
+            const tokens = raw.split(/\s+/)
+            if (tokens[tokens.length - 1] === '--reasoning') {
+              includeReasoning = true
+              query = tokens.slice(0, -1).join(' ').trim()
+            }
+          }
+
+          if (query) {
+            const found = findSession(index, zstd, includeReasoning, query)
+            if (!found) return Promise.resolve({ kind: 'error', text: `没有找到匹配 "${query}" 的会话。` })
             if (found.ambiguous) {
               return Promise.resolve({ kind: 'error', text: `关键词匹配到多个会话，请使用更完整的 session id：${found.ambiguous.join(', ')}` })
             }
-            const { text } = buildTranscript(found.session, cfg.maxChars)
-            return Promise.resolve({ kind: 'success', text })
+            const { text, charsReturned, truncated } = buildTranscript(found.session, cfg.maxChars)
+            const background = wrapBackground(text)
+            const queued = queueBackground(agent, background)
+            if (!queued) {
+              return Promise.resolve({ kind: 'error', text: '当前 agent 不支持 followup 注入，请改用工具 import_session。' })
+            }
+            const preview = makePreview(background)
+            return Promise.resolve({
+              kind: 'success',
+              text: `已把旧会话背景${includeReasoning ? '（含 reasoning）' : ''}作为一条消息注入当前会话（${charsReturned} 字符${truncated ? '，已截断' : ''}），模型马上会看到。\n\n预览：\n${preview}`,
+            })
           }
           const list = index.map((item) => summarizeSession(item, zstd, cfg.includeReasoning))
           list.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
           return Promise.resolve({ kind: 'success', text: renderSessionList(list) })
         } catch (e) {
-          return Promise.resolve({ kind: 'error', text: `列出会话失败: ${e && e.message ? e.message : e}` })
+          return Promise.resolve({ kind: 'error', text: `/import 失败: ${e && e.message ? e.message : e}` })
         }
       },
     })
@@ -396,5 +453,5 @@ export function apply(ctx, config = {}) {
     },
   })
 
-  console.log('[dsh-session-converter] loaded; tool import_session + command /import registered')
+  console.log('[dsh-session-converter] loaded; tool import_session + command /import (followup injection) registered')
 }

@@ -37,9 +37,9 @@
 
 | 方法 | 路径 | 请求 | 响应 |
 | --- | --- | --- | --- |
-| GET | `/health` | - | `{ok, service, service_version, core_version, models, port}` |
+| GET | `/health` | - | `{ok, service, service_version, core_version, models, modes, card_formats, port}` |
 | POST | `/v1/classify` | `{text, background?}` | `classify_result.json` |
-| POST | `/v1/ankify` | `{kind:"text"|"image", text?, image_base64?, mime_type?, background?, classify?}` | `ankify_result.json` |
+| POST | `/v1/ankify` | `{kind:"text"\|"image", mode:"image"\|"bulk-text"\|"simple-cards", text?, image_base64?, mime_type?, background?, classify?}` | `ankify_result.json` |
 | POST | `/v1/audit` | `{notes:[NotePayload]}` | `{actions:[AuditAction], keep_count}` |
 
 所有请求带 `Authorization: Bearer <token>`，`/health` 也要求。
@@ -60,10 +60,12 @@
 - `task_manager._worker` 改为调用 `ankifyd_client.audit()`。
 - 插件自身配置只保留 `batch_size` / `dry_run` / `reset_on_key_change` / `source_tag` / `locked_tag` / `exclude_decks`。
 
-## 6. Raycast 插件（未来）
+## 6. Raycast 插件
 
-- 删除自有 prompt / key / api 调用，改为调用 `/v1/classify` 与 `/v1/ankify`。
-- 只保留剪贴板读取、文件选择、cards -> Markdown 渲染、写入 Obsidian。
+- 删除自有 prompt / key / api 调用，改为调用 `/v1/ankify`。
+- 只保留 Vault / 文件选择、模式选择、剪贴板/选中文本读取、图片文件读取、cards -> Markdown 渲染、写入 Obsidian。
+- 三种模式：`image`、`bulk-text`、`simple-cards`；`background` 在不同模式下有不同语义。
+- `format="cloze-list"` 的 card 渲染为 `#### [cloze] {front}` 块，Anki 端转成连续 cloze。
 - `ankify` 返回的是 JSON cards，不返回 Markdown。
 
 ## 7. 测试

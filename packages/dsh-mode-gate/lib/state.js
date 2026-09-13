@@ -66,7 +66,7 @@ function emptyStaticPlan() {
 }
 
 function emptyDynamicPlan() {
-  return { scope: 'state', stateId: null, items: [], updatedAt: 0 };
+  return { scope: 'state', stateId: null, goalId: null, goalText: null, items: [], updatedAt: 0 };
 }
 
 function emptyLoopMemory() {
@@ -111,7 +111,9 @@ export function normalizeSessionEntry(entry) {
     bash: Array.isArray(source.bash) ? source.bash.filter((s) => typeof s === 'string' && s.trim()) : [],
     goal,
     staticPlan: source.staticPlan && typeof source.staticPlan === 'object' ? source.staticPlan : emptyStaticPlan(),
-    dynamicPlan: source.dynamicPlan && typeof source.dynamicPlan === 'object' ? source.dynamicPlan : emptyDynamicPlan(),
+    dynamicPlan: source.dynamicPlan && typeof source.dynamicPlan === 'object'
+      ? { ...emptyDynamicPlan(), ...source.dynamicPlan }
+      : emptyDynamicPlan(),
     loopMemory: source.loopMemory && typeof source.loopMemory === 'object' ? source.loopMemory : emptyLoopMemory(),
     selectedModel: source.selectedModel && typeof source.selectedModel === 'object' ? source.selectedModel : null,
     featureIntentFile: typeof source.featureIntentFile === 'string' ? source.featureIntentFile : null,
@@ -184,11 +186,21 @@ export function writeState(agent, patch) {
   saveStateStore(store);
 }
 
+function firstGoalLine(prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return null;
+  const first = text.split(/\r?\n/)[0].trim();
+  return first.replace(/^\[目标\]\s*/, '') || first;
+}
+
 export function formatCapabilities(state) {
+  const goalTarget = state.goal && state.goal.status === 'active' && state.goal.prompt
+    ? firstGoalLine(state.goal.prompt)
+    : null;
   return [
     `当前工作流：${state.workflowId || IDLE_WORKFLOW_ID}`,
     `当前状态：${state.phase || IDLE_STATE_ID}`,
-    `当前 Target：${state.target ? state.target.target : '未声明'}`,
+    `当前 Target：${goalTarget || (state.target ? state.target.target : '未声明')}`,
     `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
     `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
     '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换阶段）、dev_tool_search / request_extra（申请额外 skill/bash）。',
