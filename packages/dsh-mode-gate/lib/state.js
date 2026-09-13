@@ -61,6 +61,25 @@ export function normalizeTaskModes(value) {
   return out;
 }
 
+/** User-editable per-state prompt + auto-guide toggle, persisted top-level. */
+export function normalizeWorkflowOverrides(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const [workflowId, states] of Object.entries(value)) {
+    if (!states || typeof states !== 'object') continue;
+    const nextStates = {};
+    for (const [stateId, override] of Object.entries(states)) {
+      if (!override || typeof override !== 'object') continue;
+      const next = {};
+      if (typeof override.prompt === 'string') next.prompt = override.prompt.trim();
+      if (typeof override.autoGuide === 'boolean') next.autoGuide = override.autoGuide;
+      if (Object.keys(next).length > 0) nextStates[stateId] = next;
+    }
+    if (Object.keys(nextStates).length > 0) out[workflowId] = nextStates;
+  }
+  return out;
+}
+
 function emptyStaticPlan() {
   return { source: 'feature-intent.checklist', featureIntentFile: null, items: [], currentId: null, createdAt: 0 };
 }
@@ -124,6 +143,7 @@ export function normalizeSessionEntry(entry) {
     presetActionContent: typeof source.presetActionContent === 'string' ? source.presetActionContent : null,
     workspace: typeof source.workspace === 'string' ? source.workspace : null,
     migrationNotice: migrated.migrationNotice || (typeof source.migrationNotice === 'string' ? source.migrationNotice : null),
+    pendingProtocol: source.pendingProtocol && typeof source.pendingProtocol === 'object' ? source.pendingProtocol : null,
   };
 }
 
@@ -133,6 +153,7 @@ export function loadStateStore() {
     sessions: {},
     bashDenyList: undefined,
     modelCatalog: normalizeModelCatalog(),
+    workflowOverrides: normalizeWorkflowOverrides(),
     taskModes: normalizeTaskModes(),
     workflowRegistryVersion: 1,
   };
@@ -145,6 +166,7 @@ export function loadStateStore() {
       sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
       bashDenyList: parsed.bashDenyList,
       modelCatalog: normalizeModelCatalog(parsed.modelCatalog),
+      workflowOverrides: normalizeWorkflowOverrides(parsed.workflowOverrides),
       taskModes: normalizeTaskModes(parsed.taskModes),
       workflowRegistryVersion: parsed.workflowRegistryVersion || 1,
     };
@@ -173,7 +195,7 @@ export function readState(agent) {
   const sessionId = agent?.session?.id;
   const entry = readSessionEntry(sessionId);
   const store = loadStateStore();
-  return { ...entry, modelCatalog: store.modelCatalog, taskModes: store.taskModes };
+  return { ...entry, modelCatalog: store.modelCatalog, taskModes: store.taskModes, workflowOverrides: store.workflowOverrides };
 }
 
 export function writeState(agent, patch) {

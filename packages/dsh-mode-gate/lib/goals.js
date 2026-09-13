@@ -146,9 +146,9 @@ export function createBuiltinGoals() {
       id: 'feature-intent.read-and-decompose',
       prompt: (env) => [
         '[目标] 读取 feature intent 并完成需求分解',
-        '1. 用 list_feature_intents 查看全部 feature intent；可能存在多个，用 get_feature_intent 阅读与本次任务最相关的那个；',
+        '1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；',
         '2. 用 read / grep / glob / web_search / read_url / bash（只读）调研代码库，确保写出的 checklist 是可验收的节点；',
-        '3. 用 update_feature_intent 一次写入三个 field：user_words（用户原话）、understanding（你的理解）、checklist（可验收节点数组）；',
+        '3. 用 update_feature_intent 一次写入一个 feature intent 的三个 field：user_words（用户原话）、understanding（你的理解）、checklist（可验收节点数组）；这三个 field 会在同一次写入中分别落到三个小标题下；',
         '4. checklist 每一项必须是可验收的节点，例如「按钮在 xx 处出现」「点击按钮展示 xxxx 数据」；',
         '5. 如需记录需求分解期间的调研任务，可调用 todo_write；',
         '6. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
@@ -163,7 +163,7 @@ export function createBuiltinGoals() {
         'read_image', 'list_agents', 'get_goal', 'job_list', 'job_output',
         'ask_user_question', 'todo_write', 'bash', 'str_replace_editor',
       ],
-      requiredCalls: [{ tool: 'list_feature_intents', min: 1 }, { tool: 'update_feature_intent', min: 1 }],
+      requiredCalls: [{ tool: 'update_feature_intent', min: 1 }],
       submitTool: {
         name: 'submit_requirement_protocol',
         async parse(args, env) {
@@ -313,6 +313,133 @@ export function createBuiltinGoals() {
             loopMemory: memory,
           },
           prompt: item ? `已完成 checklist goal「${item.text}」。` : '本轮总结完成。',
+        };
+      },
+    },
+
+    {
+      id: 'rough.requirement-recognition',
+      prompt: (env) => [
+        '[目标] 读取 feature intent 并拆解为 1 个 goal',
+        '1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；',
+        '2. 用 read / grep / glob / web_search / read_url / bash（只读）调研代码库，确认这 1 个 goal 的可验收边界；',
+        '3. 用 update_feature_intent 一次写入三个 field：user_words、understanding、checklist；',
+        '4. checklist 只能有且仅有 1 项；同模块的多个需求（例如修改 UI 的某几个地方）必须合并成这 1 项可验收描述，不要拆成多个 goal；',
+        '5. 如需记录调研任务，可调用 todo_write；',
+        '6. 调用 submit_requirement_protocol 提交协议，通过后这 1 个 goal 会成为本工作流的 staticPlan 并同步到 DSH task 系统。',
+        '本状态允许只读 bash 和只读调研工具，但禁止写文件。',
+        '',
+        modelCatalogText(env.modelCatalog, env.taskModes),
+      ].join('\n'),
+      allowedTools: [
+        'list_feature_intents', 'get_feature_intent', 'update_feature_intent',
+        'submit_requirement_protocol', 'read', 'grep', 'glob', 'web_search',
+        'read_url', 'read_url_batch', 'read_url_links', 'read_url_site',
+        'read_image', 'list_agents', 'get_goal', 'job_list', 'job_output',
+        'ask_user_question', 'todo_write', 'bash', 'str_replace_editor',
+      ],
+      requiredCalls: [{ tool: 'update_feature_intent', min: 1 }],
+      submitTool: {
+        name: 'submit_requirement_protocol',
+        async parse(args, env) {
+          const parsed = parseRequirementProtocol(args, env.modelCatalog, env.taskModes);
+          const intents = await env.featureIntents.list();
+          const found = intents.find((entry) => entry.name === parsed.featureIntentFile);
+          if (!found) {
+            throw new Error(`feature_intent_file "${parsed.featureIntentFile}" 不存在。可用：${intents.map((e) => e.name).join(', ') || '（无）'}`);
+          }
+          const file = await env.featureIntents.get(parsed.featureIntentFile);
+          const fields = extractEntryFields(latestEntry(file.content));
+          if (fields.checklist.length !== 1) {
+            throw new Error(`ROUGH 工作流只允许识别 1 个 goal（checklist 必须且只能有 1 项），当前为 ${fields.checklist.length} 项。请把同模块的多个需求合并为 1 个可验收节点后重新写入 feature intent。`);
+          }
+          return { ...parsed, featureIntent: found, fields };
+        },
+      },
+      async onSubmit(parsed) {
+        const plan = createStaticPlan(parsed.fields.checklist, parsed.featureIntentFile);
+        const item = plan.items[0];
+        return {
+          signal: { goalCompleted: true },
+          statePatch: {
+            selectedModel: parsed.model,
+            featureIntentFile: parsed.featureIntentFile,
+            taskMode: parsed.taskMode,
+            requirementSummary: parsed.summary,
+            staticPlan: plan,
+            dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
+          },
+          prompt: [
+            `ROUGH 需求识别协议已通过，任务模式：${parsed.taskMode}。`,
+            item ? `已注册 1 个 static goal：${item.text}（id: ${item.id}）` : '（未解析到 checklist，请检查 update_feature_intent 的 checklist 字段）',
+          ].join('\n'),
+        };
+      },
+    },
+
+    {
+      id: 'rough.research',
+      prompt: (env, state) => [
+        '[目标] 研究当前 ROUGH goal',
+        currentItemText(state),
+        '1. 先调用 read_project_experience 读取项目经验（intro / 系统拓扑 / 血泪法则 / 核心状态树）；',
+        '2. 再用 read / grep / glob / web_search / read_url / bash（只读）充分调研当前 goal 的实现思路、涉及文件和风险；',
+        '3. 调研清楚后，调用 todo_write 写出本 goal 的完整 dynamic plan（第一项 in_progress，只放本 goal 的任务，不要列测试/沉淀任务）；',
+        '4. 调用 submit_state 结束研究。',
+      ].join('\n'),
+      allowedTools: [
+        'read_project_experience', 'read', 'grep', 'glob', 'web_search',
+        'read_url', 'read_url_batch', 'read_url_links', 'read_url_site',
+        'read_image', 'list_agents', 'get_goal', 'job_list', 'job_output',
+        'ask_user_question', 'todo_write', 'bash', 'str_replace_editor',
+      ],
+      requiredCalls: [{ tool: 'read_project_experience', min: 1 }, { tool: 'todo_write', min: 1 }],
+      async onActivate(env, state) {
+        return { statePatch: { staticPlan: beginCurrentStaticItem(state.staticPlan) } };
+      },
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit() {
+        return { signal: { goalCompleted: true }, prompt: '研究完成，进入实现。' };
+      },
+    },
+
+    {
+      id: 'rough.implement',
+      prompt: (env, state) => [
+        '[目标] 实现当前 ROUGH goal 并呈现',
+        currentItemText(state),
+        '只做本 goal 范围内的事；完成标准以验收文本为准。',
+        '用 todo_write 维护本 goal 的 dynamic plan：开始一项标记 in_progress，完成一项立即标记 completed。',
+        '完成后直接向用户清晰呈现改动内容与使用方式；不要运行测试，不要写 project-experience，然后调用 submit_state 结束本工作流。',
+      ].join('\n'),
+      allowedTools: [
+        'bash', 'str_replace_editor', 'write', 'edit', 'apply_patch', 'todo_write',
+        'read', 'grep', 'glob', 'web_search', 'read_url', 'read_url_batch',
+        'read_url_links', 'read_url_site', 'read_image', 'list_agents',
+        'get_goal', 'job_list', 'job_output',
+      ],
+      requiredCalls: [],
+      submitTool: {
+        name: 'submit_state',
+        async parse(args) {
+          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
+        },
+      },
+      async onSubmit(parsed, env, state) {
+        const item = staticPlanCurrent(state.staticPlan);
+        const advanced = advanceStaticPlan(state.staticPlan);
+        return {
+          signal: { goalCompleted: true },
+          statePatch: {
+            staticPlan: advanced,
+            dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
+          },
+          prompt: item ? `已完成 ROUGH goal「${item.text}」，结果已呈现。` : 'ROUGH 实现完成，结果已呈现。',
         };
       },
     },

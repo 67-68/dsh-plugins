@@ -151,7 +151,7 @@ export function createGoalEngine({ goals, log }) {
     if (!result || typeof result !== 'object') {
       return { ok: false, reason: `目标 "${def.id}" onSubmit 未返回结果` };
     }
-    return { ok: true, result };
+    return { ok: true, result, parsed };
   }
 
   /** Build the raw result for a no-submit goal whose required calls are met. */

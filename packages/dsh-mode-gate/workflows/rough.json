@@ -1,0 +1,205 @@
+{
+  "id": "rough",
+  "label": "ROUGH",
+  "description": "轻量改造：基准阅读 → 单 goal 需求分解 → 研究 → 实现并直接呈现，不做调试与沉淀。",
+  "kind": "workflow",
+  "startState": "BASE_READ",
+  "ui": {
+    "showInIdleModal": true,
+    "order": 30,
+    "buttonLabel": "ROUGH：轻量修改",
+    "buttonDescription": "单 goal 快速改造：识别一个可验收目标，研究后直接实现并呈现"
+  },
+  "onComplete": {
+    "workflow": "IDLE",
+    "state": "IDLE"
+  },
+  "staticPlan": {
+    "source": "feature-intent.checklist",
+    "goalTemplate": {
+      "idPrefix": "checklist",
+      "acceptance": "$item",
+      "status": "pending"
+    },
+    "enterAt": "REQUIREMENT_RECOGNITION.exit",
+    "advanceOn": "IMPLEMENT.exit",
+    "completion": "all-goals-completed"
+  },
+  "dynamicPlan": {
+    "scope": "state",
+    "mirrorTool": "todo_write",
+    "allowAgentEdit": true,
+    "clearOn": [
+      "state.exit",
+      "goal.completed"
+    ]
+  },
+  "states": [
+    {
+      "id": "BASE_READ",
+      "label": "了解项目基准",
+      "description": "一次性读取 project-experience 的系统拓扑、血泪法则、核心状态树。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": [
+          "read_project_experience",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view"
+        ]
+      },
+      "model": {
+        "reasoningEffort": "high"
+      },
+      "goal": {
+        "ref": "project-experience.dump"
+      },
+      "prompt": "找到本项目的 project-experience 文件夹，一次性 dump 系统拓扑、血泪法则、核心状态树三个文件。这是 ROUGH 轻量工作流，只读取一次基准，后续不做沉淀。",
+      "transitions": [
+        {
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "REQUIREMENT_RECOGNITION"
+          }
+        }
+      ]
+    },
+    {
+      "id": "REQUIREMENT_RECOGNITION",
+      "label": "需求分解（单 goal）",
+      "description": "调研代码库与 feature intent；只识别 1 个 goal，同模块多个需求合并为 1 个可验收节点；写入三字段并提交协议。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": [
+          "list_feature_intents",
+          "get_feature_intent",
+          "update_feature_intent",
+          "submit_requirement_protocol",
+          "read",
+          "grep",
+          "glob",
+          "web_search",
+          "read_url",
+          "read_url_batch",
+          "read_url_links",
+          "read_url_site",
+          "read_image",
+          "list_agents",
+          "get_goal",
+          "job_list",
+          "job_output",
+          "ask_user_question",
+          "todo_write",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view"
+        ]
+      },
+      "model": {
+        "reasoningEffort": "high"
+      },
+      "goal": {
+        "ref": "rough.requirement-recognition"
+      },
+      "prompt": "[System Directive: Rough Scheduler]\n你是 ROUGH 轻量工作流的任务拆解员。把用户的自然语言需求转化为 1 个（且只能 1 个）可验收 Goal。同模块的多个需求（例如“修改 UI 的某几个地方”）必须合并进这 1 个 goal 的验收文本里，不要拆成多个 goal。\n\n绝对禁忌：\n- 禁止技术设计：不猜测或设计具体 API、文件路径、类名或数据结构，这是后续阶段的工作。\n- 禁止可行性废话：不输出“可能面临 XX 风险”“需要调研 XX”。\n- 禁止过程指导：Goal 必须是名词/结果态（如“rough 工作流出现在工作流选择界面且只含四个状态”），不能是动词/过程态（如“去 workflows 目录新建 rough.json”）。\n\n流程：\n1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；\n2. 用只读工具调研代码库，确认 1 个 goal 的可验收边界；\n3. 用 update_feature_intent 写入三个 field：user_words、understanding、checklist；checklist 只能有 1 项，且该项把同模块多个改动点合并描述；\n4. 调用 submit_requirement_protocol 提交协议，等待用户确认。",
+      "transitions": [
+        {
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "RESEARCH"
+          }
+        }
+      ]
+    },
+    {
+      "id": "RESEARCH",
+      "label": "研究",
+      "description": "重新阅读 project-experience，为当前 goal 调研，并产出本 goal 的 dynamic plan。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": [
+          "read_project_experience",
+          "read",
+          "grep",
+          "glob",
+          "web_search",
+          "read_url",
+          "read_url_batch",
+          "read_url_links",
+          "read_url_site",
+          "read_image",
+          "list_agents",
+          "get_goal",
+          "job_list",
+          "job_output",
+          "ask_user_question",
+          "todo_write",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view"
+        ]
+      },
+      "model": {
+        "reasoningEffort": "high"
+      },
+      "goal": {
+        "ref": "rough.research",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "重新阅读 project-experience，围绕当前 goal 用只读工具充分调研，然后 todo_write 出本 goal 的 dynamic plan（第一项 in_progress），最后 submit_state。ROUGH 工作流只实现不测试，调研时不要把测试/沉淀列为计划。",
+      "transitions": [
+        {
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "IMPLEMENT"
+          }
+        }
+      ]
+    },
+    {
+      "id": "IMPLEMENT",
+      "label": "实现并呈现",
+      "description": "执行当前 goal，完成后直接向用户呈现结果；不测试、不沉淀，结束回 IDLE。",
+      "permissions": {
+        "write": true,
+        "bash": "declared",
+        "tools": "*"
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "rough.implement",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "执行当前 goal，只做验收文本范围内的事。用 todo_write 维护本 goal 的 dynamic plan：开始一项标记 in_progress，完成一项立即标记 completed。完成后直接向用户清晰呈现改动内容与使用方式；不要运行测试，不要写 project-experience，然后调用 submit_state 结束本工作流。",
+      "transitions": [
+        {
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "IDLE",
+            "state": "IDLE"
+          },
+          "complete": true
+        }
+      ]
+    }
+  ]
+}

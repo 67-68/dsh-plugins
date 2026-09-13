@@ -268,11 +268,11 @@ for dir in "$HERE"/packages/*/; do
 done
 
 # 6) External plugins declared in plugins/requirements.txt: one `source@version`
-#    per line, `#` comments, versions pinned (no @latest). `dsh plugin add` is a
-#    pnpm forwarder that installs into the profile and reconciles bundles; adding
-#    an already-installed version is a no-op, so re-running stays idempotent.
+#    per line, `#` comments, versions pinned (no @latest). DSH 的受保护插件安装
+#    必须走 dshpm（plugin_install 底层同一链路），裸 `dsh plugin add` 会被守卫拦截。
 REQ_FILE="$HERE/plugins/requirements.txt"
 if [ -f "$REQ_FILE" ]; then
+  DSHPM_BIN="$WEB_DIR/node_modules/.bin/dshpm"
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
     line="${line#"${line%%[![:space:]]*}"}"
@@ -281,7 +281,11 @@ if [ -f "$REQ_FILE" ]; then
       ''|'#'*) continue ;;
     esac
     echo "    ext      $line"
-    npx --yes @deepseek-ai/dsh plugin --profile web add "$line"
+    if [ -x "$DSHPM_BIN" ]; then
+      "$DSHPM_BIN" install "$line" --profile web
+    else
+      node "$WEB_DIR/node_modules/dsh-web-plugin-manager/dist/cli.js" install "$line" --profile web
+    fi
   done < "$REQ_FILE"
 else
   echo "    ext      plugins/requirements.txt not found (skipped)"

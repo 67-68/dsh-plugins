@@ -1,0 +1,1242 @@
+/**
+ * DSH Browser Control — MV3 service worker.
+ *
+ * Maintains one outbound WebSocket to the local bridge (bridge/server.mjs),
+ * receives JSON commands, executes them through chrome.tabs and the Chrome
+ * DevTools Protocol (chrome.debugger), and replies with JSON results.
+ *
+ * Wire protocol (text frames, one JSON object each):
+ *   ext -> bridge: {type:'hello', client, version, browser}
+ *                  {type:'pong', t}                     (reply to {type:'ping'})
+ *                  {type:'result', id, ok, result|error}
+ *   bridge -> ext: {type:'ping', t}
+ *                  {type:'command', id, command, params}
+ */
+'use strict';
+
+const EXT_VERSION = chrome.runtime.getManifest().version;
+const HEARTBEAT_MS = 20_000;
+const MAX_BACKOFF_MS = 30_000;
+const DEFAULT_PORT = 9777;
+const DEFAULT_TOKEN = 'dsh-local';
+
+/** Stored config shape (version 2): {port, token, autoConnect}. */
+const DEFAULT_CONFIG = Object.freeze({
+	port: DEFAULT_PORT,
+	token: DEFAULT_TOKEN,
+	autoConnect: true,
+});
+
+let cfg = { ...DEFAULT_CONFIG };
+let ws = null;
+let wsState = 'idle'; // idle | connecting | open
+let backoffAttempt = 0;
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let helloInfo = null;
+let lastError = null;
+/** True after the user clicks 断开连接 in the popup; blocks auto-reconnect
+ *  until they click 立即连接 again. Reset on browser restart. */
+let manualDisconnect = false;
+
+/** Tab ids we hold a persistent debugger attachment on. Detach only on
+ *  explicit disconnect, tab close, or DevTools stealing the tab. */
+const attachedTabs = new Set();
+
+/** Per-tab ring buffer of CDP `Runtime.consoleAPICalled` entries since attach.
+ *  Map<tabId, Array<entry>>. Entries are capped at 500 per tab; older entries
+ *  shift off. A new attach bumps the tab's generation so stale entries queued
+ *  before re-attach are not surfaced as if they were current. */
+const consoleLog = new Map();
+/** Bumped on every re-attach so entries recorded against an old generation are
+ *  dropped. Map<tabId, number>. */
+const tabBufferGenerations = new Map();
+/** Per-tab in-flight network entries keyed by `Network.requestId`; merged
+ *  across `requestWillBeSent` / `responseReceived` / `loadingFinished` /
+ *  `loadingFailed`. Map<tabId, Map<requestId, entry>>. */
+const networkLog = new Map();
+
+/**
+ * Native dialog (alert/confirm/prompt) auto-answer policy. 'accept' answers
+ * every dialog as OK (prompt uses defaultText), 'dismiss' cancels, 'manual'
+ * leaves dialogs open. A command can pass params.dialogPolicy to override for
+ * that call's duration; the default is accept so automation never deadlocks.
+ */
+let dialogPolicy = 'accept';
+/** Dialogs answered since attach, surfaced in results for verification. */
+const dialogLog = [];
+
+/* ------------------------------------------------------------------ config */
+
+async function loadConfig() {
+	const stored = await chrome.storage.local.get(Object.keys(DEFAULT_CONFIG));
+	// v1→v2 migration: convert old serverUrl to port.
+	if (stored.serverUrl && stored.port === undefined) {
+		try {
+			stored.port = new URL(stored.serverUrl).port ? Number(new URL(stored.serverUrl).port) : DEFAULT_PORT;
+		} catch { stored.port = DEFAULT_PORT; }
+		delete stored.serverUrl;
+	}
+	cfg = { ...DEFAULT_CONFIG, ...stored };
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+	if (area !== 'local') return;
+	for (const [key, change] of Object.entries(changes)) {
+		if (key in DEFAULT_CONFIG) cfg[key] = change.newValue;
+	}
+});
+
+/* ------------------------------------------------------------ ws lifecycle */
+
+function setBadge(text, color) {
+	try {
+		chrome.action.setBadgeBackgroundColor({ color });
+		chrome.action.setBadgeText({ text });
+	} catch (err) {
+		console.warn('[dsh-bridge] badge unavailable:', err.message);
+	}
+}
+
+function setState(state) {
+	wsState = state;
+	if (state === 'open') setBadge('ON', '#16a34a');
+	else if (state === 'connecting') setBadge('…', '#d97706');
+	else setBadge('OFF', '#6b7280');
+}
+
+function send(obj) {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+	ws.send(JSON.stringify(obj));
+	return true;
+}
+
+function scheduleReconnect() {
+	if (manualDisconnect || !cfg.autoConnect) return;
+	const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** backoffAttempt);
+	backoffAttempt += 1;
+	clearTimeout(reconnectTimer);
+	reconnectTimer = setTimeout(connect, delay);
+}
+
+function connect() {
+	if (wsState === 'open' || wsState === 'connecting') return;
+	clearTimeout(reconnectTimer);
+	if (manualDisconnect || !cfg.autoConnect) return;
+
+	let url;
+	try {
+		url = new URL(`ws://127.0.0.1:${cfg.port}/ws`);
+	} catch (err) {
+		lastError = `端口无法解析: ${err.message}`;
+		setState('idle');
+		return;
+	}
+	url.searchParams.set('token', cfg.token);
+
+	setState('connecting');
+	let sock;
+	try {
+		sock = new WebSocket(url.toString());
+	} catch (err) {
+		lastError = err.message;
+		setState('idle');
+		scheduleReconnect();
+		return;
+	}
+	ws = sock;
+
+	sock.onopen = () => {
+		if (sock !== ws) return;
+		backoffAttempt = 0;
+		lastError = null;
+		setState('open');
+		startHeartbeat();
+		sendHello();
+	};
+	sock.onmessage = (ev) => {
+		if (sock !== ws || typeof ev.data !== 'string') return;
+		let msg;
+		try { msg = JSON.parse(ev.data); } catch { return; }
+		handleBridgeMessage(msg);
+	};
+	sock.onclose = () => {
+		if (sock !== ws) return;
+		stopHeartbeat();
+		ws = null;
+		setState('idle');
+		scheduleReconnect();
+	};
+	sock.onerror = () => { /* onclose always follows */ };
+}
+
+function disconnectNow() {
+	clearTimeout(reconnectTimer);
+	stopHeartbeat();
+	if (ws) {
+		const sock = ws;
+		ws = null;
+		sock.onclose = null;
+		try { sock.close(); } catch { /* ignore */ }
+	}
+	detachAll();
+	setState('idle');
+}
+
+function startHeartbeat() {
+	stopHeartbeat();
+	heartbeatTimer = setInterval(() => send({ type: 'ping', t: Date.now() }), HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+	if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+}
+
+function sendHello() {
+	const ua = navigator.userAgent;
+	const name = /Edg\//.test(ua) ? 'edge' : /Chrome\//.test(ua) ? 'chrome' : 'chromium';
+	const versionMatch = ua.match(/(?:Edg|Chrome)\/([\d.]+)/);
+	helloInfo = { name, version: versionMatch ? versionMatch[1] : 'unknown', ua };
+	send({ type: 'hello', client: 'dsh-browser-extension', version: EXT_VERSION, browser: helloInfo });
+}
+
+/* Alarm keeps the SW alive for reconnect even without user events. */
+try { chrome.alarms.create('keepalive', { periodInMinutes: 0.5 }); }
+catch { chrome.alarms.create('keepalive', { periodInMinutes: 1 }); }
+chrome.alarms.onAlarm.addListener((alarm) => {
+	if (alarm.name !== 'keepalive') return;
+	if (wsState === 'idle') connect();
+	else send({ type: 'ping', t: Date.now() });
+});
+
+/* ------------------------------------------------------------- dispatching */
+
+function handleBridgeMessage(msg) {
+	if (msg.type === 'ping') { send({ type: 'pong', t: msg.t }); return; }
+	if (msg.type === 'command' && typeof msg.id === 'string') {
+		runCommand(msg.command, msg.params ?? {})
+			.then((result) => send({ type: 'result', id: msg.id, ok: true, result }))
+			.catch((err) => send({ type: 'result', id: msg.id, ok: false, error: String((err && err.message) || err) }));
+	}
+}
+
+async function runCommand(command, params) {
+	const handler = COMMANDS[command];
+	if (!handler) throw new Error(`unknown command: ${command}`);
+	return handler(params);
+}
+
+/* ------------------------------------------------------------ tab helpers */
+
+async function resolveTab(tabId) {
+	if (tabId !== undefined && tabId !== null) {
+		const tab = await chrome.tabs.get(tabId);
+		return tab;
+	}
+	const [focused] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+	if (focused) return focused;
+	const all = await chrome.tabs.query({});
+	if (all.length > 0) return all[0];
+	throw new Error('no tab available');
+}
+
+function waitTabComplete(tabId, timeoutMs) {
+	return new Promise((resolve) => {
+		let done = false;
+		const finish = () => { if (done) return; done = true; chrome.tabs.onUpdated.removeListener(listener); resolve(); };
+		const listener = (id, info) => { if (id === tabId && info.status === 'complete') finish(); };
+		chrome.tabs.onUpdated.addListener(listener);
+		chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') finish(); }).catch(finish);
+		setTimeout(finish, timeoutMs);
+	});
+}
+
+/** Bring the tab and its window forward so real input can land, WITHOUT
+ *  touching window geometry: `focused` only raises the window; tab activation
+ *  never moves or resizes anything. The user's window size/position/state
+ *  (maximized included) is never modified. A minimized window keeps its 0x0
+ *  viewport where real input cannot land — report that instead of
+ *  force-restoring it (state:'normal' would also un-maximize the window). */
+async function activateTabWindow(tabId) {
+	let win;
+	try {
+		const tab = await chrome.tabs.get(tabId);
+		win = await chrome.windows.get(tab.windowId);
+	} catch {
+		return; // tab or window is closing; the command reports it downstream
+	}
+	if (win.state === 'minimized') {
+		const err = new Error('browser window is minimized — real keyboard/mouse input cannot reach a 0x0 viewport; restore the window manually (automation never changes window size or position)');
+		err.code = 'window_minimized';
+		throw err;
+	}
+	try {
+		await chrome.windows.update(win.id, { focused: true });
+		await chrome.tabs.update(tabId, { active: true });
+	} catch { /* tab may be closing; input will fail downstream anyway */ }
+}
+
+/* ---------------------------------------------------------- debugger (CDP) — persistent attachment */
+
+/**
+ * Ensure a persistent debugger attachment on `tabId`. Attaches once on first
+ * CDP call and holds the attachment until explicit detach or tab close.
+ * The Chrome "is being controlled" banner stays visible until detach.
+ */
+async function ensureAttached(tabId) {
+	if (attachedTabs.has(tabId)) return;
+	await new Promise((resolve, reject) => {
+		chrome.debugger.attach({ tabId }, '1.3', () => {
+			const err = chrome.runtime.lastError;
+			if (!err) { attachedTabs.add(tabId); resolve(); return; }
+			if (/already attached/i.test(err.message)) {
+				attachedTabs.add(tabId);
+				resolve();
+				return;
+			}
+			reject(new Error(`debugger attach failed: ${err.message} (DevTools 打开着这个页面? 先关掉)`));
+		});
+	});
+	// Enable the domains whose events we consume (dialogs, navigation results,
+	// console + network capture for the browser_console_log / browser_network_log tools).
+	await dbgSend(tabId, 'Page.enable').catch(() => {});
+	await dbgSend(tabId, 'Runtime.enable').catch(() => {});
+	await dbgSend(tabId, 'Network.enable').catch(() => {});
+	// Bump the per-attached-tab generation so in-flight network entries queued
+	// against an old attachment are not surfaced as if they were current.
+	tabBufferGenerations.set(tabId, (tabBufferGenerations.get(tabId) ?? 0) + 1);
+}
+
+/* Native dialog auto-answer: fires whenever the page opens alert/confirm/
+ * prompt/beforeunload while a debugger is attached. Without an answer the
+ * page's main thread stays blocked forever. */
+chrome.debugger.onEvent.addListener((source, method, params) => {
+	const tabId = source?.tabId;
+	if (tabId === undefined) return;
+	if (method === 'Page.javascriptDialogOpening') {
+		const entry = {
+			tabId, type: params.type, message: params.message,
+			defaultPrompt: params.defaultPrompt, answeredAs: dialogPolicy, t: Date.now(),
+		};
+		dialogLog.push(entry);
+		if (dialogLog.length > 50) dialogLog.shift();
+		if (dialogPolicy === 'manual') return;
+		chrome.debugger.sendCommand(
+			{ tabId },
+			'Page.handleJavaScriptDialog',
+			{ accept: dialogPolicy === 'accept', promptText: params.defaultPrompt },
+			() => void chrome.runtime.lastError,
+		);
+		return;
+	}
+	if (method === 'Runtime.consoleAPICalled') {
+		// Skip the noisy "log-type:verbose / "time-start" pseudo entries.
+		const level = (params.type || 'log').toLowerCase();
+		if (level === 'verbose' || level === 'timeStart' || level === 'timeEnd') return;
+		const text = (params.args || []).map(arg => arg.value !== undefined ? String(arg.value) : (arg.description || arg.type || '')).join(' ');
+		let location;
+		if (params.stackTrace && params.stackTrace.callFrames && params.stackTrace.callFrames[0]) {
+			const f = params.stackTrace.callFrames[0];
+			location = `${f.url || '<inline>'}:${f.lineNumber}`;
+		}
+		const entry = { tabId, level, text, t: params.timestamp ? Math.round(params.timestamp * 1000) : Date.now() };
+		if (location) entry.location = location;
+		const buf = consoleLog.get(tabId) || [];
+		buf.push(entry);
+		if (buf.length > 500) buf.shift();
+		consoleLog.set(tabId, buf);
+		return;
+	}
+	if (method === 'Network.requestWillBeSent') {
+		// requestId from CDP; one per request. Key under the tab; the body is
+		// capped at 64KB to keep the buffer from blowing up on large POSTs.
+		const POST_LIMIT = 64 * 1024;
+		const post = params.request.postData;
+		const entry = {
+			tabId,
+			requestId: params.requestId,
+			method: params.request.method,
+			url: params.request.url,
+			headers: params.request.headers,
+			resourceType: params.type,
+			postData: typeof post === 'string' && post.length > POST_LIMIT ? post.slice(0, POST_LIMIT) + '…(truncated)' : post,
+			initiator: params.initiator && params.initiator.url,
+			wallTime: params.wallTime,
+		};
+		let tabMap = networkLog.get(tabId);
+		if (!tabMap) { tabMap = new Map(); networkLog.set(tabId, tabMap); }
+		tabMap.set(params.requestId, entry);
+		trimNetworkMap(tabMap);
+		return;
+	}
+	if (method === 'Network.responseReceived') {
+		const tabMap = networkLog.get(tabId);
+		if (!tabMap) return;
+		const entry = tabMap.get(params.requestId);
+		if (!entry) return;
+		entry.status = params.response.status;
+		entry.statusText = params.response.statusText;
+		entry.mimeType = params.response.mimeType;
+		entry.responseHeaders = params.response.headers;
+		return;
+	}
+	if (method === 'Network.loadingFinished') {
+		const tabMap = networkLog.get(tabId);
+		if (!tabMap) return;
+		const entry = tabMap.get(params.requestId);
+		if (!entry) return;
+		entry.encodedDataLength = params.encodedDataLength;
+		entry.finished = true;
+		return;
+	}
+	if (method === 'Network.loadingFailed') {
+		const tabMap = networkLog.get(tabId);
+		if (!tabMap) return;
+		const entry = tabMap.get(params.requestId);
+		if (!entry) return;
+		entry.failed = true;
+		entry.errorText = params.errorText;
+		entry.canceled = params.canceled;
+		return;
+	}
+});
+
+/** Cap a per-tab request map at 500 entries (LRU-by-insertion-order). */
+function trimNetworkMap(tabMap) {
+	if (tabMap.size <= 500) return;
+	const overflow = tabMap.size - 500;
+	const keys = tabMap.keys();
+	for (let i = 0; i < overflow; i++) tabMap.delete(keys.next().value);
+}
+
+function detachTab(tabId) {
+	attachedTabs.delete(tabId);
+	consoleLog.delete(tabId);
+	networkLog.delete(tabId);
+	tabBufferGenerations.delete(tabId);
+	chrome.debugger.detach({ tabId }, () => void chrome.runtime.lastError);
+}
+
+function detachAll() {
+	for (const tabId of [...attachedTabs]) detachTab(tabId);
+}
+
+/* Clean up when a tab is closed (detaches automatically, but remove from set). */
+chrome.tabs.onRemoved.addListener((tabId) => {
+	if (attachedTabs.has(tabId)) attachedTabs.delete(tabId);
+	consoleLog.delete(tabId);
+	networkLog.delete(tabId);
+	tabBufferGenerations.delete(tabId);
+});
+
+/* Clean up when DevTools steals a tab (detach event fires). */
+chrome.debugger.onDetach.addListener((_source, reason) => {
+	if (reason === 'target_closed' || reason === 'canceled_by_user') {
+		// attachedTabs cleanup is handled by chrome.tabs.onRemoved
+	}
+});
+
+function dbgSend(tabId, method, params) {
+	return new Promise((resolve, reject) => {
+		chrome.debugger.sendCommand({ tabId }, method, params ?? {}, (res) => {
+			const err = chrome.runtime.lastError;
+			if (err) reject(new Error(`${method} failed: ${err.message}`));
+			else resolve(res);
+		});
+	});
+}
+
+/** Persistent CDP: attaches (if not already) and holds. */
+async function withCDP(tabId, fn) {
+	await ensureAttached(tabId);
+	return fn((method, params) => dbgSend(tabId, method, params));
+}
+
+/* ------------------------------------------------------- command handlers */
+
+async function cmdPing() {
+	return { pong: true, t: Date.now(), version: EXT_VERSION };
+}
+
+/**
+ * Return the recorded `Runtime.consoleAPICalled` entries for a tab. Filters
+ * apply client-side so the model only sees the rows it asked for. `clear`
+ * empties the buffer on the same call so the next call starts fresh; useful
+ * for "give me the warnings that appeared after I clicked submit" without
+ * earlier noise. `limit` defaults to 100, capped at 500.
+ */
+async function cmdConsoleLog(params) {
+	const tab = await resolveTab(params.tabId);
+	const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
+	const levels = Array.isArray(params.levels) && params.levels.length > 0
+		? new Set(params.levels.map((l) => String(l).toLowerCase()))
+		: null;
+	const pattern = typeof params.pattern === 'string' && params.pattern.length > 0
+		? new RegExp(params.pattern, 'i')
+		: null;
+	const buf = consoleLog.get(tab.id) || [];
+	const filtered = buf.filter((e) => {
+		if (levels && !levels.has(e.level)) return false;
+		if (pattern && !pattern.test(e.text || '')) return false;
+		return true;
+	});
+	const tail = filtered.slice(-limit);
+	if (params.clear === true) consoleLog.set(tab.id, []);
+	return { tabId: tab.id, count: tail.length, total: filtered.length, entries: tail };
+}
+
+/**
+ * Return merged request/response entries captured by `Network.*` events.
+ * `includeStatic: true` surfaces images / fonts / stylesheets / scripts that
+ * are filtered by default (they dominate the buffer in a typical page load).
+ * `methodPattern` / `urlPattern` / `status` filter client-side.
+ */
+async function cmdNetworkLog(params) {
+	const tab = await resolveTab(params.tabId);
+	const tabMap = networkLog.get(tab.id);
+	const all = tabMap ? [...tabMap.values()] : [];
+	const includeStatic = params.includeStatic === true;
+	const methodPattern = typeof params.methodPattern === 'string' && params.methodPattern.length > 0
+		? new RegExp(params.methodPattern, 'i')
+		: null;
+	const urlPattern = typeof params.urlPattern === 'string' && params.urlPattern.length > 0
+		? new RegExp(params.urlPattern, 'i')
+		: null;
+	const statusFilter = typeof params.status === 'string' && params.status.length > 0 ? params.status : null;
+	const staticTypes = new Set(['Image', 'Font', 'Stylesheet', 'Script', 'Favicon', 'Manifest']);
+	const filtered = all.filter((e) => {
+		if (!includeStatic && staticTypes.has(e.resourceType)) return false;
+		if (methodPattern && !methodPattern.test(e.method || '')) return false;
+		if (urlPattern && !urlPattern.test(e.url || '')) return false;
+		if (statusFilter) {
+			if (e.failed) {
+				if (!/^f/i.test(statusFilter)) return false;
+			} else if (e.status === undefined) {
+				if (!/^p/i.test(statusFilter)) return false; // pending
+			} else if (statusFilter === '2xx' && (e.status < 200 || e.status >= 300)) return false;
+			else if (statusFilter === '3xx' && (e.status < 300 || e.status >= 400)) return false;
+			else if (statusFilter === '4xx' && (e.status < 400 || e.status >= 500)) return false;
+			else if (statusFilter === '5xx' && (e.status < 500 || e.status >= 600)) return false;
+		}
+		return true;
+	});
+	filtered.sort((a, b) => (a.wallTime || 0) - (b.wallTime || 0));
+	const limit = Math.min(1000, Math.max(1, Number(params.limit) || 200));
+	const out = filtered.slice(-limit).map((e) => {
+		const { requestId: _id, tabId: _t, ...rest } = e;
+		return rest;
+	});
+	if (params.clear === true) networkLog.set(tab.id, new Map());
+	return { tabId: tab.id, count: out.length, total: filtered.length, requests: out };
+}
+
+async function cmdNetworkClear(params) {
+	const tab = await resolveTab(params.tabId);
+	networkLog.set(tab.id, new Map());
+	return { tabId: tab.id, cleared: true };
+}
+
+/**
+ * `Page.printToPDF` returns base64-encoded PDF. The extension's MV3 SW cannot
+ * write to absolute paths on the host; the bridge decodes the base64 to a
+ * `path` the caller supplies (or to `<shotsDir>/<tabId>-<t>.pdf` when no path
+ * is given). The result echoes the saved path + size so callers can hand it
+ * off to a reader tool.
+ */
+async function cmdPdf(params) {
+	const tab = await resolveTab(params.tabId);
+	return withCDP(tab.id, async (send) => {
+		const cdpParams = {
+			printBackground: params.printBackground !== false,
+			landscape: params.landscape === true,
+			...(typeof params.paperWidth === 'number' ? { paperWidth: params.paperWidth } : {}),
+			...(typeof params.paperHeight === 'number' ? { paperHeight: params.paperHeight } : {}),
+			...(typeof params.scale === 'number' ? { scale: params.scale } : {}),
+			...(params.pageRanges ? { pageRanges: String(params.pageRanges) } : {}),
+		};
+		const res = await send('Page.printToPDF', cdpParams);
+		if (!res || !res.data) throw new Error('Page.printToPDF returned no data');
+		return { tabId: tab.id, base64: res.data };
+	});
+}
+
+/**
+ * Apply `Emulation.setDeviceMetricsOverride` + `setUserAgentOverride` +
+ * `setTouchEmulationEnabled` to switch how the page renders. Presets cover
+ * the common shapes (desktop / iphone / ipad / pixel); a custom object
+ * overrides any field. Restoring back to desktop is `device:"reset"` so
+ * the agent can clean up after itself.
+ */
+async function cmdEmulate(params) {
+	const tab = await resolveTab(params.tabId);
+	const preset = params.device && params.device !== 'reset' ? PRESETS[String(params.device).toLowerCase()] : null;
+	if (params.device && params.device !== 'reset' && !preset && typeof params.device === 'string') {
+		throw new Error(`unknown device preset "${params.device}". Use one of: ${Object.keys(PRESETS).join(', ')}, reset, or pass width/height fields directly.`);
+	}
+	const width = Number(params.width ?? (preset && preset.width) ?? 0);
+	const height = Number(params.height ?? (preset && preset.height) ?? 0);
+	const deviceScaleFactor = Number(params.deviceScaleFactor ?? (preset && preset.deviceScaleFactor) ?? 1);
+	const isMobile = params.isMobile ?? (preset && preset.isMobile) ?? false;
+	const hasTouch = params.hasTouch ?? (preset && preset.hasTouch) ?? false;
+	const userAgent = params.userAgent || (preset && preset.userAgent) || undefined;
+	return withCDP(tab.id, async (send) => {
+		if (params.device === 'reset') {
+			await send('Emulation.clearDeviceMetricsOverride').catch(() => {});
+			await send('Emulation.setUserAgentOverride', { userAgent: '' }).catch(() => {});
+			await send('Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {});
+			return { tabId: tab.id, reset: true };
+		}
+		if (width > 0 && height > 0) {
+			await send('Emulation.setDeviceMetricsOverride', {
+				width, height, deviceScaleFactor, mobile: isMobile,
+			}).catch((e) => { throw new Error(`setDeviceMetricsOverride failed: ${e.message}`); });
+		}
+		if (userAgent) {
+			await send('Emulation.setUserAgentOverride', { userAgent }).catch(() => {});
+		}
+		await send('Emulation.setTouchEmulationEnabled', { enabled: hasTouch }).catch(() => {});
+		return {
+			tabId: tab.id,
+			width, height, deviceScaleFactor, isMobile, hasTouch,
+			userAgent: userAgent || null,
+		};
+	});
+}
+
+const PRESETS = {
+	desktop: { width: 1280, height: 800, deviceScaleFactor: 1, isMobile: false, hasTouch: false, userAgent: '' },
+	'mobile-iphone-13': { width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1' },
+	'mobile-pixel-7': { width: 412, height: 915, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true, userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36' },
+	'tablet-ipad': { width: 768, height: 1024, deviceScaleFactor: 2, isMobile: true, hasTouch: true, userAgent: 'Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1' },
+};
+
+async function cmdBrowserInfo() {
+	return { client: 'dsh-browser-extension', version: EXT_VERSION, browser: helloInfo };
+}
+
+async function cmdTabsList() {
+	const tabs = await chrome.tabs.query({});
+	// Compact shape (id/url/active/title only): the bridge serializes this
+	// straight into a tool result and wide shapes were truncating mid-JSON.
+	return {
+		count: tabs.length,
+		activeTabId: tabs.find((t) => t.active)?.id,
+		tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active })),
+	};
+}
+
+async function cmdTabsOpen(params) {
+	if (!params.url) throw new Error('params.url is required');
+	const created = await chrome.tabs.create({
+		url: params.url,
+		active: params.active !== undefined ? Boolean(params.active) : true,
+	});
+	if (params.wait !== false) await waitTabComplete(created.id, Number(params.timeoutMs) || 15_000);
+	const fresh = await chrome.tabs.get(created.id).catch(() => null);
+	return { tabId: created.id, url: fresh?.url, title: fresh?.title };
+}
+
+async function cmdTabsClose(params) {
+	if (params.tabId === undefined) throw new Error('params.tabId is required');
+	await chrome.tabs.remove(Number(params.tabId));
+	return { closed: Number(params.tabId) };
+}
+
+async function cmdTabsActivate(params) {
+	if (params.tabId === undefined) throw new Error('params.tabId is required');
+	await chrome.tabs.update(Number(params.tabId), { active: true });
+	return { activated: Number(params.tabId) };
+}
+
+async function cmdNav(params) {
+	if (!params.url) throw new Error('params.url is required');
+	const tab = await resolveTab(params.tabId);
+	await chrome.tabs.update(tab.id, { url: params.url });
+	if (params.wait !== false) await waitTabComplete(tab.id, Number(params.timeoutMs) || 15_000);
+	const fresh = await chrome.tabs.get(tab.id).catch(() => null);
+	// Chrome lands dead navigations on an internal error page, but tabs.get()
+	// keeps reporting the ORIGINAL url — only in-page location.href reveals
+	// chrome-error://. Probe it so callers can react structurally.
+	let landedUrl = '';
+	try {
+		landedUrl = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
+			expression: 'location.href', awaitPromise: false, returnByValue: true, userGesture: true,
+		}).then((r) => String(r.result?.value ?? '')));
+	} catch { /* no debugger possible (e.g. chrome:// pages) — fall through */ }
+	let siteUnreachable;
+	if (/^chrome-error:/.test(landedUrl)) {
+		let errText = '';
+		try {
+			errText = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
+				expression: 'document.body ? document.body.innerText.slice(0, 4000) : ""',
+				awaitPromise: false, returnByValue: true, userGesture: true,
+			}).then((r) => String(r.result?.value ?? '')));
+		} catch { /* classification falls back below */ }
+		// Error-page copy is localized (zh-CN shows 无法找到 … 的 DNS 地址,
+		// en-US shows ERR_NAME_NOT_RESOLVED); match either plus any bare DNS
+		// mention such as DNS_PROBE_STARTED.
+		const dns = /ERR_NAME_NOT_RESOLVED|ERR_DNS_TIMED_OUT|\bDNS\b|无法找到.{0,40}(DNS|服务器)/i.test(errText)
+			|| /ERR_NAME_NOT_RESOLVED|dns/i.test(fresh?.title ?? '');
+		siteUnreachable = { reason: dns ? 'dns' : 'unreachable' };
+	}
+	return {
+		tabId: tab.id,
+		url: siteUnreachable ? params.url : (fresh?.url ?? params.url),
+		title: siteUnreachable ? undefined : fresh?.title,
+		...(siteUnreachable ? { siteUnreachable } : {}),
+	};
+}
+
+async function cmdEval(params) {
+	if (typeof params.expression !== 'string' || params.expression.length === 0) {
+		throw new Error('params.expression is required');
+	}
+	const tab = await resolveTab(params.tabId);
+	// Frame targeting: params.frameSelector (CSS selector of an <iframe>) runs
+	// the expression inside that frame via contentDocument (same-origin).
+	// Cross-origin frames need a separate debugger target — reported clearly.
+	let expression = params.expression;
+	if (Array.isArray(params.argNames) && Array.isArray(params.args)
+		&& params.argNames.length === params.args.length && params.argNames.length > 0) {
+		const argValues = params.args.map((a) => JSON.stringify(a)).join(', ');
+		expression = `((${params.argNames.join(', ')}) => { ${params.expression} })(${argValues})`;
+	}
+	if (params.frameSelector) {
+		const inner = expression.startsWith('(') ? expression : `(() => { ${expression} })()`;
+		// Rebind document/window to the frame by passing them as parameters of
+		// the wrapping arrow — parameter shadowing, no TDZ hazard. A `const
+		// document = doc` declaration in the same scope would throw
+		// "Cannot access 'document' before initialization" at the host lookup
+		// above it.
+		expression = `(() => {
+			const host = document.querySelector(${JSON.stringify(String(params.frameSelector))});
+			if (!host || !(host instanceof HTMLIFrameElement)) throw new Error('iframe not found: ${String(params.frameSelector).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}');
+			if (!host.contentDocument) throw new Error('cross-origin iframe: same-origin only supported, use a frame-specific tool');
+			const doc = host.contentDocument, win = host.contentWindow;
+			return ((document, window) => ${inner})(doc, win);
+		})()`;
+	}
+	// params.timeoutMs races the evaluation: a hung awaitPromise (looping
+	// promise, blocked page) must fail at the caller's budget instead of
+	// riding the bridge-wide 60s default.
+	const evalTimeoutMs = Math.min(120_000, Math.max(100, Number(params.timeoutMs) || 0)) || null;
+	const raceTimeout = (ms) => new Promise((_, reject) => setTimeout(() => {
+		const err = new Error(`eval timeout after ${ms}ms`);
+		err.code = 'eval_timeout';
+		reject(err);
+	}, ms));
+	const evaluate = withCDP(tab.id, async (send) => {
+		// Evaluate WITHOUT returnByValue first: the RemoteObject's type/subtype
+		// metadata tells us honestly what came back. Newer Chrome serializes
+		// un-serializable objects to `{}` under returnByValue:true, which would
+		// masquerade as a legitimate empty object.
+		return send('Runtime.evaluate', {
+			expression,
+			awaitPromise: params.awaitPromise !== false,
+			returnByValue: false,
+			userGesture: true,
+		}).then(async (res) => {
+			if (res.exceptionDetails) {
+				const d = res.exceptionDetails;
+				const desc = String(d.exception?.description ?? d.text);
+				if (CONTEXT_DESTROYED_RE.test(desc)) {
+					const err = new Error('context_destroyed: page navigated while evaluate was pending');
+					err.code = 'context_destroyed';
+					throw err;
+				}
+				throw new Error(`page exception: ${desc}`);
+			}
+			const ro = res.result;
+			// Primitives carry their value inline; nothing more to transfer.
+			const isPrimitiveLike = ro.type === 'number' || ro.type === 'string' || ro.type === 'boolean'
+				|| ro.type === 'bigint' || ro.type === 'undefined' || ro.subtype === 'null';
+			if (isPrimitiveLike || !ro.objectId) return ro;
+			// Objects known un-serializable by value get an honest report instead
+			// of a silent {} (DOM nodes, functions, proxies, symbols, Map/Set…).
+			const NOT_BY_VALUE = new Set(['node', 'function', 'proxy', 'symbol', 'map', 'set',
+				'weakmap', 'weakset', 'iterator', 'generator']);
+			if (NOT_BY_VALUE.has(ro.subtype ?? '') || ro.type === 'function' || ro.type === 'symbol') return ro;
+			// Transfer by value without re-executing the expression:
+			// callFunctionOn(identity) on the existing objectId.
+			const ser = await send('Runtime.callFunctionOn', {
+				objectId: ro.objectId,
+				functionDeclaration: 'function () { return this; }',
+				returnByValue: true,
+			});
+			if (ser.exceptionDetails) return ro;
+			return { ...ro, value: ser.result.value };
+		}).catch((err) => {
+			// Protocol-level variant: Chrome rejects the whole sendCommand with
+			// -32000 "Inspected target navigated or closed" when the target dies
+			// mid-call; surface it under the same structural code.
+			if (err instanceof Error && CONTEXT_DESTROYED_RE.test(err.message)) {
+				const wrapped = new Error('context_destroyed: page navigated while evaluate was pending');
+				wrapped.code = 'context_destroyed';
+				throw wrapped;
+			}
+			throw err;
+		});
+	});
+	const value = evalTimeoutMs
+		? await Promise.race([evaluate, raceTimeout(evalTimeoutMs)])
+		: await evaluate;
+	// Serialize what we honestly got. `value` here is a RemoteObject; a
+	// missing `.value` on a non-primitive means transfer was impossible.
+	let out;
+	if (value.value !== undefined) {
+		out = value.value;
+	} else if (value.type === 'undefined') {
+		out = null;
+	} else if (value.subtype === 'node') {
+		out = `[dom:${value.className ?? 'Node'} — wrap in JSON.stringify() or read specific properties]`;
+	} else {
+		out = `[${value.type}${value.subtype ? `:${value.subtype}` : ''}: not serializable — wrap the expression in JSON.stringify()]`;
+	}
+	return { tabId: tab.id, value: out, valueType: value.type };
+}
+
+async function cmdContent(params) {
+	const mode = params.mode === 'html' ? 'html' : 'text';
+	const tab = await resolveTab(params.tabId);
+	const inner = mode === 'html'
+		? 'document.documentElement.outerHTML'
+		: '(document.body && (document.body.innerText || document.body.textContent)) || ""';
+	const payload = await withCDP(tab.id, (send) =>
+		send('Runtime.evaluate', {
+			expression: `JSON.stringify({title: document.title, url: location.href, readyState: document.readyState, content: ${inner}})`,
+			awaitPromise: false, returnByValue: true, userGesture: true,
+		}).then((res) => {
+			if (res.exceptionDetails) throw new Error(`page exception: ${res.exceptionDetails.text}`);
+			return JSON.parse(res.result.value);
+		}));
+	return { tabId: tab.id, mode, ...payload };
+}
+
+async function cmdFind(params) {
+	if (!params.selector) throw new Error('params.selector is required');
+	const limit = Math.max(1, Math.min(50, Number(params.limit) || 10));
+	const tab = await resolveTab(params.tabId);
+	const payload = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
+		expression: `(() => {
+			const els = [...document.querySelectorAll(${JSON.stringify(String(params.selector))})];
+			return JSON.stringify({
+				count: els.length,
+				items: els.slice(0, ${limit}).map((el) => {
+					const r = el.getBoundingClientRect();
+					return {
+						tag: el.tagName.toLowerCase(), id: el.id || undefined,
+						class: String(el.className || '').slice(0, 120) || undefined,
+						text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 160) || undefined,
+						href: el instanceof Element && el.hasAttribute('href') ? el.getAttribute('href') : undefined,
+						rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+					};
+				}),
+			});
+		})()`,
+		awaitPromise: false, returnByValue: true, userGesture: true,
+	}).then((res) => JSON.parse(res.result.value)));
+	return { tabId: tab.id, selector: params.selector, ...payload };
+}
+
+async function cmdClick(params) {
+	if (!params.selector) throw new Error('params.selector is required');
+	const tab = await resolveTab(params.tabId);
+	// Mouse events land on whatever is under the viewport coordinates of the
+	// focused tab; ensure our tab is frontmost so coordinates are meaningful.
+	await activateTabWindow(tab.id);
+	return withCDP(tab.id, async (send) => {
+		const hit = await send('Runtime.evaluate', {
+			expression: `(() => {
+				const el = document.querySelector(${JSON.stringify(String(params.selector))});
+				if (!el) return null;
+				el.scrollIntoView({ block: 'center', inline: 'center' });
+				const r = el.getBoundingClientRect();
+				// elementFromPoint at the intended hit point catches overlays
+				// (sticky headers, ads) that would swallow the click.
+				const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+				const topEl = document.elementFromPoint(x, y);
+				const isTop = topEl === el || el.contains(topEl);
+				return { x, y, tag: el.tagName.toLowerCase(), text: (el.textContent || '').trim().slice(0, 120),
+					hitTag: topEl ? topEl.tagName.toLowerCase() : null, isTop };
+			})()`,
+			awaitPromise: false, returnByValue: true, userGesture: true,
+		}).then((res) => {
+			if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+			return res.result.value;
+		});
+		if (!hit) throw new Error(`element not found: ${params.selector}`);
+		const clickCount = params.doubleClick ? 2 : 1;
+		await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.x, y: hit.y });
+		await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', clickCount });
+		await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', clickCount });
+		return {
+			tabId: tab.id,
+			clicked: { x: hit.x, y: hit.y, tag: hit.tag, text: hit.text },
+			hitVerified: hit.isTop,
+			...(hit.isTop ? {} : { hitInstead: hit.hitTag }),
+			dialogsAnswered: dialogLog.filter((d) => d.tabId === tab.id && Date.now() - d.t < 5000).length,
+		};
+	});
+}
+
+async function cmdInput(params) {
+	if (!params.selector) throw new Error('params.selector is required');
+	if (params.value === undefined) throw new Error('params.value is required');
+	const tab = await resolveTab(params.tabId);
+	// 'type' mode drives the real keyboard pipeline (Input.insertText per
+	// keystroke) so stateful components (React-controlled, search bars with
+	// internal suggestion state) observe every character. 'fill' (default)
+	// sets the value directly — fast, but bypasses component keystroke logic.
+	const mode = params.mode === 'type' ? 'type' : 'fill';
+	// Real key events require the tab to have OS-level focus; activate first.
+	if (mode === 'type') await activateTabWindow(tab.id);
+
+	// Locate + focus + clear in one evaluate, shared by both modes.
+	const located = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
+		expression: `(() => {
+			const el = document.querySelector(${JSON.stringify(String(params.selector))});
+			if (!el) return null;
+			el.scrollIntoView({ block: 'center', inline: 'center' });
+			el.focus();
+			let tag = el.tagName.toLowerCase();
+			let cleared = '';
+			if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+				const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+				Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, '');
+				el.dispatchEvent(new Event('input', { bubbles: true }));
+				tag = tag + '[' + (el.getAttribute('type') || 'text') + ']';
+				cleared = '';
+			} else if (el.isContentEditable) {
+				el.textContent = '';
+				el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+			} else if (el instanceof HTMLSelectElement) {
+				tag = 'select';
+			}
+			return { tag };
+		})()`,
+		awaitPromise: false, returnByValue: true, userGesture: true,
+	}).then((res) => {
+		if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+		return res.result.value;
+	}));
+	if (!located) throw new Error(`element not found: ${params.selector}`);
+
+	if (mode === 'fill') {
+		const result = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
+			expression: `(() => {
+				const el = document.querySelector(${JSON.stringify(String(params.selector))});
+				const value = ${JSON.stringify(String(params.value))};
+				if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+					const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+					Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					el.dispatchEvent(new Event('change', { bubbles: true }));
+				} else if (el.isContentEditable) {
+					el.textContent = value;
+					el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+				} else if (el instanceof HTMLSelectElement) {
+					el.value = value;
+					el.dispatchEvent(new Event('change', { bubbles: true }));
+				} else {
+					el.textContent = value;
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					el.dispatchEvent(new Event('change', { bubbles: true }));
+				}
+				return { tag: el.tagName.toLowerCase(), value: String(el.value ?? el.textContent ?? '') };
+			})()`,
+			awaitPromise: false, returnByValue: true, userGesture: true,
+		}).then((res) => {
+			if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+			return res.result.value;
+		}));
+		return { tabId: tab.id, mode, filled: result };
+	}
+
+	// 'type' mode: per-character real key events. dispatchKeyEvent with the
+	// text field performs a full keyDown→char→keyUp; insertText would skip
+	// per-key keydown handlers, so we use rawKeyDown+char for letters and
+	// dispatchKeyEvent(text=…) for everything else.
+	const text = String(params.value);
+	return withCDP(tab.id, async (send) => {
+		for (const ch of text) {
+			if (ch === '\n') {
+				await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', windowsVirtualKeyCode: 13, code: 'Enter', text: '\r' });
+				await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', windowsVirtualKeyCode: 13, code: 'Enter' });
+				continue;
+			}
+			// Non-ASCII (CJK, emoji) cannot travel through keyEvent text — the
+			// protocol mangles them to '?'. Route them through insertText which
+			// performs a real composition-style insertion; ASCII keeps full
+			// keyDown/char/keyUp so per-key handlers still fire.
+			if (ch.charCodeAt(0) > 127 || ch.codePointAt(0) > 0xFFFF) {
+				await send('Input.insertText', { text: ch });
+				continue;
+			}
+			await send('Input.dispatchKeyEvent', {
+				type: 'keyDown', key: ch, text: ch, unmodifiedText: ch,
+				windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0),
+			});
+			// NOTE: no separate 'char' event — Chrome inserts the character from
+			// keyDown's text field; an explicit char event duplicates the input.
+			await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0) });
+		}
+		// Read back what actually landed in the element.
+		const readBack = await send('Runtime.evaluate', {
+			expression: `(() => {
+				const el = document.querySelector(${JSON.stringify(String(params.selector))});
+				if (!el) return null;
+				return { tag: el.tagName.toLowerCase(), value: String(el.value ?? el.textContent ?? '') };
+			})()`,
+			awaitPromise: false, returnByValue: true, userGesture: true,
+		}).then((res) => res.result.value);
+		return { tabId: tab.id, mode, filled: readBack };
+	});
+}
+
+const KEY_CODES = {
+	Enter: [13, 'Enter'], Tab: [9, 'Tab'], Escape: [27, 'Escape'],
+	Backspace: [8, 'Backspace'], Delete: [46, 'Delete'], Space: [32, 'Space'],
+	ArrowUp: [38, 'ArrowUp'], ArrowDown: [40, 'ArrowDown'],
+	ArrowLeft: [37, 'ArrowLeft'], ArrowRight: [39, 'ArrowRight'],
+	Home: [36, 'Home'], End: [35, 'End'],
+	PageUp: [33, 'PageUp'], PageDown: [34, 'PageDown'],
+};
+const MODIFIER_BITS = { alt: 1, ctrl: 2, control: 2, meta: 4, command: 4, shift: 8 };
+
+async function cmdPress(params) {
+	const key = String(params.key ?? '');
+	if (key.length === 0) throw new Error('params.key is required');
+	const tab = await resolveTab(params.tabId);
+	// Key events need OS focus; a background tab swallows them silently.
+	await activateTabWindow(tab.id);
+	let keyCode, code;
+	if (KEY_CODES[key]) { [keyCode, code] = KEY_CODES[key]; }
+	else if (key.length === 1) {
+		keyCode = key.toUpperCase().charCodeAt(0);
+		if (/^[a-z]$/i.test(key)) code = `Key${key.toUpperCase()}`;
+		else if (/^[0-9]$/.test(key)) code = `Digit${key}`;
+	}
+	const text = params.text !== undefined
+		? String(params.text)
+		: key === 'Enter' ? '\r' // '\r' makes keyDown perform implicit form submission
+		: key.length === 1 && !(params.modifiers ?? []).some((m) => m in MODIFIER_BITS && m !== 'shift') ? key : undefined;
+	let modifiers = 0;
+	for (const m of params.modifiers ?? []) modifiers |= MODIFIER_BITS[String(m).toLowerCase()] ?? 0;
+	return withCDP(tab.id, async (send) => {
+		await send('Input.dispatchKeyEvent', {
+			type: 'keyDown', key, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, code, text, unmodifiedText: text, modifiers,
+		});
+		if (text) {
+			await send('Input.dispatchKeyEvent', { type: 'char', key, text, unmodifiedText: text, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, code, modifiers });
+		}
+		await send('Input.dispatchKeyEvent', { type: 'keyUp', key, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, code, modifiers });
+		return { tabId: tab.id, key };
+	});
+}
+
+async function cmdScreenshot(params) {
+	const tab = await resolveTab(params.tabId);
+	const format = params.format === 'jpeg' ? 'jpeg' : 'png';
+	const res = await withCDP(tab.id, async (send) => {
+		// Element capture: resolve the selector to a CSS-pixel rect, then pass
+		// it as clip. Page.captureScreenshot's clip is in CSS pixels and it
+		// handles DPR internally (unlike raw base64 math).
+		if (params.selector) {
+			const rect = await send('Runtime.evaluate', {
+				expression: `(() => {
+					const el = document.querySelector(${JSON.stringify(String(params.selector))});
+					if (!el) return null;
+					el.scrollIntoView({ block: 'center', inline: 'center' });
+					const r = el.getBoundingClientRect();
+					return { x: r.left, y: r.top, width: r.width, height: r.height };
+				})()`,
+				awaitPromise: false, returnByValue: true, userGesture: true,
+			}).then((r) => {
+				if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
+				return r.result.value;
+			});
+			if (!rect) throw new Error(`element not found: ${params.selector}`);
+			return send('Page.captureScreenshot', {
+				format,
+				quality: format === 'jpeg' ? Math.min(100, Math.max(1, Number(params.quality) || 80)) : undefined,
+				clip: { ...rect, scale: 1 },
+			}).then((shot) => ({ shot, elementRect: rect }));
+		}
+		const shot = await send('Page.captureScreenshot', {
+			format,
+			quality: format === 'jpeg' ? Math.min(100, Math.max(1, Number(params.quality) || 80)) : undefined,
+			captureBeyondViewport: Boolean(params.fullPage),
+		});
+		return { shot };
+	});
+	return {
+		tabId: tab.id,
+		format,
+		base64: res.shot.data,
+		tabTitle: tab.title,
+		tabUrl: tab.url,
+		...(res.elementRect ? {
+			elementRect: {
+				x: Math.round(res.elementRect.x), y: Math.round(res.elementRect.y),
+				w: Math.round(res.elementRect.width), h: Math.round(res.elementRect.height),
+			},
+		} : {}),
+	};
+}
+
+async function cmdScroll(params) {
+	const tab = await resolveTab(params.tabId);
+	const dx = Number.isFinite(Number(params.x)) ? Number(params.x) : 0;
+	const dy = Number.isFinite(Number(params.y)) ? Number(params.y) : 0;
+	return withCDP(tab.id, (send) => send('Runtime.evaluate', {
+		expression: `(() => {
+			window.scrollBy({ left: ${JSON.stringify(dx)}, top: ${JSON.stringify(dy)}, behavior: 'instant' });
+			return { tabId: ${tab.id}, scrollX: window.scrollX, scrollY: window.scrollY,
+				pageHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight };
+		})()`,
+		awaitPromise: false, returnByValue: true, userGesture: true,
+	}).then((res) => res.result.value));
+}
+
+/** All CDP message variants that mean "the page went away mid-evaluation". */
+const CONTEXT_DESTROYED_RE = /Execution context was destroyed|Cannot find default execution context|Inspected target navigated or closed/i;
+
+const SNAPSHOT_SELECTOR = 'a[href], button, input, select, textarea, [role="button"], [role="link"], '
+	+ '[role="tab"], [role="checkbox"], [role="radio"], [contenteditable="true"], [onclick]';
+
+async function cmdSnapshot(params) {
+	const tab = await resolveTab(params.tabId);
+	const limit = Math.min(200, Math.max(1, Number(params.limit) || 120));
+	return withCDP(tab.id, async (send) => {
+		await send('Runtime.enable').catch(() => {});
+		const payload = await send('Runtime.evaluate', {
+			expression: `(() => {
+				const ATTR = 'data-dsh-ref';
+				document.querySelectorAll('[' + ATTR + ']').forEach((el) => el.removeAttribute(ATTR));
+				const nodes = [...document.querySelectorAll(${JSON.stringify(SNAPSHOT_SELECTOR)})];
+				const items = [];
+				let n = 0;
+				for (const el of nodes) {
+					if (items.length >= ${limit}) break;
+					const r = el.getBoundingClientRect();
+					if (r.width === 0 && r.height === 0) continue;
+					const ref = 'e' + (++n);
+					el.setAttribute(ATTR, ref);
+					const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+					items.push({
+						ref, tag: el.tagName.toLowerCase(),
+						type: el.getAttribute('type') || undefined,
+						role: el.getAttribute('role') || undefined,
+						name: (el.getAttribute('aria-label') || el.getAttribute('placeholder')
+							|| (el.textContent || '').trim().replace(/\\s+/g, ' ')).slice(0, 80) || undefined,
+						value: isField || el instanceof HTMLSelectElement ? String(el.value ?? '').slice(0, 60) : undefined,
+						href: el.hasAttribute('href') ? el.href : undefined,
+						rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+					});
+				}
+				return { tabId: ${tab.id}, title: document.title, url: location.href, total: nodes.length, items };
+			})()`,
+			awaitPromise: false, returnByValue: true, userGesture: true,
+		}).then((res) => {
+			if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+			return res.result.value;
+		});
+		payload.limitedTo = limit;
+		return payload;
+	});
+}
+
+const COMMANDS = {
+	ping: cmdPing, 'browser.info': cmdBrowserInfo,
+	'tabs.list': cmdTabsList, 'tabs.open': cmdTabsOpen, 'tabs.close': cmdTabsClose, 'tabs.activate': cmdTabsActivate,
+	nav: cmdNav, eval: cmdEval, content: cmdContent, find: cmdFind,
+	click: cmdClick, input: cmdInput, press: cmdPress, scroll: cmdScroll,
+	snapshot: cmdSnapshot, screenshot: cmdScreenshot,
+	wait: cmdWait, dialog: cmdDialogPolicy,
+	'console.log': cmdConsoleLog, 'network.log': cmdNetworkLog, 'network.clear': cmdNetworkClear,
+	pdf: cmdPdf, emulate: cmdEmulate,
+};
+
+/**
+ * Explicit wait primitive: poll until a selector appears, page text contains
+ * a string, or a predicate function returns truthy. Polls inside the page via
+ * requestAnimationFrame-ish loop (50ms interval) — no bridge round-trips.
+ */
+async function cmdWait(params) {
+	const tab = await resolveTab(params.tabId);
+	const timeoutMs = Math.min(120_000, Math.max(100, Number(params.timeoutMs) || 15_000));
+	let condition;
+	if (params.selector) {
+		condition = `!!document.querySelector(${JSON.stringify(String(params.selector))})`;
+	} else if (typeof params.text === 'string') {
+		condition = `(document.body && document.body.innerText.includes(${JSON.stringify(params.text)}))`;
+	} else if (typeof params.fn === 'string' && params.fn.length > 0) {
+		// Accept both a predicate function ("() => x.ready") and a bare boolean
+		// expression ("x.ready === true"): call function values, evaluate
+		// everything else as-is.
+		condition = `(() => { const f = (${params.fn}); return typeof f === 'function' ? Boolean(f()) : Boolean(f); })()`;
+	} else {
+		throw new Error('provide one of selector, text, or fn');
+	}
+	return withCDP(tab.id, async (send) => {
+		const started = Date.now();
+		for (;;) {
+			const res = await send('Runtime.evaluate', {
+				expression: condition,
+				awaitPromise: false, returnByValue: true, userGesture: true,
+			}).catch(() => ({ result: { value: false } }));
+			if (res.exceptionDetails) throw new Error(`wait condition error: ${res.exceptionDetails.text}`);
+			if (res.result.value === true) return { tabId: tab.id, waited: Date.now() - started };
+			if (Date.now() - started >= timeoutMs) throw new Error(`wait timeout after ${timeoutMs}ms`);
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	});
+}
+
+/**
+ * Read or set the native-dialog auto-answer policy. GET: {action:'get'} →
+ * {policy, recent}. SET: {action:'set', policy:'accept'|'dismiss'|'manual'}.
+ * Recent dialogs (last 50) are returned so callers can verify what happened.
+ */
+async function cmdDialogPolicy(params) {
+	if (params?.policy !== undefined) {
+		const p = String(params.policy);
+		if (!['accept', 'dismiss', 'manual'].includes(p)) throw new Error(`invalid dialog policy: ${p}`);
+		dialogPolicy = p;
+	}
+	return { policy: dialogPolicy, recent: dialogLog.slice(-10) };
+}
+
+/* ------------------------------------------------------------ popup link */
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+	if (msg?.type === 'bridgeStatus') {
+		sendResponse({ state: wsState, cfg, helloInfo, lastError });
+		return false;
+	}
+	if (msg?.type === 'reconnect') {
+		manualDisconnect = false;
+		backoffAttempt = 0;
+		disconnectNow();
+		loadConfig().then(() => { connect(); sendResponse({ started: true }); });
+		return true;
+	}
+	if (msg?.type === 'disconnect') {
+		manualDisconnect = true;
+		disconnectNow();
+		sendResponse({ started: true });
+		return false;
+	}
+	return false;
+});
+
+/* -------------------------------------------------------------- lifecycle */
+
+async function init() {
+	await loadConfig();
+	connect();
+}
+
+chrome.runtime.onInstalled.addListener(() => init());
+chrome.runtime.onStartup.addListener(() => init());
+init();

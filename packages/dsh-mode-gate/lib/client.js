@@ -10,7 +10,7 @@ window.__ModuleLoader__.load({
 		const zh = {
 			tab: "模式门禁",
 			title: "dsh-mode-gate 阶段权限",
-			desc: "展示需求循环各阶段的权限定义，维护模型目录、任务模式默认模型与 bash 禁止命令列表。",
+			desc: "维护各工作流阶段的 Prompt 与自动命令指引，以及模型目录、任务模式默认模型和 bash 禁止命令列表。",
 			phasePresetAction: "PRESET_ACTION",
 			phaseRequirementRecognition: "REQUIREMENT_RECOGNITION",
 			phaseImplement: "IMPLEMENT",
@@ -59,11 +59,36 @@ window.__ModuleLoader__.load({
 			saveModelCatalogFailed: "保存模型目录失败",
 			loadTaskModesFailed: "读取任务模式失败",
 			saveTaskModesFailed: "保存任务模式失败",
+			workflowSettingsTitle: "工作流阶段设置",
+			workflowSettingsDesc: "点击工作流展开阶段表格。Prompt 会作为该阶段的初始指引喂给 Agent；开启自动命令指引后，系统会根据该阶段的 goal 动态生成需要执行/提交的命令清单。",
+			expandWorkflow: "展开",
+			collapseWorkflow: "收起",
+			phaseColumn: "阶段",
+			promptColumn: "阶段 Prompt（可编辑）",
+			autoGuideColumn: "自动生成命令指引",
+			saveWorkflow: "保存该工作流设置",
+			loadWorkflowSettingsFailed: "读取工作流设置失败",
+			saveWorkflowSettingsFailed: "保存工作流设置失败",
+			workflowSettingsSaveSuccess: "已保存",
+			pendingProtocolTitle: "需求识别协议待确认",
+			pendingProtocolDesc: "Agent 已提交以下阶段进展，请确认是否接受。接受后进入研究阶段；在下方输入框发送任意内容将视为拒绝，Agent 会继续修改需求理解。",
+			accept: "接受",
+			accepting: "正在接受…",
+			approveSuccess: "已接受，进入下一阶段",
+			approveFailed: "接受失败",
+			fieldTaskMode: "任务模式",
+			fieldFeatureIntentFile: "Feature intent 文件",
+			fieldSummary: "任务摘要",
+			fieldUserWords: "用户原话",
+			fieldUnderstanding: "Agent 理解",
+			fieldChecklist: "可验收 Checklist",
+			fieldModel: "模型",
+			pendingPlaceholder: "在这里输入内容并发送以修改需求或者评论理解。",
 		};
 		const en = {
 			tab: "Mode Gate",
 			title: "dsh-mode-gate phase permissions",
-			desc: "Shows the requirement-loop phase permissions, model catalog, task-mode default models, and bash deny-list.",
+			desc: "Edit per-workflow phase prompts and auto command guides, plus model catalog, task-mode default models, and bash deny-list.",
 			phasePresetAction: "PRESET_ACTION",
 			phaseRequirementRecognition: "REQUIREMENT_RECOGNITION",
 			phaseImplement: "IMPLEMENT",
@@ -112,6 +137,31 @@ window.__ModuleLoader__.load({
 			saveModelCatalogFailed: "Failed to save model catalog",
 			loadTaskModesFailed: "Failed to load task modes",
 			saveTaskModesFailed: "Failed to save task modes",
+			workflowSettingsTitle: "Workflow phase settings",
+			workflowSettingsDesc: "Expand a workflow to edit each phase prompt. The prompt is fed to the agent as the initial phase guide; enable auto command guide and the system generates the required tool/submit commands from the phase goal.",
+			expandWorkflow: "Expand",
+			collapseWorkflow: "Collapse",
+			phaseColumn: "Phase",
+			promptColumn: "Phase prompt (editable)",
+			autoGuideColumn: "Auto command guide",
+			saveWorkflow: "Save workflow settings",
+			loadWorkflowSettingsFailed: "Failed to load workflow settings",
+			saveWorkflowSettingsFailed: "Failed to save workflow settings",
+			workflowSettingsSaveSuccess: "Saved",
+			pendingProtocolTitle: "Requirement protocol pending",
+			pendingProtocolDesc: "The agent submitted the following phase progress. Accept to enter research; sending any message in the composer rejects it and the agent continues revising the requirement.",
+			accept: "Accept",
+			accepting: "Accepting…",
+			approveSuccess: "Accepted, moving to next phase",
+			approveFailed: "Failed to accept",
+			fieldTaskMode: "Task mode",
+			fieldFeatureIntentFile: "Feature intent file",
+			fieldSummary: "Summary",
+			fieldUserWords: "User words",
+			fieldUnderstanding: "Agent understanding",
+			fieldChecklist: "Checklist",
+			fieldModel: "Model",
+			pendingPlaceholder: "Type here and send to revise the requirement or comment on the understanding.",
 		};
 
 		const PHASES = ["IDLE", "BASE_READ", "REQUIREMENT_RECOGNITION", "RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION", "PRESET_ACTION", "ACTION_EXECUTE"];
@@ -271,11 +321,54 @@ window.__ModuleLoader__.load({
 			return { modes, error, refresh, save };
 		}
 
-		const PHASE_ROWS = [
-			["wfIdle", "permImplement"],
-			["wfSimpleAction", "permSimpleAction"],
-			["wfCreate", "permCreate"],
-		];
+		/** Read and update per-state workflow prompts + auto-guide toggles through the Remote service. */
+		function useWorkflowSettings(api) {
+			const [data, setData] = react.useState({ workflows: [], overrides: {}, workspace: null });
+			const [error, setError] = react.useState("");
+			const [savedAt, setSavedAt] = react.useState(0);
+
+			const refresh = react.useCallback(async () => {
+				try {
+					const result = await api().getWorkflowSettings();
+					if (result && result.ok && result.value) {
+						setData({
+							workflows: Array.isArray(result.value.workflows) ? result.value.workflows : [],
+							overrides: result.value.overrides || {},
+							workspace: result.value.workspace || null,
+						});
+					} else {
+						setError("loadWorkflowSettingsFailed");
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+
+			const saveOverride = react.useCallback(async (workflowId, stateId, patch) => {
+				try {
+					const result = await api().setWorkflowOverride({ workflowId, stateId, patch });
+					if (result && result.ok === false) {
+						setError(String(result.error || "saveWorkflowSettingsFailed"));
+						return false;
+					}
+					setError("");
+					setSavedAt(Date.now());
+					return true;
+				} catch (err) {
+					setError(String((err && err.message) || err));
+					return false;
+				}
+			}, [api]);
+
+			react.useEffect(() => {
+				refresh();
+				const timer = setInterval(refresh, 4000);
+				return () => clearInterval(timer);
+			}, [refresh]);
+
+			return { ...data, error, refresh, saveOverride, savedAt };
+		}
+
 
 		const styles = {
 			footer: { display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", color: "var(--dsw-alias-label-secondary)", fontSize: 12, minWidth: 0 },
@@ -294,16 +387,135 @@ window.__ModuleLoader__.load({
 			error: { color: "var(--dsw-alias-label-danger, #e5484d)", fontSize: 13, margin: 0 },
 		};
 
-		/** Left sidebar footer badge: current phase + declared target. */
+		/** Folder-style workflow settings: click to expand, editable per-state prompt + auto-guide toggle. */
+		function WorkflowSettingsView(props) {
+			const { t, api } = props;
+			const settings = useWorkflowSettings(api);
+			const [expanded, setExpanded] = react.useState({});
+			const [drafts, setDrafts] = react.useState({});
+			const initialized = react.useRef(false);
+
+			react.useEffect(() => {
+				if (!Array.isArray(settings.workflows) || settings.workflows.length === 0) return;
+				if (initialized.current) return;
+				const next = {};
+				for (const wf of settings.workflows) {
+					next[wf.id] = (wf.states || []).map((state) => {
+						const override = settings.overrides && settings.overrides[wf.id] && settings.overrides[wf.id][state.id]
+							? settings.overrides[wf.id][state.id]
+							: null;
+						const defaultAuto = Boolean(state.goalRef || state.hasTransitions);
+						return {
+							stateId: state.id,
+							prompt: override && typeof override.prompt === "string" ? override.prompt : (state.prompt || ""),
+							autoGuide: override && typeof override.autoGuide === "boolean" ? override.autoGuide : defaultAuto,
+						};
+					});
+				}
+				setDrafts(next);
+				initialized.current = true;
+			}, [settings.workflows, settings.overrides]);
+
+			const updateDraft = (workflowId, index, patch) => {
+				setDrafts((prev) => {
+					const wfDrafts = prev[workflowId] || [];
+					return { ...prev, [workflowId]: wfDrafts.map((row, i) => (i === index ? { ...row, ...patch } : row)) };
+				});
+			};
+
+			const saveWorkflow = async (workflowId) => {
+				const rows = drafts[workflowId] || [];
+				for (const row of rows) {
+					await settings.saveOverride(workflowId, row.stateId, {
+						prompt: row.prompt,
+						autoGuide: row.autoGuide,
+					});
+				}
+				await settings.refresh();
+			};
+
+			const settingsError = typeof settings.error === "string" && settings.error
+				? (settings.error === "loadWorkflowSettingsFailed" || settings.error === "saveWorkflowSettingsFailed"
+					? t(settings.error)
+					: settings.error)
+				: "";
+
+			if (settings.workflows.length === 0) {
+				return react.createElement("div", null,
+					react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
+					react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
+					react.createElement("p", { style: styles.error }, settingsError || t("loadWorkflowSettingsFailed")),
+				);
+			}
+
+			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+				react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
+				react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
+				settings.workflows.map((wf) => {
+					const isOpen = Boolean(expanded[wf.id]);
+					const rows = drafts[wf.id] || [];
+					return react.createElement("div", {
+						key: wf.id,
+						style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden" },
+					},
+						react.createElement("button", {
+							type: "button",
+							onClick: () => setExpanded((prev) => ({ ...prev, [wf.id]: !prev[wf.id] })),
+							style: { ...styles.button, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, border: "none", borderRadius: 0, padding: "10px 12px" },
+						},
+							react.createElement("span", { style: { fontSize: 12, lineHeight: "18px" } }, isOpen ? "▾" : "▸"),
+							react.createElement("code", { style: styles.code }, wf.label || wf.id),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, wf.description || wf.id),
+						),
+						isOpen && react.createElement("table", { style: { ...styles.table, border: "none", borderRadius: 0 } },
+							react.createElement("thead", null,
+								react.createElement("tr", null,
+									react.createElement("th", { style: styles.th }, t("phaseColumn")),
+									react.createElement("th", { style: styles.th }, t("promptColumn")),
+									react.createElement("th", { style: styles.th }, t("autoGuideColumn")),
+								),
+							),
+							react.createElement("tbody", null,
+								rows.map((row, idx) => react.createElement("tr", { key: row.stateId },
+									react.createElement("td", { style: styles.td },
+										react.createElement("code", { style: styles.code }, row.stateId),
+									),
+									react.createElement("td", { style: styles.td },
+										react.createElement("textarea", {
+											style: { ...styles.input, minHeight: 72, resize: "vertical" },
+											value: row.prompt,
+											onChange: (e) => updateDraft(wf.id, idx, { prompt: e.target.value }),
+										}),
+									),
+									react.createElement("td", { style: { ...styles.td, textAlign: "center" } },
+										react.createElement("input", {
+											type: "checkbox",
+											checked: Boolean(row.autoGuide),
+											onChange: (e) => updateDraft(wf.id, idx, { autoGuide: e.target.checked }),
+										}),
+									),
+								)),
+							),
+							react.createElement("div", { style: { padding: "8px 10px", display: "flex", gap: 8, alignItems: "center" } },
+								react.createElement("button", { style: styles.button, onClick: () => saveWorkflow(wf.id) }, t("saveWorkflow")),
+								settings.savedAt ? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, t("workflowSettingsSaveSuccess")) : null,
+							),
+						),
+					);
+				}),
+				settingsError ? react.createElement("p", { style: styles.error }, settingsError) : null,
+			);
+		}
+
+		/** Left sidebar footer badge: phase only; mode+goal now live in the input dock. */
 		function ModeGateFooterAction(props) {
 			const { sessions, api, t, wide } = props;
 			const state = useModeGateState(sessions, api);
 			const phase = state.phase || "PRESET_ACTION";
-			const title = `${t("modeLabel")}: ${phase} / ${t("targetLabel")}: ${state.target ? state.target.target : t("noTarget")}`;
+			const title = `${t("modeLabel")}: ${phase}`;
 			if (!wide) return react.createElement("span", { style: styles.badge, title }, phase);
 			return react.createElement("div", { style: styles.footer },
-				react.createElement("span", { style: styles.badge }, phase),
-				react.createElement("span", { style: styles.target }, state.target ? state.target.target : t("noTarget")),
+				react.createElement("span", { style: styles.badge, title }, phase),
 			);
 		}
 
@@ -385,19 +597,7 @@ window.__ModuleLoader__.load({
 			const saveTaskModes = async () => { await taskModes.save(taskDraft); };
 
 			const head = react.createElement("p", { style: styles.desc }, t("desc"));
-			const rows = PHASE_ROWS.map(([phaseKey, permKey]) => react.createElement("tr", { key: phaseKey },
-				react.createElement("td", { style: styles.td }, react.createElement("code", { style: styles.code }, t(phaseKey))),
-				react.createElement("td", { style: styles.td }, t(permKey)),
-			));
-			const table = react.createElement("table", { style: styles.table },
-				react.createElement("thead", null,
-					react.createElement("tr", null,
-						react.createElement("th", { style: styles.th }, t("modeLabel")),
-						react.createElement("th", { style: styles.th }, t("permLabel")),
-					)
-				),
-				react.createElement("tbody", null, rows),
-			);
+			const workflowSettings = react.createElement(WorkflowSettingsView, { t, api });
 
 			// model catalog
 			const modelHead = react.createElement("h3", { style: styles.denyHead }, t("modelCatalogTitle"));
@@ -479,7 +679,7 @@ window.__ModuleLoader__.load({
 
 			return react.createElement("div", { style: styles.section },
 				head,
-				table,
+				workflowSettings,
 				modelHead, modelDesc, modelTable, modelAddRow, modelSaveButton, modelErrorLine,
 				taskHead, taskDesc, taskSimple, taskComplex, taskSaveButton, taskErrorLine,
 				denyHead, denyDesc, denyTable, addRow, saveButton, errorLine,
@@ -531,6 +731,10 @@ window.__ModuleLoader__.load({
 				remoteArgsDescriptor("setModelCatalog", "SetModelCatalogResult"),
 				remoteDescriptor("getTaskModes", "GetTaskModesResult"),
 				remoteArgsDescriptor("setTaskModes", "SetTaskModesResult"),
+				remoteDescriptor("getWorkflowSettings", "GetWorkflowSettingsResult"),
+				remoteArgsDescriptor("setWorkflowOverride", "SetWorkflowOverrideResult"),
+				remoteArgsDescriptor("approveRequirementProtocol", "ApproveRequirementProtocolResult"),
+				remoteArgsDescriptor("rejectRequirementProtocol", "RejectRequirementProtocolResult"),
 			],
 		};
 
@@ -716,9 +920,78 @@ window.__ModuleLoader__.load({
 			}));
 		}
 
+		/** Simple renderer for a pending feature-intent protocol. */
+		function FeatureIntentApprovalView(props) {
+			const { t, api, sessionId } = props;
+			const state = useModeGateState(props.sessions, api);
+			const pending = state.pendingProtocol;
+			const display = pending && pending.display ? pending.display : null;
+			const [busy, setBusy] = react.useState(false);
+			const [approved, setApproved] = react.useState(false);
+			const [error, setError] = react.useState("");
+
+			const approve = async () => {
+				if (busy || approved) return;
+				setBusy(true);
+				setError("");
+				try {
+					const result = await api().approveRequirementProtocol({ sessionId });
+					if (result && result.ok === false) {
+						setError(String(result.error || t("approveFailed")));
+					} else {
+						setApproved(true);
+						// Let the header controller switch back to 对话 once the state
+						// poll observes the transition; this delayed click only covers
+						// layouts where the header controls are not mounted.
+						setTimeout(() => activateChatView(), 2500);
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				} finally {
+					setBusy(false);
+				}
+			};
+
+			const field = (label, value) => react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+				react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, label),
+				react.createElement("span", { style: { whiteSpace: "pre-wrap", color: "var(--dsw-alias-label-primary)", fontSize: 13 } }, String(value || "（空）")),
+			);
+
+			return react.createElement("div", {
+				style: {
+					height: "100%", width: "100%", overflowY: "auto",
+					padding: "28px 32px", display: "flex", flexDirection: "column",
+					alignItems: "center", gap: 12,
+				},
+			},
+				react.createElement("div", { style: { width: "100%", maxWidth: 720, display: "flex", flexDirection: "column", gap: 14 } },
+					react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 20, fontWeight: 600 } }, t("pendingProtocolTitle")),
+					react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, lineHeight: "20px" } }, t("pendingProtocolDesc")),
+					field(t("fieldTaskMode"), display && display.taskMode),
+					field(t("fieldFeatureIntentFile"), display && display.featureIntentFile),
+					field(t("fieldSummary"), display && display.summary),
+					field(t("fieldModel"), display && display.model && `${display.model.model || ""} (${display.model.provider || ""})`),
+					field(t("fieldUserWords"), display && display.userWords),
+					field(t("fieldUnderstanding"), display && display.understanding),
+					react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+						react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("fieldChecklist")),
+						react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+							(Array.isArray(display && display.checklist) ? display.checklist : []).map((item, idx) => react.createElement("div", { key: idx, style: { display: "flex", gap: 8 } },
+								react.createElement("code", { style: styles.code }, `checklist-${idx + 1}`),
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 13 } }, item),
+							)),
+						),
+					),
+					react.createElement("button", { style: { ...styles.button, alignSelf: "flex-start", padding: "8px 18px" }, onClick: approve, disabled: busy || approved }, busy ? t("accepting") : (approved ? t("approveSuccess") : t("accept"))),
+					error && react.createElement("p", { style: styles.error }, error),
+				),
+			);
+		}
+
 		/** IDLE workflow chooser as a sibling view of 对话/轨迹. */
 		function IdleWorkflowView(props) {
-			const { sessions, api, getCommands, inputActions, useInput } = props;
+			const { sessions, api, getCommands, inputActions, useInput, t } = props;
+			const state = useModeGateState(sessions, api);
 			const { workflows, sessionId } = useWorkflows(sessions, api);
 			/* Draft source: the framework session kit first, DOM polling as the backstop. */
 			const polled = useComposerState();
@@ -726,6 +999,16 @@ window.__ModuleLoader__.load({
 			const draft = typeof liveDraft === "string" ? liveDraft : polled.text;
 			const hasText = draft.trim().length > 0;
 			const [busy, setBusy] = react.useState(false);
+
+			const pending = state.pendingProtocol && state.pendingProtocol.status === "awaiting_user" ? state.pendingProtocol : null;
+			const isIdle = !state.workflowId || state.workflowId === "IDLE";
+			react.useEffect(() => {
+				if (!isIdle && !pending) activateChatView();
+			}, [isIdle, pending]);
+			if (pending) {
+				return react.createElement(FeatureIntentApprovalView, { sessions, api, sessionId, t });
+			}
+			if (!isIdle) return react.createElement("div", { style: { display: "none" } });
 
 			const run = async (workflowId) => {
 				if (busy || !hasText) return;
@@ -797,6 +1080,62 @@ window.__ModuleLoader__.load({
 				react.createElement(WorkflowChooser, { workflows, disabled: !hasText, busy, onPick: run })
 			);
 		}
+
+		function firstGoalLine(text) {
+			const value = String(text || '').trim();
+			if (!value) return '';
+			const line = value.split(/\r?\n/)[0].trim();
+			return line.replace(/^\[目标\]\s*/, '') || line;
+		}
+
+		/** Non-IDLE mode+goal dock, rendered in the same input dock as the native GoalBar. */
+		function ModeGateGoalDock(props) {
+			const { sessions, api } = props;
+			const state = useModeGateState(sessions, api);
+			const workflowId = state.workflowId || "IDLE";
+			if (workflowId === "IDLE") return null;
+			const phase = state.phase || workflowId;
+			const goalPrompt = state.goal && state.goal.status === "active" && state.goal.prompt
+				? String(state.goal.prompt)
+				: "";
+			const targetText = state.target && state.target.target ? String(state.target.target) : "";
+			const full = goalPrompt || targetText || phase;
+			const text = firstGoalLine(full);
+			return react.createElement("div", {
+				style: {
+					width: "min(calc(var(--dsh-composer-card-max-width, 780px) + 2 * var(--dsh-composer-side-clearance, 16px)), 100%)",
+					alignSelf: "center", boxSizing: "border-box",
+					padding: "0 var(--dsh-composer-side-clearance, 16px)",
+				},
+			},
+				react.createElement("div", {
+					style: {
+						boxSizing: "border-box",
+						width: "100%",
+						border: "1px solid var(--dsw-alias-border-l1)",
+						background: "var(--dsw-specific-tip)",
+						borderRadius: 12,
+						alignItems: "center",
+						gap: 10,
+						minHeight: 36,
+						padding: "4px 5px 4px 12px",
+						display: "flex",
+					},
+					title: full,
+				},
+					react.createElement("span", {
+						style: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", borderRadius: 999, padding: "1px 8px", fontSize: 11, lineHeight: "17px", color: "var(--dsw-alias-label-primary)" },
+					}, phase),
+					react.createElement("span", {
+						style: { color: "var(--dsw-alias-label-primary)", flex: "none", fontSize: 13, fontWeight: 500, lineHeight: "24px" },
+					}, "目标"),
+					react.createElement("span", {
+						style: { minWidth: 0, color: "var(--dsw-alias-label-primary-dimmed)", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 13, lineHeight: "20px", overflow: "hidden" },
+					}, text)
+				)
+			);
+		}
+
 		/**
 		 * Header-right controls. Besides the show/hide button, this component
 		 * activates the IDLE workflow tab (via `setView` when the seat supplies it,
@@ -807,12 +1146,14 @@ window.__ModuleLoader__.load({
 		function ModeGateHeaderControls(props) {
 			const { sessions, api, setView } = props;
 			const status = useIdleStatus(sessions, api);
+			const state = useModeGateState(sessions, api);
 			const isIdle = status.idle;
 			const hidden = useIdleModalHidden();
 			const prevShown = react.useRef(null);
+			const hasPending = Boolean(state.pendingProtocol && state.pendingProtocol.status === "awaiting_user");
 
 			react.useEffect(() => {
-				const show = isIdle && status.loaded && !hidden;
+				const show = hasPending || (isIdle && status.loaded && !hidden);
 				const activate = (label) => {
 					if (typeof setView === "function") {
 						setView(label === "工作流" ? "mode-gate-idle" : "chat");
@@ -836,9 +1177,28 @@ window.__ModuleLoader__.load({
 				if (prevShown.current === true) activate("对话");
 				prevShown.current = false;
 				return undefined;
-			}, [isIdle, status.loaded, hidden, setView]);
+			}, [isIdle, status.loaded, hidden, hasPending, setView]);
 
-			if (!isIdle) return null;
+			if (!isIdle && !hasPending) return null;
+			if (hasPending) {
+				return react.createElement("button", {
+					onClick: () => {
+						if (typeof setView === "function") setView("mode-gate-idle");
+						else if (typeof document !== "undefined") {
+							const tabs = document.querySelectorAll('[role="tab"]');
+							for (const tab of tabs) {
+								if (tab.textContent && tab.textContent.includes("工作流")) { tab.click(); return; }
+							}
+						}
+					},
+					title: "查看待确认的需求协议",
+					style: {
+						cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)",
+						background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
+						borderRadius: 8, padding: "3px 8px", fontSize: 12,
+					},
+				}, "查看需求确认");
+			}
 			return react.createElement("button", {
 				onClick: () => modalStore.toggle(),
 				title: hidden ? "显示工作流面板" : "隐藏工作流面板",
@@ -852,8 +1212,11 @@ window.__ModuleLoader__.load({
 
 		/** IDLE-only custom placeholder rendered inside the composer input. */
 		function ComposerPlaceholder(props) {
-			const { sessions, api, useInput } = props;
-			const isIdle = useIsIdle(sessions, api);
+			const { sessions, api, useInput, t } = props;
+			const pendingPlaceholderText = typeof t === "function" ? t("pendingPlaceholder") : "在这里输入内容并发送以修改需求或者评论理解。";
+			const state = useModeGateState(sessions, api);
+			const isIdle = !state.workflowId || state.workflowId === "IDLE";
+			const pending = Boolean(state.pendingProtocol && state.pendingProtocol.status === "awaiting_user");
 			const polled = useComposerState();
 			const liveDraft = typeof useInput === "function" ? useInput((state) => state.draft) : null;
 			const composer = { hasText: typeof liveDraft === "string" ? liveDraft.trim().length > 0 : polled.hasText };
@@ -867,22 +1230,38 @@ window.__ModuleLoader__.load({
 						delete el.dataset.modeGatePlaceholder;
 					}
 					document.body.classList.remove("mode-gate-idle-composer");
+					document.body.classList.remove("mode-gate-pending-composer");
 				};
 				const apply = () => {
-					if (!isIdle) { restore(); return; }
-					document.body.classList.add("mode-gate-idle-composer");
-					const el = findComposerTextarea();
-					if (!el) return;
-					if (!el.dataset.modeGatePlaceholder) {
-						el.dataset.modeGatePlaceholder = el.getAttribute("placeholder") || "";
+					if (pending) {
+						document.body.classList.remove("mode-gate-idle-composer");
+						document.body.classList.add("mode-gate-pending-composer");
+						const el = findComposerTextarea();
+						if (!el) return;
+						if (!el.dataset.modeGatePlaceholder) {
+							el.dataset.modeGatePlaceholder = el.getAttribute("placeholder") || "";
+						}
+						el.setAttribute("placeholder", pendingPlaceholderText);
+						return;
 					}
-					if (el.getAttribute("placeholder") !== "") el.setAttribute("placeholder", "");
+					if (isIdle) {
+						document.body.classList.remove("mode-gate-pending-composer");
+						document.body.classList.add("mode-gate-idle-composer");
+						const el = findComposerTextarea();
+						if (!el) return;
+						if (!el.dataset.modeGatePlaceholder) {
+							el.dataset.modeGatePlaceholder = el.getAttribute("placeholder") || "";
+						}
+						if (el.getAttribute("placeholder") !== "") el.setAttribute("placeholder", "");
+						return;
+					}
+					restore();
 				};
 				apply();
 				// The composer textarea can be re-created on session switches.
 				const timer = setInterval(apply, 500);
 				return () => { clearInterval(timer); restore(); };
-			}, [isIdle]);
+			}, [isIdle, pending]);
 
 			if (!isIdle || composer.hasText) return null;
 			return react.createElement("div", {
@@ -974,7 +1353,7 @@ window.__ModuleLoader__.load({
 			ctx.slots.inject("conversation.view", () => ctx.slots.register({
 				name: "conversation.view",
 				id: "mode-gate-idle",
-				order: -1,
+				order: 1,
 				locale: NS,
 				label: () => "工作流",
 				inject: () => ({ sessions: ctx.get("sessions"), api, getCommands: () => ctx.get("remote.commands") })
@@ -989,6 +1368,15 @@ window.__ModuleLoader__.load({
 				locale: NS,
 				inject: () => ({ sessions: ctx.get("sessions"), api, getCommands: () => ctx.get("remote.commands") })
 			}, IdleWorkflowDock));
+
+			// Non-IDLE mode+goal strip, visually aligned with the native GoalBar.
+			ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({
+				name: "conversation.input.dock",
+				id: "mode-gate-goal-dock",
+				order: 6,
+				locale: NS,
+				inject: () => ({ sessions: ctx.get("sessions"), api })
+			}, ModeGateGoalDock));
 
 			ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
 				name: "conversation.session.header.actions",

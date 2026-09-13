@@ -1,6 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -12,6 +11,7 @@ import { createWorkflowRegistry, expandHome, BUILTIN_WORKFLOW_DIR } from './work
 import { createProjectExperienceStore, defaultProjectExperienceDir } from './project-experience.js';
 import {
   createDynamicPlan,
+  extractEntryFields,
   staticPlanCurrent,
   staticPlanPendingCount,
 } from './plans.js';
@@ -23,6 +23,7 @@ import {
   loadStateStore,
   normalizeModelCatalog,
   normalizeTaskModes,
+  normalizeWorkflowOverrides,
   readSessionEntry,
   readState,
   saveStateStore,
@@ -126,6 +127,7 @@ class ModeGateGateway extends TypertRemoteService {
       chosenPresetAction: entry.chosenPresetAction,
       workspace: entry.workspace || null,
       modelCatalog: store.modelCatalog,
+      pendingProtocol: entry.pendingProtocol,
     };
   }
   async getWorkflows(args) {
@@ -147,26 +149,20 @@ class ModeGateGateway extends TypertRemoteService {
     const sessionId = args && args.sessionId;
     const workflowId = args && args.workflowId;
     const stateId = (args && args.stateId) || null;
-    const store = loadStateStore();
     const entry = readSessionEntry(sessionId);
     const registry = this.options.registryForWorkspace(entry.workspace || this.options.defaultWorkspace || null);
     const wf = registry.get(workflowId);
     if (!wf) return { ok: false, error: `未知工作流 ${String(workflowId)}` };
     const start = stateId || wf.startState;
-    store.sessions[sessionId] = { ...entry, workflowId, phase: start, mode: start, goal: null, target: null };
-    saveStateStore(store);
-    const agent = this.options.getAgent ? this.options.getAgent(sessionId) : null;
-    if (agent && typeof agent.steer === 'function') {
-      try {
-        agent.steer(createUserMessage({
-          content: [{ type: 'text', text: `请开始 ${wf.label} 工作流（${workflowId} / ${start}）。先调用 declare_target。` }],
-          source: { kind: 'user' },
-        }));
-      } catch (err) {
-        console.log('[dsh-mode-gate] selectWorkflow steer failed:', err && err.message);
-      }
+    const stateDef = registry.stateOf(workflowId, start);
+    if (!stateDef) return { ok: false, error: `工作流 ${workflowId} 不存在状态 ${start}` };
+    const agent = this.options.getAgent ? this.options.getAgent(sessionId) : null
+      || { session: { id: sessionId, header: { cwd: entry.workspace } } };
+    if (typeof this.options.activateStateGoal !== 'function') {
+      return { ok: false, error: 'mode-gate 尚未初始化 activateStateGoal' };
     }
-    return { ok: true, workflowId, state: start };
+    const activated = await this.options.activateStateGoal(agent, workflowId, start);
+    return { ok: true, workflowId, state: start, ...(activated && activated.prompt ? { prompt: activated.prompt } : {}) };
   }
   async getBashDenyList() {
     return { entries: readBashDenyList() };
@@ -195,12 +191,73 @@ class ModeGateGateway extends TypertRemoteService {
     saveStateStore(store);
     return { modes: store.taskModes };
   }
+  async getWorkflowSettings() {
+    const registry = this.options.registryForWorkspace(this.options.defaultWorkspace || null);
+    const store = loadStateStore();
+    return {
+      workspace: this.options.defaultWorkspace || null,
+      workflows: registry.list().map((wf) => ({
+        id: wf.id,
+        label: wf.label,
+        description: wf.description,
+        kind: wf.kind,
+        startState: wf.startState,
+        states: (wf.states || []).map((state) => ({
+          id: state.id,
+          label: state.label || state.id,
+          prompt: typeof state.prompt === 'string' ? state.prompt : '',
+          goalRef: state.goal && state.goal.ref ? state.goal.ref : null,
+          hasTransitions: Array.isArray(state.transitions) && state.transitions.length > 0,
+          permissions: state.permissions || null,
+        })),
+      })),
+      overrides: store.workflowOverrides,
+    };
+  }
+  async setWorkflowOverride(args) {
+    const workflowId = args && args.workflowId;
+    const stateId = args && args.stateId;
+    const patch = args && args.patch;
+    if (typeof workflowId !== 'string' || typeof stateId !== 'string' || !patch || typeof patch !== 'object') {
+      return { ok: false, error: 'setWorkflowOverride 需要 workflowId / stateId / patch' };
+    }
+    const registry = this.options.registryForWorkspace(this.options.defaultWorkspace || null);
+    const stateDef = registry.stateOf(workflowId, stateId);
+    if (!stateDef) return { ok: false, error: `未知状态 ${workflowId} / ${stateId}` };
+    const store = loadStateStore();
+    const overrides = normalizeWorkflowOverrides(store.workflowOverrides);
+    const wfOverrides = { ...(overrides[workflowId] || {}) };
+    const current = { ...(wfOverrides[stateId] || {}) };
+    if (typeof patch.prompt === 'string') current.prompt = patch.prompt.trim();
+    if (typeof patch.autoGuide === 'boolean') current.autoGuide = patch.autoGuide;
+    if (Object.keys(current).length > 0) wfOverrides[stateId] = current;
+    else delete wfOverrides[stateId];
+    if (Object.keys(wfOverrides).length > 0) overrides[workflowId] = wfOverrides;
+    else delete overrides[workflowId];
+    store.workflowOverrides = overrides;
+    saveStateStore(store);
+    return { ok: true, workflowOverrides: overrides };
+  }
+  async approveRequirementProtocol(args) {
+    if (typeof this.options.approveRequirementProtocol !== 'function') {
+      return { ok: false, error: 'approveRequirementProtocol 未配置' };
+    }
+    return this.options.approveRequirementProtocol(args && args.sessionId);
+  }
+  async rejectRequirementProtocol(args) {
+    if (typeof this.options.rejectRequirementProtocol !== 'function') {
+      return { ok: false, error: 'rejectRequirementProtocol 未配置' };
+    }
+    return this.options.rejectRequirementProtocol(args && args.sessionId);
+  }
 }
 markRemoteMethods(ModeGateGateway, [
   'getState', 'getWorkflows', 'selectWorkflow',
   'getBashDenyList', 'setBashDenyList',
   'getModelCatalog', 'setModelCatalog',
   'getTaskModes', 'setTaskModes',
+  'getWorkflowSettings', 'setWorkflowOverride',
+  'approveRequirementProtocol', 'rejectRequirementProtocol',
 ]);
 
 export default {
@@ -359,6 +416,67 @@ export default {
       };
     }
 
+    /** Effective per-state prompt: user override wins, then workflow JSON. */
+    function stateOverride(state, workflowId, stateId) {
+      const overrides = state && state.workflowOverrides && typeof state.workflowOverrides === 'object'
+        ? state.workflowOverrides
+        : {};
+      const wf = overrides[workflowId];
+      return wf && wf[stateId] ? wf[stateId] : null;
+    }
+
+    function effectiveStatePrompt(state, workflowId, stateId, stateDef) {
+      const override = stateOverride(state, workflowId, stateId);
+      if (override && typeof override.prompt === 'string') {
+        return override.prompt.trim();
+      }
+      return stateDef && typeof stateDef.prompt === 'string' ? stateDef.prompt.trim() : '';
+    }
+
+    function defaultAutoGuideEnabled(stateDef) {
+      return Boolean(stateDef && (stateDef.goal || (Array.isArray(stateDef.transitions) && stateDef.transitions.length > 0)));
+    }
+
+    function autoGuideEnabled(state, workflowId, stateId, stateDef) {
+      const override = stateOverride(state, workflowId, stateId);
+      if (override && typeof override.autoGuide === 'boolean') return override.autoGuide;
+      return defaultAutoGuideEnabled(stateDef);
+    }
+
+    /** Dynamically generated command guide for a state, derived from its goal. */
+    function buildAutoGuide(stateDef, goalDef) {
+      if (!stateDef) return '';
+      const lines = [];
+      if (goalDef) {
+        for (const req of goalDef.requiredCalls || []) {
+          lines.push(`- 调用 ${req.tool}${req.min && req.min > 1 ? `（至少 ${req.min} 次）` : ''}`);
+        }
+        if (goalDef.submitTool) {
+          lines.push(`- 最后调用 ${goalDef.submitTool.name} 提交并推进模式`);
+        }
+      } else {
+        const tools = stateDef.permissions && Array.isArray(stateDef.permissions.tools)
+          ? stateDef.permissions.tools
+          : null;
+        if (Array.isArray(tools) && tools.length > 0) lines.push(`- 本阶段可用工具：${tools.join('、')}`);
+        else if (stateDef.permissions && stateDef.permissions.tools === '*') lines.push('- 本阶段可使用全部工具');
+      }
+      if (lines.length === 0) return '';
+      return ['本阶段命令指引（自动生成）：', ...lines].join('\n');
+    }
+
+    function latestEntry(content) {
+      const text = String(content || '');
+      const parts = text.split(/\n---\n/);
+      return parts.length ? parts[parts.length - 1] : text;
+    }
+
+    function agentFor(sessionId) {
+      if (agents.has(sessionId)) return agents.get(sessionId);
+      const entry = readSessionEntry(sessionId);
+      return { session: { id: sessionId, header: { cwd: entry.workspace } } };
+    }
+
     async function activateStateGoal(agent, workflowId, stateId) {
       const state = readState(agent);
       const registry = registryFor(agent);
@@ -370,14 +488,15 @@ export default {
         mode: stateId,
         workspace: workspaceOf(agent, defaultWorkspace),
         dynamicPlan: { scope: 'state', stateId, items: [], updatedAt: Date.now() },
+        pendingProtocol: null,
       };
       if (!goalRef) {
-        const prompt = (stateDef && stateDef.prompt) || `当前状态：${stateId}`;
+        const prompt = effectiveStatePrompt(state, workflowId, stateId, stateDef) || `当前状态：${stateId}`;
         writeState(agent, { ...basePatch, goal: null, target: { target: prompt, mode: stateId } });
         return { prompt, messages: [] };
       }
       const result = await goalEngine.activate(goalRef, envFor(agent, state), state);
-      const targetText = result.prompt || (stateDef && stateDef.prompt) || stateId;
+      const targetText = result.prompt || effectiveStatePrompt(state, workflowId, stateId, stateDef) || stateId;
       writeState(agent, { ...basePatch, ...result.statePatch, target: { target: targetText, mode: stateId } });
       return result;
     }
@@ -414,21 +533,83 @@ export default {
         phase: nextState,
         mode: nextState,
         goal: null,
+        pendingProtocol: null,
         dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
       });
       return activateStateGoal(agent, nextWorkflow, nextState);
     }
 
+    async function buildPendingProtocolDisplay(agent, parsed) {
+      let fields = { userWords: '', understanding: '', checklist: [] };
+      try {
+        const file = await featureIntents.get(parsed.featureIntentFile);
+        fields = extractEntryFields(latestEntry(file.content));
+      } catch (err) {
+        log(`读取 feature intent 以生成待确认协议失败：${(err && err.message) || err}`);
+      }
+      return {
+        taskMode: parsed.taskMode,
+        summary: parsed.summary,
+        featureIntentFile: parsed.featureIntentFile,
+        model: parsed.model,
+        userWords: fields.userWords,
+        understanding: fields.understanding,
+        checklist: fields.checklist,
+      };
+    }
+
     async function submitGoalTool(agent, toolName, args) {
       const before = readState(agent);
-      const result = await goalEngine.submit(toolName, args, before, envFor(agent, before));
-      if (!result.ok) throw new Error(result.reason);
-      await completeGoal(agent, result.result);
+      const submitted = await goalEngine.submit(toolName, args, before, envFor(agent, before));
+      if (!submitted.ok) throw new Error(submitted.reason);
+      const { result, parsed } = submitted;
+      if (toolName === 'submit_requirement_protocol') {
+        const display = await buildPendingProtocolDisplay(agent, parsed);
+        writeState(agent, {
+          goal: null,
+          pendingProtocol: {
+            status: 'awaiting_user',
+            submittedAt: Date.now(),
+            workflowId: before.workflowId,
+            stateId: before.phase,
+            result,
+            display,
+          },
+          target: { target: '需求协议已提交，请在“工作流”界面确认；发送任意消息视为拒绝并继续修改需求。', mode: before.phase },
+        });
+        return { pendingApproval: true, phase: before.phase, workflowId: before.workflowId, display };
+      }
+      await completeGoal(agent, result);
       const after = readState(agent);
-      if (toolName === 'submit_requirement_protocol' || (toolName === 'submit_state' && before.phase === 'ACCUMULATION')) {
+      if (toolName === 'submit_state' && (before.phase === 'ACCUMULATION' || (before.workflowId === 'rough' && before.phase === 'IMPLEMENT'))) {
         syncStaticPlanToDshTodos(agent, after);
       }
-      return result.result;
+      return result;
+    }
+
+    async function approvePendingProtocol(sessionId) {
+      const entry = readSessionEntry(sessionId);
+      if (!entry || !entry.pendingProtocol) {
+        return { ok: false, error: '当前没有待确认的需求协议' };
+      }
+      const agent = agentFor(sessionId);
+      writeState(agent, { pendingProtocol: null });
+      const rawResult = entry.pendingProtocol.result;
+      const activated = await completeGoal(agent, rawResult);
+      const after = readState(agent);
+      syncStaticPlanToDshTodos(agent, after);
+      return { ok: true, workflowId: after.workflowId, phase: after.phase, ...(activated && activated.prompt ? { prompt: activated.prompt } : {}) };
+    }
+
+    async function rejectPendingProtocol(sessionId) {
+      const entry = readSessionEntry(sessionId);
+      if (!entry || !entry.pendingProtocol) {
+        return { ok: false, error: '当前没有待确认的需求协议' };
+      }
+      const agent = agentFor(sessionId);
+      writeState(agent, { pendingProtocol: null, goal: null, target: null });
+      const activated = await activateStateGoal(agent, entry.workflowId, entry.phase);
+      return { ok: true, workflowId: entry.workflowId, phase: entry.phase, ...(activated && activated.prompt ? { prompt: activated.prompt } : {}) };
     }
 
     function syncStaticPlanToDshTodos(agent, state) {
@@ -489,9 +670,15 @@ export default {
         const wf = registry.get(state.workflowId);
         const stateDef = registry.stateOf(state.workflowId, state.phase);
         const goalDef = goalEngine.defFor(state);
+        const guideGoalDef = goalDef || (stateDef && stateDef.goal && stateDef.goal.ref ? goalEngine.get(stateDef.goal.ref) : null);
         const goalPrompt = state.goal && state.goal.prompt
           ? state.goal.prompt
           : (goalDef ? (typeof goalDef.prompt === 'function' ? goalDef.prompt(envFor(agent, state), state) : goalDef.prompt) : '');
+        const stagePrompt = effectiveStatePrompt(state, state.workflowId, state.phase, stateDef);
+        const awaitingUser = Boolean(state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user');
+        const autoGuide = !awaitingUser && autoGuideEnabled(state, state.workflowId, state.phase, stateDef)
+          ? buildAutoGuide(stateDef, guideGoalDef)
+          : '';
         const denyList = readBashDenyList();
         const lines = [
           '[mode-gate]',
@@ -507,7 +694,11 @@ export default {
           '当前禁止的 bash 命令：',
           denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n') : '  （无）',
         ];
-        if (stateDef && stateDef.prompt && !state.goal) lines.push('', '当前状态说明：', stateDef.prompt);
+        if (awaitingUser) {
+          lines.push('', '当前有需求协议正在等待用户确认。请停止工具调用，等待用户在“工作流”界面点击“接受”，或发送消息以修改需求。');
+        }
+        if (stagePrompt) lines.push('', '当前阶段说明：', stagePrompt);
+        if (autoGuide) lines.push('', autoGuide);
         if (state.goal && state.goal.status === 'active') lines.push('', '当前目标：', goalPrompt);
         const plan = state.staticPlan;
         if (plan && Array.isArray(plan.items) && plan.items.length > 0) {
@@ -560,8 +751,9 @@ export default {
         const state = readState(agent);
         const registry = registryFor(agent);
         const stateDef = registry.stateOf(state.workflowId, state.phase);
+        const hasPending = Boolean(state.pendingProtocol);
         let goalPrompt = '';
-        if (stateDef && stateDef.goal && (!state.goal || state.goal.status !== 'active')) {
+        if (!hasPending && stateDef && stateDef.goal && (!state.goal || state.goal.status !== 'active')) {
           const activated = await activateStateGoal(agent, state.workflowId, state.phase);
           goalPrompt = activated && activated.prompt ? activated.prompt : '';
         } else if (state.goal && state.goal.status === 'active' && state.goal.prompt) {
@@ -655,6 +847,7 @@ export default {
           staticPlan: state.staticPlan,
           dynamicPlan: state.dynamicPlan,
           loopMemory: state.loopMemory,
+          pendingProtocol: state.pendingProtocol,
         }, null, 2);
       },
     }));
@@ -674,15 +867,8 @@ export default {
         const wf = registry.get(args.workflow_id);
         if (!wf) throw new Error(`未知工作流 ${String(args.workflow_id)}`);
         const stateId = args.state || wf.startState;
-        writeState(agent, {
-          workflowId: args.workflow_id,
-          phase: stateId,
-          mode: stateId,
-          goal: null,
-          target: null,
-          workspace: workspaceOf(agent, defaultWorkspace),
-        });
-        return `已选择工作流 ${args.workflow_id}，起始状态 ${stateId}。请先调用 declare_target。`;
+        const activated = await activateStateGoal(agent, args.workflow_id, stateId);
+        return `已静默切换到 ${args.workflow_id} / ${stateId}。请先调用 declare_target。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`;
       },
     }));
 
@@ -784,7 +970,7 @@ export default {
 
     ctx.tools.register(defineTool({
       name: 'submit_requirement_protocol',
-      description: '提交需求识别协议。通过后 checklist 会成为 CREATE 工作流的 staticPlan。',
+      description: '提交需求识别协议。提交后会在“工作流”界面等待用户确认：接受则进入 RESEARCH，发送任意消息则视为拒绝并继续修改需求。',
       parameters: {
         protocol: { type: 'string', required: true, description: '固定为 requirement-recognition。' },
         version: { type: 'number', required: true, description: '固定为 1。' },
@@ -799,6 +985,16 @@ export default {
         if (agent === void 0) throw new Error('submit_requirement_protocol 需要 agent 上下文');
         const result = await submitGoalTool(agent, 'submit_requirement_protocol', args || {});
         const state = readState(agent);
+        if (result && result.pendingApproval) {
+          return JSON.stringify({
+            ok: true,
+            pendingApproval: true,
+            phase: state.phase,
+            workflowId: state.workflowId,
+            message: '协议已提交，等待用户在“工作流”界面确认。用户发送任意消息将视为拒绝，Agent 需继续修改需求。',
+            display: result.display,
+          }, null, 2);
+        }
         return JSON.stringify({
           ok: true,
           phase: state.phase,
@@ -862,7 +1058,7 @@ export default {
         description: 'select a mode-gate workflow by id',
         input: { hint: '<workflow-id>' },
         recordInput: false,
-        handler: ({ agent, rawInput }) => {
+        handler: async ({ agent, rawInput }) => {
           const workflowId = String(rawInput || '').trim();
           if (!workflowId) {
             const registry = registryFor(agent);
@@ -872,23 +1068,11 @@ export default {
           const registry = registryFor(agent);
           const wf = registry.get(workflowId);
           if (!wf) return { kind: 'error', text: `未知工作流 ${workflowId}` };
-          writeState(agent, {
-            workflowId,
-            phase: wf.startState,
-            mode: wf.startState,
-            goal: null,
-            target: null,
-            workspace: workspaceOf(agent, defaultWorkspace),
-          });
-          try {
-            agent.steer(createUserMessage({
-              content: [{ type: 'text', text: `请开始 ${wf.label} 工作流（${workflowId} / ${wf.startState}）。先调用 declare_target。` }],
-              source: { kind: 'user' },
-            }));
-          } catch (err) {
-            log(`/mode steer 失败：${(err && err.message) || err}`);
-          }
-          return { kind: 'success', text: `已进入 ${wf.label}（${workflowId} / ${wf.startState}）。` };
+          const activated = await activateStateGoal(agent, workflowId, wf.startState);
+          return {
+            kind: 'success',
+            text: `已静默进入 ${wf.label}（${workflowId} / ${wf.startState}）。请先调用 declare_target。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`,
+          };
         },
       });
     });
@@ -1049,6 +1233,24 @@ export default {
       return decision;
     });
 
+    // ── feature-intent approval: sending a user message rejects the pending protocol ──
+    ctx.on('session/event', (session, event) => {
+      try {
+        if (!event || event.type !== 'user/message') return;
+        const sessionId = typeof session === 'string'
+          ? session
+          : (session && (session.id ?? session.sessionId));
+        if (typeof sessionId !== 'string') return;
+        const entry = readSessionEntry(sessionId);
+        if (!entry || !entry.pendingProtocol) return;
+        rejectPendingProtocol(sessionId)
+          .then((result) => log(`用户发送消息，已拒绝待确认需求协议：${sessionId} -> ${result && result.workflowId}/${result && result.phase}`))
+          .catch((err) => log(`拒绝待确认需求协议失败：${(err && err.message) || err}`));
+      } catch (err) {
+        log(`session/event 处理失败：${(err && err.message) || err}`);
+      }
+    });
+
     // ── per-agent model override ─────────────────────────────────────────
     ctx.on('agent/created', ({ agent }) => {
       try {
@@ -1056,7 +1258,27 @@ export default {
         const agentCtx = agent && agent.ctx;
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
-          const state = readState(agent);
+          let state = readState(agent);
+          // Safety net for the feature-intent approval gate: a new user message
+          // while the protocol is awaiting user confirmation rejects it and
+          // re-activates REQUIREMENT_RECOGNITION so the agent can revise.
+          if (state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user') {
+            const messages = Array.isArray(_payload && _payload.messages) ? _payload.messages : [];
+            const last = messages[messages.length - 1];
+            const userTurn = Boolean(last && (
+              last.role === 'user'
+              || last.type === 'user/message'
+              || (last.type === 'message' && last.role === 'user')
+            ));
+            if (userTurn && agent && agent.session && typeof agent.session.id === 'string') {
+              try {
+                await rejectPendingProtocol(agent.session.id);
+                state = readState(agent);
+              } catch (err) {
+                log(`agent/request 自动拒绝待确认协议失败：${(err && err.message) || err}`);
+              }
+            }
+          }
           const selected = state.selectedModel;
           const stateDef = registryFor(agent).stateOf(state.workflowId, state.phase);
           const phaseModel = stateDef && stateDef.model ? stateDef.model : null;
@@ -1077,6 +1299,13 @@ export default {
       }
     });
 
-    new ModeGateGateway(ctx, { registryForWorkspace, defaultWorkspace, getAgent: (sessionId) => agents.get(sessionId) });
+    new ModeGateGateway(ctx, {
+      registryForWorkspace,
+      defaultWorkspace,
+      getAgent: (sessionId) => agents.get(sessionId),
+      activateStateGoal,
+      approveRequirementProtocol: approvePendingProtocol,
+      rejectRequirementProtocol: rejectPendingProtocol,
+    });
   },
 };
