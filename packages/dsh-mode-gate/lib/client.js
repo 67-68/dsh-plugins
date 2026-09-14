@@ -9,6 +9,8 @@ window.__ModuleLoader__.load({
 		// ── locales ─────────────────────────────────────────────────────────────
 		const zh = {
 			tab: "模式门禁",
+			tabCurrent: "当前配置",
+			tabAllModes: "所有模式",
 			title: "dsh-mode-gate 阶段权限",
 			desc: "维护各工作流阶段的 Prompt 与自动命令指引，以及模型目录、任务模式默认模型和 bash 禁止命令列表。",
 			phasePresetAction: "PRESET_ACTION",
@@ -60,12 +62,19 @@ window.__ModuleLoader__.load({
 			loadTaskModesFailed: "读取任务模式失败",
 			saveTaskModesFailed: "保存任务模式失败",
 			workflowSettingsTitle: "工作流阶段设置",
-			workflowSettingsDesc: "点击工作流展开阶段表格。Prompt 会作为该阶段的初始指引喂给 Agent；开启自动命令指引后，系统会根据该阶段的 goal 动态生成需要执行/提交的命令清单。",
+			workflowSettingsDesc: "点击工作流展开阶段表格。Prompt 会作为该阶段的 runtime context 注入并喂给 Agent（即使当前 agent preset 使用 complete persona 也能到达模型）；开启自动命令指引后，系统会根据该阶段的 goal 动态生成需要执行/提交的命令清单。",
 			expandWorkflow: "展开",
 			collapseWorkflow: "收起",
 			phaseColumn: "阶段",
 			promptColumn: "阶段 Prompt（可编辑）",
 			autoGuideColumn: "自动生成命令指引",
+			modelThinkingColumn: "模型 / thinking",
+			workflowModelPlaceholder: "model id（留空用默认）",
+			effortDefault: "默认",
+			effortHigh: "high",
+			effortLow: "low",
+			effortNo: "no",
+			effortMax: "max",
 			saveWorkflow: "保存该工作流设置",
 			loadWorkflowSettingsFailed: "读取工作流设置失败",
 			saveWorkflowSettingsFailed: "保存工作流设置失败",
@@ -87,6 +96,8 @@ window.__ModuleLoader__.load({
 		};
 		const en = {
 			tab: "Mode Gate",
+			tabCurrent: "Current",
+			tabAllModes: "All modes",
 			title: "dsh-mode-gate phase permissions",
 			desc: "Edit per-workflow phase prompts and auto command guides, plus model catalog, task-mode default models, and bash deny-list.",
 			phasePresetAction: "PRESET_ACTION",
@@ -138,12 +149,19 @@ window.__ModuleLoader__.load({
 			loadTaskModesFailed: "Failed to load task modes",
 			saveTaskModesFailed: "Failed to save task modes",
 			workflowSettingsTitle: "Workflow phase settings",
-			workflowSettingsDesc: "Expand a workflow to edit each phase prompt. The prompt is fed to the agent as the initial phase guide; enable auto command guide and the system generates the required tool/submit commands from the phase goal.",
+			workflowSettingsDesc: "Expand a workflow to edit each phase prompt. The prompt is injected as runtime context for the agent (it reaches the model even when the agent preset uses a complete persona); enable auto command guide and the system generates the required tool/submit commands from the phase goal.",
 			expandWorkflow: "Expand",
 			collapseWorkflow: "Collapse",
 			phaseColumn: "Phase",
 			promptColumn: "Phase prompt (editable)",
 			autoGuideColumn: "Auto command guide",
+			modelThinkingColumn: "Model / thinking",
+			workflowModelPlaceholder: "model id (empty = default)",
+			effortDefault: "default",
+			effortHigh: "high",
+			effortLow: "low",
+			effortNo: "no",
+			effortMax: "max",
 			saveWorkflow: "Save workflow settings",
 			loadWorkflowSettingsFailed: "Failed to load workflow settings",
 			saveWorkflowSettingsFailed: "Failed to save workflow settings",
@@ -409,6 +427,10 @@ window.__ModuleLoader__.load({
 							stateId: state.id,
 							prompt: override && typeof override.prompt === "string" ? override.prompt : (state.prompt || ""),
 							autoGuide: override && typeof override.autoGuide === "boolean" ? override.autoGuide : defaultAuto,
+							model: override && typeof override.model === "string" ? override.model : (typeof state.model === "string" ? state.model : ""),
+							reasoningEffort: override && typeof override.reasoningEffort === "string"
+								? override.reasoningEffort
+								: (typeof state.reasoningEffort === "string" ? state.reasoningEffort : ""),
 						};
 					});
 				}
@@ -429,6 +451,8 @@ window.__ModuleLoader__.load({
 					await settings.saveOverride(workflowId, row.stateId, {
 						prompt: row.prompt,
 						autoGuide: row.autoGuide,
+						model: row.model,
+						reasoningEffort: row.reasoningEffort,
 					});
 				}
 				await settings.refresh();
@@ -473,6 +497,7 @@ window.__ModuleLoader__.load({
 									react.createElement("th", { style: styles.th }, t("phaseColumn")),
 									react.createElement("th", { style: styles.th }, t("promptColumn")),
 									react.createElement("th", { style: styles.th }, t("autoGuideColumn")),
+									react.createElement("th", { style: styles.th }, t("modelThinkingColumn")),
 								),
 							),
 							react.createElement("tbody", null,
@@ -493,6 +518,27 @@ window.__ModuleLoader__.load({
 											checked: Boolean(row.autoGuide),
 											onChange: (e) => updateDraft(wf.id, idx, { autoGuide: e.target.checked }),
 										}),
+									),
+									react.createElement("td", { style: styles.td },
+										react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+											react.createElement("input", {
+												style: styles.input,
+												placeholder: t("workflowModelPlaceholder"),
+												value: row.model || "",
+												onChange: (e) => updateDraft(wf.id, idx, { model: e.target.value }),
+											}),
+											react.createElement("select", {
+												style: styles.input,
+												value: row.reasoningEffort || "",
+												onChange: (e) => updateDraft(wf.id, idx, { reasoningEffort: e.target.value }),
+											},
+												react.createElement("option", { value: "" }, t("effortDefault")),
+												react.createElement("option", { value: "high" }, t("effortHigh")),
+												react.createElement("option", { value: "low" }, t("effortLow")),
+												react.createElement("option", { value: "no" }, t("effortNo")),
+												react.createElement("option", { value: "max" }, t("effortMax")),
+											),
+										),
 									),
 								)),
 							),
@@ -597,7 +643,6 @@ window.__ModuleLoader__.load({
 			const saveTaskModes = async () => { await taskModes.save(taskDraft); };
 
 			const head = react.createElement("p", { style: styles.desc }, t("desc"));
-			const workflowSettings = react.createElement(WorkflowSettingsView, { t, api });
 
 			// model catalog
 			const modelHead = react.createElement("h3", { style: styles.denyHead }, t("modelCatalogTitle"));
@@ -679,10 +724,45 @@ window.__ModuleLoader__.load({
 
 			return react.createElement("div", { style: styles.section },
 				head,
-				workflowSettings,
 				modelHead, modelDesc, modelTable, modelAddRow, modelSaveButton, modelErrorLine,
 				taskHead, taskDesc, taskSimple, taskComplex, taskSaveButton, taskErrorLine,
 				denyHead, denyDesc, denyTable, addRow, saveButton, errorLine,
+			);
+		}
+
+		/** 「所有模式」tab 的临时内容：后续 checklist 会替换为阶段卡片 UI。 */
+		function ModeGateAllModesTab(props) {
+			const { t, api } = props;
+			return react.createElement(WorkflowSettingsView, { t, api });
+		}
+
+		/** 独立的「设置 → 模式门禁」页面：顶部「当前配置 / 所有模式」两个 tab。 */
+		function ModeGateSettingsSection(props) {
+			const { t, api } = props;
+			const [activeTab, setActiveTab] = react.useState("current");
+			const tabButton = (id, label) => react.createElement("button", {
+				key: id,
+				type: "button",
+				onClick: () => setActiveTab(id),
+				style: {
+					padding: "6px 10px",
+					border: "none",
+					borderBottom: `2px solid ${activeTab === id ? "var(--dsw-alias-label-primary)" : "transparent"}`,
+					background: "transparent",
+					color: activeTab === id ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-secondary)",
+					fontSize: 13,
+					cursor: "pointer",
+					fontWeight: activeTab === id ? 600 : 400,
+				},
+			}, label);
+			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 12, width: "100%" } },
+				react.createElement("div", { style: { display: "flex", gap: 4, borderBottom: "1px solid var(--dsw-alias-border-l2)" } },
+					tabButton("current", t("tabCurrent")),
+					tabButton("all", t("tabAllModes")),
+				),
+				activeTab === "current"
+					? react.createElement(ModeGateSettingsTab, { t, api })
+					: react.createElement(ModeGateAllModesTab, { t, api }),
 			);
 		}
 
@@ -1088,19 +1168,26 @@ window.__ModuleLoader__.load({
 			return line.replace(/^\[目标\]\s*/, '') || line;
 		}
 
-		/** Non-IDLE mode+goal dock, rendered in the same input dock as the native GoalBar. */
+		/** Input-dock goal strip: current goal + expandable remaining checklist goals (DSH tasks style). */
 		function ModeGateGoalDock(props) {
 			const { sessions, api } = props;
 			const state = useModeGateState(sessions, api);
+			const [expanded, setExpanded] = react.useState(false);
 			const workflowId = state.workflowId || "IDLE";
 			if (workflowId === "IDLE") return null;
-			const phase = state.phase || workflowId;
 			const goalPrompt = state.goal && state.goal.status === "active" && state.goal.prompt
 				? String(state.goal.prompt)
 				: "";
 			const targetText = state.target && state.target.target ? String(state.target.target) : "";
-			const full = goalPrompt || targetText || phase;
-			const text = firstGoalLine(full);
+			const full = goalPrompt || targetText || state.phase || workflowId;
+			const currentText = firstGoalLine(full);
+			const staticItems = state.staticPlan && Array.isArray(state.staticPlan.items) ? state.staticPlan.items : [];
+			const dynamicItems = state.dynamicPlan && Array.isArray(state.dynamicPlan.items) ? state.dynamicPlan.items : [];
+			const items = staticItems.length > 0
+				? staticItems.map((item) => ({ id: item.id, text: item.text, status: item.status }))
+				: dynamicItems.map((item, index) => ({ id: item.id || `dynamic-${index + 1}`, text: item.content, status: item.status }));
+			const done = items.filter((item) => item.status === "completed").length;
+			const hasItems = items.length > 0;
 			return react.createElement("div", {
 				style: {
 					width: "min(calc(var(--dsh-composer-card-max-width, 780px) + 2 * var(--dsh-composer-side-clearance, 16px)), 100%)",
@@ -1115,24 +1202,114 @@ window.__ModuleLoader__.load({
 						border: "1px solid var(--dsw-alias-border-l1)",
 						background: "var(--dsw-specific-tip)",
 						borderRadius: 12,
-						alignItems: "center",
-						gap: 10,
-						minHeight: 36,
 						padding: "4px 5px 4px 12px",
 						display: "flex",
+						flexDirection: "column",
+						gap: 2,
 					},
 					title: full,
 				},
-					react.createElement("span", {
-						style: { whiteSpace: "nowrap", background: "var(--dsw-alias-bg-module-platform)", borderRadius: 999, padding: "1px 8px", fontSize: 11, lineHeight: "17px", color: "var(--dsw-alias-label-primary)" },
-					}, phase),
-					react.createElement("span", {
-						style: { color: "var(--dsw-alias-label-primary)", flex: "none", fontSize: 13, fontWeight: 500, lineHeight: "24px" },
-					}, "目标"),
-					react.createElement("span", {
-						style: { minWidth: 0, color: "var(--dsw-alias-label-primary-dimmed)", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 13, lineHeight: "20px", overflow: "hidden" },
-					}, text)
-				)
+					react.createElement("div", {
+						onClick: hasItems ? () => setExpanded((value) => !value) : undefined,
+						style: { display: "flex", alignItems: "center", gap: 10, minHeight: 36, cursor: hasItems ? "pointer" : "default" },
+					},
+						react.createElement("span", {
+							style: { color: "var(--dsw-alias-label-primary)", flex: "none", fontSize: 13, fontWeight: 500, lineHeight: "24px" },
+						}, "目标"),
+						react.createElement("span", {
+							style: { minWidth: 0, color: "var(--dsw-alias-label-primary-dimmed)", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 13, lineHeight: "20px", overflow: "hidden" },
+						}, currentText),
+						hasItems ? react.createElement("span", { style: { flex: "none", color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, `${done}/${items.length}`) : null,
+						hasItems ? react.createElement("span", { style: { flex: "none", color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, expanded ? "▾" : "▸") : null,
+					),
+					expanded && hasItems ? react.createElement("div", {
+						style: { borderTop: "1px solid var(--dsw-alias-border-l1)", padding: "6px 4px 6px 0", display: "flex", flexDirection: "column", gap: 4 },
+					},
+						items.map((item) => react.createElement("div", {
+							key: item.id,
+							style: { display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, lineHeight: "18px" },
+						},
+							react.createElement("span", {
+								style: { flex: "none", width: 16, color: item.status === "completed" ? "var(--dsw-alias-label-tertiary)" : "var(--dsw-alias-label-secondary)" },
+							}, item.status === "completed" ? "[x]" : item.status === "in_progress" ? "[~]" : "[ ]"),
+							react.createElement("span", {
+								style: { minWidth: 0, color: item.status === "completed" ? "var(--dsw-alias-label-tertiary)" : "var(--dsw-alias-label-primary-dimmed)", textDecoration: item.status === "completed" ? "line-through" : "none" },
+							}, item.text),
+						)),
+					) : null,
+				),
+			);
+		}
+
+		/** Top-of-conversation mode badge + phase progress modal (same header slot as agent preset). */
+		function ModeGateModeBadge(props) {
+			const { sessions, api } = props;
+			const state = useModeGateState(sessions, api);
+			const [open, setOpen] = react.useState(false);
+			const workflowId = state.workflowId || "IDLE";
+			if (workflowId === "IDLE") return null;
+			const workflow = state.workflow;
+			const states = workflow && Array.isArray(workflow.states) ? workflow.states : [];
+			const currentIndex = workflow && Number.isInteger(workflow.phaseIndex)
+				? workflow.phaseIndex
+				: states.findIndex((entry) => entry.id === state.phase);
+			const current = states[currentIndex] || { id: state.phase, label: state.phase };
+			const previous = currentIndex > 0 ? states[currentIndex - 1] : null;
+			const next = currentIndex >= 0 && currentIndex < states.length - 1 ? states[currentIndex + 1] : null;
+			const completed = currentIndex > 0 ? states.slice(0, currentIndex) : [];
+			const label = `${(workflow && workflow.label) || workflowId} · ${current.label || current.id}`;
+			const phaseLine = (title, entry) => react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "baseline" } },
+				react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, flex: "none", width: 56 } }, title),
+				react.createElement("span", { style: { color: entry ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-tertiary)", fontSize: 13 } }, entry ? (entry.label || entry.id) : "—"),
+			);
+			return react.createElement(react.Fragment, null,
+				react.createElement("button", {
+					type: "button",
+					onClick: () => setOpen((value) => !value),
+					title: "查看阶段进度",
+					style: {
+						cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)",
+						background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
+						borderRadius: 999, padding: "2px 10px", fontSize: 12, lineHeight: "20px", maxWidth: 220,
+						overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+					},
+				}, label),
+				open ? react.createElement("div", {
+					onClick: () => setOpen(false),
+					style: {
+						position: "fixed", inset: 0, zIndex: 1200,
+						background: "rgba(0,0,0,0.28)", display: "flex", alignItems: "flex-start", justifyContent: "center",
+						paddingTop: 72,
+					},
+				},
+					react.createElement("div", {
+						onClick: (event) => event.stopPropagation(),
+						style: {
+							width: "min(420px, calc(100vw - 32px))", boxSizing: "border-box",
+							background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
+							border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 12,
+							boxShadow: "var(--dsw-elevation-prominent, 0 12px 32px rgba(0,0,0,0.28))", padding: "12px 14px",
+							display: "flex", flexDirection: "column", gap: 10,
+						},
+					},
+						react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
+							react.createElement("span", { style: { fontWeight: 600, fontSize: 14 } }, label),
+							react.createElement("button", { onClick: () => setOpen(false), style: { cursor: "pointer", border: "none", background: "transparent", color: "var(--dsw-alias-label-tertiary)", fontSize: 16, lineHeight: "16px" } }, "×"),
+						),
+						phaseLine("当前阶段", current),
+						phaseLine("上一阶段", previous),
+						phaseLine("下一阶段", next),
+						react.createElement("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", paddingTop: 8 } },
+							react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, marginBottom: 4 } }, `已完成阶段（${completed.length}）`),
+							completed.length
+								? react.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, completed.map((entry) => react.createElement("span", {
+									key: entry.id,
+									style: { background: "var(--dsw-alias-bg-module-platform)", border: "1px solid var(--dsw-alias-border-l1)", borderRadius: 999, padding: "1px 8px", fontSize: 11, color: "var(--dsw-alias-label-secondary)" },
+								}, entry.label || entry.id)))
+								: react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, "暂无"),
+						),
+					),
+				) : null,
 			);
 		}
 
@@ -1377,6 +1554,14 @@ window.__ModuleLoader__.load({
 				locale: NS,
 				inject: () => ({ sessions: ctx.get("sessions"), api })
 			}, ModeGateGoalDock));
+
+			ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
+				name: "conversation.session.header.actions",
+				id: "mode-gate-mode-badge",
+				order: -20,
+				locale: NS,
+				inject: () => ({ sessions: ctx.get("sessions"), api })
+			}, ModeGateModeBadge));
 
 			ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
 				name: "conversation.session.header.actions",

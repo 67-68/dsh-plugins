@@ -1,4 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -19,6 +20,7 @@ import { resolveTransition } from './transitions.js';
 import {
   IDLE_STATE_ID,
   IDLE_WORKFLOW_ID,
+  WORKFLOW_REASONING_EFFORTS,
   formatCapabilities,
   loadStateStore,
   normalizeModelCatalog,
@@ -38,6 +40,7 @@ import {
 import {
   classifyCommand,
   extractCommandVerbs,
+  isAlwaysAllowedBash,
   matchBashDeny,
   normalizeDenyList,
   undeclaredBashVerbs,
@@ -113,6 +116,12 @@ class ModeGateGateway extends TypertRemoteService {
     const sessionId = args && args.sessionId;
     const entry = readSessionEntry(sessionId);
     const store = loadStateStore();
+    const registry = this.options.registryForWorkspace(entry.workspace || this.options.defaultWorkspace || null);
+    const wf = registry.get(entry.workflowId);
+    const states = (wf && Array.isArray(wf.states) ? wf.states : []).map((state) => ({
+      id: state.id,
+      label: state.label || state.id,
+    }));
     return {
       workflowId: entry.workflowId,
       phase: entry.phase,
@@ -128,6 +137,9 @@ class ModeGateGateway extends TypertRemoteService {
       workspace: entry.workspace || null,
       modelCatalog: store.modelCatalog,
       pendingProtocol: entry.pendingProtocol,
+      workflow: wf
+        ? { id: wf.id, label: wf.label || wf.id, states, phaseIndex: states.findIndex((state) => state.id === entry.phase) }
+        : null,
     };
   }
   async getWorkflows(args) {
@@ -202,14 +214,21 @@ class ModeGateGateway extends TypertRemoteService {
         description: wf.description,
         kind: wf.kind,
         startState: wf.startState,
-        states: (wf.states || []).map((state) => ({
-          id: state.id,
-          label: state.label || state.id,
-          prompt: typeof state.prompt === 'string' ? state.prompt : '',
-          goalRef: state.goal && state.goal.ref ? state.goal.ref : null,
-          hasTransitions: Array.isArray(state.transitions) && state.transitions.length > 0,
-          permissions: state.permissions || null,
-        })),
+        states: (wf.states || []).map((state) => {
+          const override = (store.workflowOverrides && store.workflowOverrides[wf.id] && store.workflowOverrides[wf.id][state.id]) || {};
+          return {
+            id: state.id,
+            label: state.label || state.id,
+            prompt: typeof state.prompt === 'string' ? state.prompt : '',
+            goalRef: state.goal && state.goal.ref ? state.goal.ref : null,
+            hasTransitions: Array.isArray(state.transitions) && state.transitions.length > 0,
+            permissions: state.permissions || null,
+            model: typeof override.model === 'string' ? override.model : '',
+            reasoningEffort: typeof override.reasoningEffort === 'string'
+              ? override.reasoningEffort
+              : (state.model && state.model.reasoningEffort ? state.model.reasoningEffort : ''),
+          };
+        }),
       })),
       overrides: store.workflowOverrides,
     };
@@ -230,6 +249,20 @@ class ModeGateGateway extends TypertRemoteService {
     const current = { ...(wfOverrides[stateId] || {}) };
     if (typeof patch.prompt === 'string') current.prompt = patch.prompt.trim();
     if (typeof patch.autoGuide === 'boolean') current.autoGuide = patch.autoGuide;
+    if (typeof patch.model === 'string') {
+      const modelId = patch.model.trim();
+      if (modelId) current.model = modelId;
+      else delete current.model;
+    }
+    if (patch.reasoningEffort === null || (typeof patch.reasoningEffort === 'string' && patch.reasoningEffort.trim() === '')) {
+      delete current.reasoningEffort;
+    } else if (typeof patch.reasoningEffort === 'string') {
+      const effort = patch.reasoningEffort.trim();
+      if (!WORKFLOW_REASONING_EFFORTS.has(effort)) {
+        return { ok: false, error: 'reasoningEffort 必须是 high / low / no / max 或空字符串' };
+      }
+      current.reasoningEffort = effort;
+    }
     if (Object.keys(current).length > 0) wfOverrides[stateId] = current;
     else delete wfOverrides[stateId];
     if (Object.keys(wfOverrides).length > 0) overrides[workflowId] = wfOverrides;
@@ -425,6 +458,40 @@ export default {
       return wf && wf[stateId] ? wf[stateId] : null;
     }
 
+    function modelEntryForId(modelId) {
+      if (!modelId) return null;
+      const catalog = loadStateStore().modelCatalog || [];
+      return catalog.find((entry) => entry && entry.id === modelId) || null;
+    }
+
+    function stateModelOverride(state, workflowId, stateId) {
+      const override = stateOverride(state, workflowId, stateId);
+      if (!override) return null;
+      const model = typeof override.model === 'string' && override.model.trim() ? override.model.trim() : '';
+      const reasoningEffort = typeof override.reasoningEffort === 'string' ? override.reasoningEffort.trim() : '';
+      if (!model && !reasoningEffort) return null;
+      return { model, reasoningEffort };
+    }
+
+    /** Persist a per-state model selection so the client model selector follows immediately. */
+    function applyStateModelSelection(agent, workflowId, stateId) {
+      if (!agent || !agent.session || typeof agent.session.append !== 'function') return;
+      const state = readState(agent);
+      const override = stateModelOverride(state, workflowId, stateId);
+      if (!override || !override.model) return;
+      const entry = modelEntryForId(override.model);
+      const payload = {
+        provider: (entry && entry.provider) || 'deepseek-official',
+        model: override.model,
+        ...(override.reasoningEffort ? { reasoningEffort: override.reasoningEffort } : {}),
+      };
+      try {
+        agent.session.append('model/selection', payload);
+      } catch (err) {
+        log(`model/selection 注入失败：${(err && err.message) || err}`);
+      }
+    }
+
     function effectiveStatePrompt(state, workflowId, stateId, stateDef) {
       const override = stateOverride(state, workflowId, stateId);
       if (override && typeof override.prompt === 'string') {
@@ -493,11 +560,15 @@ export default {
       if (!goalRef) {
         const prompt = effectiveStatePrompt(state, workflowId, stateId, stateDef) || `当前状态：${stateId}`;
         writeState(agent, { ...basePatch, goal: null, target: { target: prompt, mode: stateId } });
+        applyStateModelSelection(agent, workflowId, stateId);
+        void injectModeGateContext(agent, 'state');
         return { prompt, messages: [] };
       }
       const result = await goalEngine.activate(goalRef, envFor(agent, state), state);
       const targetText = result.prompt || effectiveStatePrompt(state, workflowId, stateId, stateDef) || stateId;
       writeState(agent, { ...basePatch, ...result.statePatch, target: { target: targetText, mode: stateId } });
+      applyStateModelSelection(agent, workflowId, stateId);
+      void injectModeGateContext(agent, 'state');
       return result;
     }
 
@@ -598,6 +669,17 @@ export default {
       const activated = await completeGoal(agent, rawResult);
       const after = readState(agent);
       syncStaticPlanToDshTodos(agent, after);
+      const live = agents.get(sessionId);
+      if (live && typeof live.followup === 'function') {
+        try {
+          live.followup(createUserMessage({
+            content: [{ type: 'text', text: '需求协议已通过，请现在开始执行当前阶段的工作：先调用 declare_target 声明 Target，然后按阶段目标推进。' }],
+            source: { kind: 'user' },
+          }));
+        } catch (err) {
+          log(`协议确认后自动开工消息注入失败：${(err && err.message) || err}`);
+        }
+      }
       return { ok: true, workflowId: after.workflowId, phase: after.phase, ...(activated && activated.prompt ? { prompt: activated.prompt } : {}) };
     }
 
@@ -637,7 +719,15 @@ export default {
       const deny = matchBashDeny(command, readBashDenyList());
       if (deny) return { kind: 'deny', reason: deny.reason || `命令 ${deny.commands.join('/')} 已被禁止。` };
       const policy = (stateDef && stateDef.permissions && stateDef.permissions.bash) || 'declared';
-      if (policy === 'none') return { kind: 'deny', reason: '当前状态禁用 bash。' };
+      if (policy === 'none') {
+        const requirementRecognition = Boolean(stateDef && stateDef.id === 'REQUIREMENT_RECOGNITION');
+        return {
+          kind: 'deny',
+          reason: requirementRecognition
+            ? '需求分解阶段禁止使用任何 bash，请专心分解需求；请使用只读调研工具。'
+            : '当前状态禁用 bash，请专心完成当前阶段目标。',
+        };
+      }
       const kind = classifyCommand(command);
       if (policy === 'unrestricted') {
         return kind === 'dangerous' ? { kind: 'ask', reason: `检测到危险命令，需要人工授权：${command}` } : { kind: 'allow' };
@@ -646,6 +736,11 @@ export default {
         return kind === 'read-only'
           ? { kind: 'allow' }
           : { kind: 'deny', reason: `当前状态只允许只读 bash 命令：${command}` };
+      }
+      if (policy === 'read-only-strict') {
+        return isAlwaysAllowedBash(command)
+          ? { kind: 'allow' }
+          : { kind: 'deny', reason: `当前状态只允许白名单只读命令（ls/cat/grep/sed/find 等），禁止 node/python3 等解释器：${command}` };
       }
       const missing = undeclaredBashVerbs(command, state.bash);
       if (missing.length) {
@@ -659,71 +754,118 @@ export default {
         : { kind: 'allow' };
     }
 
-    // ── system prompt ────────────────────────────────────────────────────
-    ctx.systemPrompt.section({
+    // ── system prompt / runtime context ─────────────────────────────────
+    function buildModeGatePolicyText(agent) {
+      const state = readState(agent);
+      const registry = registryFor(agent);
+      const wf = registry.get(state.workflowId);
+      const stateDef = registry.stateOf(state.workflowId, state.phase);
+      const goalDef = goalEngine.defFor(state);
+      const guideGoalDef = goalDef || (stateDef && stateDef.goal && stateDef.goal.ref ? goalEngine.get(stateDef.goal.ref) : null);
+      const goalPrompt = state.goal && state.goal.prompt
+        ? state.goal.prompt
+        : (goalDef ? (typeof goalDef.prompt === 'function' ? goalDef.prompt(envFor(agent, state), state) : goalDef.prompt) : '');
+      const stagePrompt = effectiveStatePrompt(state, state.workflowId, state.phase, stateDef);
+      const awaitingUser = Boolean(state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user');
+      const autoGuide = !awaitingUser && autoGuideEnabled(state, state.workflowId, state.phase, stateDef)
+        ? buildAutoGuide(stateDef, guideGoalDef)
+        : '';
+      const denyList = readBashDenyList();
+      const lines = [
+        '[mode-gate]',
+        `当前工作流：${state.workflowId}${wf ? `（${wf.label}）` : ''}`,
+        `当前状态：${state.phase}${stateDef ? `（${stateDef.label}）` : ''}`,
+        `当前 Target：${state.target && state.target.target ? firstLine(state.target.target) : '未声明'}`,
+        `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
+        `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
+        '规则：',
+        '- 工作流状态下，每次行动前必须先调用 declare_target 声明 Target。',
+        '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请。',
+        '- 始终可用：skill_search、switch_mode、dev_tool_search / request_extra、submit_state。',
+        '当前禁止的 bash 命令：',
+        denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n') : '  （无）',
+      ];
+      if (awaitingUser) {
+        lines.push('', '当前有需求协议正在等待用户确认。请停止工具调用，等待用户在“工作流”界面点击“接受”，或发送消息以修改需求。');
+      }
+      if (stagePrompt) lines.push('', '当前阶段说明：', stagePrompt);
+      if (autoGuide) lines.push('', autoGuide);
+      if (state.goal && state.goal.status === 'active') lines.push('', '当前目标：', goalPrompt);
+      if (state.goal && state.goal.status === 'active' && (state.goal.toolCount || 0) >= 10) {
+        const submitName = guideGoalDef && guideGoalDef.submitTool ? guideGoalDef.submitTool.name : 'submit_state';
+        lines.push('', '[目标提醒] 你当前的目标是：', goalPrompt, `完成当前 goal 后，调用 ${submitName} 推进到下一阶段。`);
+      }
+      const plan = state.staticPlan;
+      if (plan && Array.isArray(plan.items) && plan.items.length > 0) {
+        const pending = staticPlanPendingCount(plan);
+        const current = staticPlanCurrent(plan);
+        lines.push('', `Checklist 进度：${plan.items.length - pending}/${plan.items.length} 完成`);
+        lines.push(...plan.items.map((item) => `  - [${item.status === 'completed' ? 'x' : ' '}] ${item.id}: ${item.text}`));
+        if (current) lines.push(`当前 checklist goal：${current.id}`);
+      }
+      const dynamic = state.dynamicPlan;
+      if (dynamic && Array.isArray(dynamic.items) && dynamic.items.length > 0) {
+        const goalLabel = dynamic.goalId ? `（goal: ${dynamic.goalId}）` : '';
+        lines.push('', `当前动态计划${goalLabel}（本状态内有效，状态切换时清空）：`);
+        lines.push(...dynamic.items.map((item) => `  - [${item.status === 'completed' ? 'x' : item.status === 'in_progress' ? '~' : ' '}] ${item.content}`));
+      }
+      const memory = state.loopMemory;
+      if (wf && wf.memory && Array.isArray(wf.memory.injectAtStates) && wf.memory.injectAtStates.includes(state.phase)
+        && memory && Array.isArray(memory.blocks) && memory.blocks.length > 0) {
+        lines.push('', `Loop Memory（iteration=${memory.iteration || 0}）：`);
+        lines.push(...memory.blocks.slice(-8).map((block) => `  - [${block.iteration}] ${block.text}${block.stamp ? `（${block.stamp}）` : ''}`));
+      }
+      if (state.migrationNotice) lines.push('', `迁移提示：${state.migrationNotice}`);
+      return lines.join('\n');
+    }
+
+    ctx.systemPrompt.context({
       name: 'mode-gate:policy',
       order: 95,
-      text: (assembleCtx) => {
-        const agent = assembleCtx && assembleCtx.agent;
-        const state = readState(agent);
-        const registry = registryFor(agent);
-        const wf = registry.get(state.workflowId);
-        const stateDef = registry.stateOf(state.workflowId, state.phase);
-        const goalDef = goalEngine.defFor(state);
-        const guideGoalDef = goalDef || (stateDef && stateDef.goal && stateDef.goal.ref ? goalEngine.get(stateDef.goal.ref) : null);
-        const goalPrompt = state.goal && state.goal.prompt
-          ? state.goal.prompt
-          : (goalDef ? (typeof goalDef.prompt === 'function' ? goalDef.prompt(envFor(agent, state), state) : goalDef.prompt) : '');
-        const stagePrompt = effectiveStatePrompt(state, state.workflowId, state.phase, stateDef);
-        const awaitingUser = Boolean(state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user');
-        const autoGuide = !awaitingUser && autoGuideEnabled(state, state.workflowId, state.phase, stateDef)
-          ? buildAutoGuide(stateDef, guideGoalDef)
-          : '';
-        const denyList = readBashDenyList();
-        const lines = [
-          '[mode-gate]',
-          `当前工作流：${state.workflowId}${wf ? `（${wf.label}）` : ''}`,
-          `当前状态：${state.phase}${stateDef ? `（${stateDef.label}）` : ''}`,
-          `当前 Target：${state.target && state.target.target ? firstLine(state.target.target) : '未声明'}`,
-          `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
-          `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
-          '规则：',
-          '- 工作流状态下，每次行动前必须先调用 declare_target 声明 Target。',
-          '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请。',
-          '- 始终可用：skill_search、switch_mode、dev_tool_search / request_extra、submit_state。',
-          '当前禁止的 bash 命令：',
-          denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n') : '  （无）',
-        ];
-        if (awaitingUser) {
-          lines.push('', '当前有需求协议正在等待用户确认。请停止工具调用，等待用户在“工作流”界面点击“接受”，或发送消息以修改需求。');
-        }
-        if (stagePrompt) lines.push('', '当前阶段说明：', stagePrompt);
-        if (autoGuide) lines.push('', autoGuide);
-        if (state.goal && state.goal.status === 'active') lines.push('', '当前目标：', goalPrompt);
-        const plan = state.staticPlan;
-        if (plan && Array.isArray(plan.items) && plan.items.length > 0) {
-          const pending = staticPlanPendingCount(plan);
-          const current = staticPlanCurrent(plan);
-          lines.push('', `Checklist 进度：${plan.items.length - pending}/${plan.items.length} 完成`);
-          lines.push(...plan.items.map((item) => `  - [${item.status === 'completed' ? 'x' : ' '}] ${item.id}: ${item.text}`));
-          if (current) lines.push(`当前 checklist goal：${current.id}`);
-        }
-        const dynamic = state.dynamicPlan;
-        if (dynamic && Array.isArray(dynamic.items) && dynamic.items.length > 0) {
-          const goalLabel = dynamic.goalId ? `（goal: ${dynamic.goalId}）` : '';
-          lines.push('', `当前动态计划${goalLabel}（本状态内有效，状态切换时清空）：`);
-          lines.push(...dynamic.items.map((item) => `  - [${item.status === 'completed' ? 'x' : item.status === 'in_progress' ? '~' : ' '}] ${item.content}`));
-        }
-        const memory = state.loopMemory;
-        if (wf && wf.memory && Array.isArray(wf.memory.injectAtStates) && wf.memory.injectAtStates.includes(state.phase)
-          && memory && Array.isArray(memory.blocks) && memory.blocks.length > 0) {
-          lines.push('', `Loop Memory（iteration=${memory.iteration || 0}）：`);
-          lines.push(...memory.blocks.slice(-8).map((block) => `  - [${block.iteration}] ${block.text}${block.stamp ? `（${block.stamp}）` : ''}`));
-        }
-        if (state.migrationNotice) lines.push('', `迁移提示：${state.migrationNotice}`);
-        return lines.join('\n');
-      },
+      text: (assembleCtx) => buildModeGatePolicyText(assembleCtx && assembleCtx.agent),
     });
+
+    async function modeGateContextDelivered(agent) {
+      if (!agent || typeof agent.id === 'undefined') return false;
+      try {
+        const assembly = await ctx.systemPrompt.assemble({ scope: agent });
+        return Array.isArray(assembly.contexts)
+          && assembly.contexts.some((entry) => entry && entry.name === 'mode-gate:policy');
+      } catch (err) {
+        log(`mode-gate context assembly detection failed: ${(err && err.message) || err}`);
+        return false;
+      }
+    }
+
+    /**
+     * Some agent presets use a `complete: true` persona and suppress runtime
+     * contexts (`includeRuntimeContext: false`). In that environment the
+     * standard system prompt channels are intentionally unavailable, so
+     * mode-gate delivers its phase/goal policy as a synthetic pre-step user
+     * context instead. When the normal context channel is available this is a
+     * no-op.
+     */
+    async function injectModeGateContext(agent, reason) {
+      if (!agent || typeof agent.inject !== 'function') return false;
+      try {
+        if (await modeGateContextDelivered(agent)) return false;
+        const text = buildModeGatePolicyText(agent);
+        if (!text) return false;
+        agent.inject(createUserMessage({
+          content: [{ type: 'text', text }],
+          source: {
+            kind: 'plugin',
+            plugin: 'mode-gate',
+            form: 'notice',
+            summary: `mode-gate 阶段上下文（${reason || 'state'}）`,
+          },
+        }));
+        return true;
+      } catch (err) {
+        log(`mode-gate 阶段上下文注入失败：${(err && err.message) || err}`);
+        return false;
+      }
+    }
 
     // ── tools ────────────────────────────────────────────────────────────
     ctx.tools.register(defineTool({
@@ -1218,8 +1360,13 @@ export default {
         // actually succeed before submit_state will accept them.
         const countErrorCall = name === 'read_project_experience';
         if (!(result && result.isError === true) || countErrorCall) {
+          const beforeCount = (state.goal && state.goal.toolCount) || 0;
           const recorded = goalEngine.recordCall(state, name);
-          if (recorded !== state) writeState(agent, { goal: recorded.goal });
+          if (recorded !== state) {
+            writeState(agent, { goal: recorded.goal });
+            const afterCount = (recorded.goal.toolCount) || 0;
+            if (beforeCount < 10 && afterCount >= 10) void injectModeGateContext(agent, 'toolCount');
+          }
         }
         if (result && result.isError === true) return decision;
         const after = readState(agent);
@@ -1237,6 +1384,8 @@ export default {
     ctx.on('session/event', (session, event) => {
       try {
         if (!event || event.type !== 'user/message') return;
+        const source = event.data && event.data.source;
+        if (!source || source.kind !== 'user') return;
         const sessionId = typeof session === 'string'
           ? session
           : (session && (session.id ?? session.sessionId));
@@ -1265,11 +1414,12 @@ export default {
           if (state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user') {
             const messages = Array.isArray(_payload && _payload.messages) ? _payload.messages : [];
             const last = messages[messages.length - 1];
-            const userTurn = Boolean(last && (
+            const realUser = Boolean(last && last.source && last.source.kind === 'user');
+            const userTurn = realUser && Boolean(
               last.role === 'user'
               || last.type === 'user/message'
               || (last.type === 'message' && last.role === 'user')
-            ));
+            );
             if (userTurn && agent && agent.session && typeof agent.session.id === 'string') {
               try {
                 await rejectPendingProtocol(agent.session.id);
@@ -1291,6 +1441,15 @@ export default {
             if (selected.provider) _payload.provider = selected.provider;
             if (selected.model) _payload.model = selected.model;
             if (selected.reasoningEffort) _payload.reasoningEffort = selected.reasoningEffort;
+          }
+          const phaseOverride = stateModelOverride(state, state.workflowId, state.phase);
+          if (phaseOverride) {
+            if (phaseOverride.model) {
+              const entry = modelEntryForId(phaseOverride.model);
+              _payload.provider = (entry && entry.provider) || 'deepseek-official';
+              _payload.model = phaseOverride.model;
+            }
+            if (phaseOverride.reasoningEffort) _payload.reasoningEffort = phaseOverride.reasoningEffort;
           }
           return next();
         });

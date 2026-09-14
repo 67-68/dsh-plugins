@@ -61,7 +61,9 @@ export function normalizeTaskModes(value) {
   return out;
 }
 
-/** User-editable per-state prompt + auto-guide toggle, persisted top-level. */
+/** User-editable per-state prompt + auto-guide toggle + model override, persisted top-level. */
+export const WORKFLOW_REASONING_EFFORTS = new Set(['high', 'low', 'no', 'max']);
+
 export function normalizeWorkflowOverrides(value) {
   const out = {};
   if (!value || typeof value !== 'object') return out;
@@ -73,6 +75,10 @@ export function normalizeWorkflowOverrides(value) {
       const next = {};
       if (typeof override.prompt === 'string') next.prompt = override.prompt.trim();
       if (typeof override.autoGuide === 'boolean') next.autoGuide = override.autoGuide;
+      if (typeof override.model === 'string' && override.model.trim()) next.model = override.model.trim();
+      if (typeof override.reasoningEffort === 'string' && WORKFLOW_REASONING_EFFORTS.has(override.reasoningEffort.trim())) {
+        next.reasoningEffort = override.reasoningEffort.trim();
+      }
       if (Object.keys(next).length > 0) nextStates[stateId] = next;
     }
     if (Object.keys(nextStates).length > 0) out[workflowId] = nextStates;

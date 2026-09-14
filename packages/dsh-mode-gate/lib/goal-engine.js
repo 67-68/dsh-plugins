@@ -93,6 +93,7 @@ export function createGoalEngine({ goals, log }) {
       status: 'active',
       startedAt: Date.now(),
       calls: {},
+      toolCount: 0,
       iteration: (state && ((state.goal && state.goal.iteration) || (state.loopMemory && state.loopMemory.iteration))) || 0,
       ...(action.goalPatch || {}),
     };
@@ -109,10 +110,16 @@ export function createGoalEngine({ goals, log }) {
     const def = definitions.get(state.goal.id);
     if (!def) return state;
     const isRequired = (def.requiredCalls || []).some((req) => req.tool === toolName);
-    if (!isRequired) return state;
     const calls = { ...(state.goal.calls || {}) };
-    calls[toolName] = (calls[toolName] || 0) + 1;
-    return { ...state, goal: { ...state.goal, calls } };
+    if (isRequired) calls[toolName] = (calls[toolName] || 0) + 1;
+    return {
+      ...state,
+      goal: {
+        ...state.goal,
+        calls,
+        toolCount: (state.goal.toolCount || 0) + 1,
+      },
+    };
   }
 
   /** True when a no-submit goal has satisfied its required calls. */
