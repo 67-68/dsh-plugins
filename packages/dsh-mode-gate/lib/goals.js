@@ -1,4 +1,4 @@
-import { parsePresetActionProtocol, parseRequirementProtocol, modelCatalogText } from './protocols.js';
+import { parsePresetActionProtocol, parseRequirementProtocol } from './protocols.js';
 import {
   extractEntryFields,
   createStaticPlan,
@@ -153,8 +153,6 @@ export function createBuiltinGoals() {
         '5. 如需记录需求分解期间的调研任务，可调用 todo_write；',
         '6. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
         '本状态完全禁用 bash，只允许只读调研工具和 feature intent 工具，禁止写文件。',
-        '',
-        modelCatalogText(env.modelCatalog, env.taskModes),
       ].join('\n'),
       allowedTools: [
         'list_feature_intents', 'get_feature_intent', 'update_feature_intent',
@@ -167,7 +165,7 @@ export function createBuiltinGoals() {
       submitTool: {
         name: 'submit_requirement_protocol',
         async parse(args, env) {
-          const parsed = parseRequirementProtocol(args, env.modelCatalog, env.taskModes);
+          const parsed = parseRequirementProtocol(args);
           const intents = await env.featureIntents.list();
           const found = intents.find((entry) => entry.name === parsed.featureIntentFile);
           if (!found) {
@@ -183,15 +181,13 @@ export function createBuiltinGoals() {
         return {
           signal: { goalCompleted: true },
           statePatch: {
-            selectedModel: parsed.model,
             featureIntentFile: parsed.featureIntentFile,
-            taskMode: parsed.taskMode,
             requirementSummary: parsed.summary,
             staticPlan: plan,
             dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
           },
           prompt: [
-            `需求识别协议已通过，任务模式：${parsed.taskMode}。`,
+            `需求识别协议已通过。`,
             `checklist 已注册为 ${plan.items.length} 个 static goal。`,
             plan.items.length ? plan.items.map((item) => `- ${item.id}: ${item.text}`).join('\n') : '（未解析到 checklist，请检查 update_feature_intent 的 checklist 字段）',
           ].join('\n'),
@@ -328,8 +324,6 @@ export function createBuiltinGoals() {
         '5. 如需记录调研任务，可调用 todo_write；',
         '6. 调用 submit_requirement_protocol 提交协议，通过后这 1 个 goal 会成为本工作流的 staticPlan 并同步到 DSH task 系统。',
         '本状态完全禁用 bash，只允许只读调研工具和 feature intent 工具，禁止写文件。',
-        '',
-        modelCatalogText(env.modelCatalog, env.taskModes),
       ].join('\n'),
       allowedTools: [
         'list_feature_intents', 'get_feature_intent', 'update_feature_intent',
@@ -342,7 +336,7 @@ export function createBuiltinGoals() {
       submitTool: {
         name: 'submit_requirement_protocol',
         async parse(args, env) {
-          const parsed = parseRequirementProtocol(args, env.modelCatalog, env.taskModes);
+          const parsed = parseRequirementProtocol(args);
           const intents = await env.featureIntents.list();
           const found = intents.find((entry) => entry.name === parsed.featureIntentFile);
           if (!found) {
@@ -362,15 +356,13 @@ export function createBuiltinGoals() {
         return {
           signal: { goalCompleted: true },
           statePatch: {
-            selectedModel: parsed.model,
             featureIntentFile: parsed.featureIntentFile,
-            taskMode: parsed.taskMode,
             requirementSummary: parsed.summary,
             staticPlan: plan,
             dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
           },
           prompt: [
-            `ROUGH 需求识别协议已通过，任务模式：${parsed.taskMode}。`,
+            `ROUGH 需求识别协议已通过。`,
             item ? `已注册 1 个 static goal：${item.text}（id: ${item.id}）` : '（未解析到 checklist，请检查 update_feature_intent 的 checklist 字段）',
           ].join('\n'),
         };

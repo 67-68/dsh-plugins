@@ -24,11 +24,13 @@ import {
   formatCapabilities,
   loadStateStore,
   normalizeModelCatalog,
-  normalizeTaskModes,
+  normalizeRequirements,
+  normalizeStageOverrides,
   normalizeWorkflowOverrides,
   readSessionEntry,
   readState,
   saveStateStore,
+  stageIdFor,
   writeState,
 } from './state.js';
 import {
@@ -45,7 +47,7 @@ import {
   normalizeDenyList,
   undeclaredBashVerbs,
 } from './bash.js';
-import { modelCatalogText } from './protocols.js';
+
 
 const CONTROL_TOOLS = new Set([
   'declare_target', 'switch_mode', 'skill_search', 'skill_load', 'request_extra',
@@ -194,15 +196,6 @@ class ModeGateGateway extends TypertRemoteService {
     saveStateStore(store);
     return { entries: store.modelCatalog };
   }
-  async getTaskModes() {
-    return { modes: loadStateStore().taskModes };
-  }
-  async setTaskModes(args) {
-    const store = loadStateStore();
-    store.taskModes = normalizeTaskModes(args && args.modes);
-    saveStateStore(store);
-    return { modes: store.taskModes };
-  }
   async getWorkflowSettings() {
     const registry = this.options.registryForWorkspace(this.options.defaultWorkspace || null);
     const store = loadStateStore();
@@ -215,11 +208,18 @@ class ModeGateGateway extends TypertRemoteService {
         kind: wf.kind,
         startState: wf.startState,
         states: (wf.states || []).map((state) => {
-          const override = (store.workflowOverrides && store.workflowOverrides[wf.id] && store.workflowOverrides[wf.id][state.id]) || {};
+          const stageId = stageIdFor(wf.id, state.id);
+          const stageOverride = (store.stageOverrides && store.stageOverrides[stageId]) || {};
+          const legacyOverride = (store.workflowOverrides && store.workflowOverrides[wf.id] && store.workflowOverrides[wf.id][state.id]) || {};
+          const override = { ...legacyOverride, ...stageOverride };
+          const defaultAuto = Boolean(state.goal || (Array.isArray(state.transitions) && state.transitions.length > 0));
           return {
             id: state.id,
+            stageId,
             label: state.label || state.id,
-            prompt: typeof state.prompt === 'string' ? state.prompt : '',
+            description: typeof state.description === 'string' ? state.description : '',
+            prompt: typeof override.prompt === 'string' ? override.prompt : (typeof state.prompt === 'string' ? state.prompt : ''),
+            autoGuide: typeof override.autoGuide === 'boolean' ? override.autoGuide : defaultAuto,
             goalRef: state.goal && state.goal.ref ? state.goal.ref : null,
             hasTransitions: Array.isArray(state.transitions) && state.transitions.length > 0,
             permissions: state.permissions || null,
@@ -227,10 +227,12 @@ class ModeGateGateway extends TypertRemoteService {
             reasoningEffort: typeof override.reasoningEffort === 'string'
               ? override.reasoningEffort
               : (state.model && state.model.reasoningEffort ? state.model.reasoningEffort : ''),
+            requirements: normalizeRequirements(override.requirements),
           };
         }),
       })),
       overrides: store.workflowOverrides,
+      stageOverrides: store.stageOverrides,
     };
   }
   async setWorkflowOverride(args) {
@@ -263,6 +265,11 @@ class ModeGateGateway extends TypertRemoteService {
       }
       current.reasoningEffort = effort;
     }
+    if (Array.isArray(patch.requirements)) {
+      const requirements = normalizeRequirements(patch.requirements);
+      if (requirements.length > 0) current.requirements = requirements;
+      else delete current.requirements;
+    }
     if (Object.keys(current).length > 0) wfOverrides[stateId] = current;
     else delete wfOverrides[stateId];
     if (Object.keys(wfOverrides).length > 0) overrides[workflowId] = wfOverrides;
@@ -271,6 +278,43 @@ class ModeGateGateway extends TypertRemoteService {
     saveStateStore(store);
     return { ok: true, workflowOverrides: overrides };
   }
+  async setStageOverride(args) {
+    const stageId = args && args.stageId;
+    const patch = args && args.patch;
+    if (typeof stageId !== 'string' || stageId.length === 0 || !patch || typeof patch !== 'object') {
+      return { ok: false, error: 'setStageOverride 需要 stageId / patch' };
+    }
+    const store = loadStateStore();
+    const stageOverrides = normalizeStageOverrides(store.stageOverrides);
+    const current = { ...(stageOverrides[stageId] || {}) };
+    if (typeof patch.prompt === 'string') current.prompt = patch.prompt.trim();
+    if (typeof patch.autoGuide === 'boolean') current.autoGuide = patch.autoGuide;
+    if (typeof patch.model === 'string') {
+      const modelId = patch.model.trim();
+      if (modelId) current.model = modelId;
+      else delete current.model;
+    }
+    if (patch.reasoningEffort === null || (typeof patch.reasoningEffort === 'string' && patch.reasoningEffort.trim() === '')) {
+      delete current.reasoningEffort;
+    } else if (typeof patch.reasoningEffort === 'string') {
+      const effort = patch.reasoningEffort.trim();
+      if (!WORKFLOW_REASONING_EFFORTS.has(effort)) {
+        return { ok: false, error: 'reasoningEffort 必须是 high / low / no / max 或空字符串' };
+      }
+      current.reasoningEffort = effort;
+    }
+    if (Array.isArray(patch.requirements)) {
+      const requirements = normalizeRequirements(patch.requirements);
+      if (requirements.length > 0) current.requirements = requirements;
+      else delete current.requirements;
+    }
+    if (Object.keys(current).length > 0) stageOverrides[stageId] = current;
+    else delete stageOverrides[stageId];
+    store.stageOverrides = stageOverrides;
+    saveStateStore(store);
+    return { ok: true, stageOverrides };
+  }
+
   async approveRequirementProtocol(args) {
     if (typeof this.options.approveRequirementProtocol !== 'function') {
       return { ok: false, error: 'approveRequirementProtocol 未配置' };
@@ -288,8 +332,7 @@ markRemoteMethods(ModeGateGateway, [
   'getState', 'getWorkflows', 'selectWorkflow',
   'getBashDenyList', 'setBashDenyList',
   'getModelCatalog', 'setModelCatalog',
-  'getTaskModes', 'setTaskModes',
-  'getWorkflowSettings', 'setWorkflowOverride',
+  'getWorkflowSettings', 'setWorkflowOverride', 'setStageOverride',
   'approveRequirementProtocol', 'rejectRequirementProtocol',
 ]);
 
@@ -442,15 +485,20 @@ export default {
         registry: registryFor(agent),
         workspace: workspaceOf(agent, defaultWorkspace),
         modelCatalog: state ? state.modelCatalog : loadStateStore().modelCatalog,
-        taskModes: state ? state.taskModes : loadStateStore().taskModes,
         agent,
         ctx,
         log,
       };
     }
 
-    /** Effective per-state prompt: user override wins, then workflow JSON. */
+    /** Effective per-stage override: stage-scoped wins, then legacy per-workflow/state. */
     function stateOverride(state, workflowId, stateId) {
+      const stageId = stageIdFor(workflowId, stateId);
+      const stageOverrides = state && state.stageOverrides && typeof state.stageOverrides === 'object'
+        ? state.stageOverrides
+        : {};
+      const stage = stageOverrides[stageId];
+      if (stage) return stage;
       const overrides = state && state.workflowOverrides && typeof state.workflowOverrides === 'object'
         ? state.workflowOverrides
         : {};
@@ -471,6 +519,113 @@ export default {
       const reasoningEffort = typeof override.reasoningEffort === 'string' ? override.reasoningEffort.trim() : '';
       if (!model && !reasoningEffort) return null;
       return { model, reasoningEffort };
+    }
+
+    function normalizeRequirementPath(path) {
+      return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    }
+
+    function matchesRequirementPath(requiredPath, actualPath) {
+      const required = normalizeRequirementPath(requiredPath);
+      const actual = normalizeRequirementPath(actualPath);
+      if (!required || !actual) return false;
+      return actual === required || actual.endsWith(`/${required}`) || required.endsWith(`/${actual}`);
+    }
+
+    function effectiveStateRequirements(state, workflowId, stateId, stateDef) {
+      const override = stateOverride(state, workflowId, stateId);
+      if (override && Array.isArray(override.requirements)) return normalizeRequirements(override.requirements);
+      if (stateDef && Array.isArray(stateDef.requirements)) return normalizeRequirements(stateDef.requirements);
+      return [];
+    }
+
+    function parseToolResultValue(result) {
+      const raw = result && result.value;
+      if (raw === void 0 || raw === null) return null;
+      if (typeof raw === 'string') {
+        try { return JSON.parse(raw); } catch (_err) { return null; }
+      }
+      return typeof raw === 'object' ? raw : null;
+    }
+
+    function requirementLabel(requirement) {
+      if (requirement.kind === 'file') return `查看过文件 ${requirement.path}`;
+      const field = requirement.requireTrueField ? `（要求 ${requirement.trueField || 'ok'} = true）` : '';
+      return `执行过 skill ${requirement.name}${field}`;
+    }
+
+    function unmetStateRequirements(state, stateDef) {
+      const requirements = effectiveStateRequirements(state, state.workflowId, state.phase, stateDef);
+      if (requirements.length === 0) return [];
+      const progress = state.requirementProgress && typeof state.requirementProgress === 'object' ? state.requirementProgress : {};
+      const files = Array.isArray(progress.files) ? progress.files : [];
+      const skills = progress.skills && typeof progress.skills === 'object' ? progress.skills : {};
+      const unmet = [];
+      for (const requirement of requirements) {
+        if (requirement.kind === 'file') {
+          if (!files.some((path) => matchesRequirementPath(requirement.path, path))) unmet.push(requirement);
+          continue;
+        }
+        if (requirement.kind === 'skill') {
+          const entry = skills[requirement.name];
+          if (!entry || (entry.count || 0) < 1) {
+            unmet.push(requirement);
+            continue;
+          }
+          if (requirement.requireTrueField) {
+            const field = requirement.trueField || 'ok';
+            const trueFields = entry.trueFields && typeof entry.trueFields === 'object' ? entry.trueFields : {};
+            if (trueFields[field] !== true) unmet.push(requirement);
+          }
+        }
+      }
+      return unmet;
+    }
+
+    function recordStateRequirementProgress(agent, exec, result) {
+      const state = readState(agent);
+      const stateDef = registryFor(agent).stateOf(state.workflowId, state.phase);
+      const requirements = effectiveStateRequirements(state, state.workflowId, state.phase, stateDef);
+      if (requirements.length === 0) return;
+      const name = exec && exec.name;
+      const args = (exec && exec.arguments) || {};
+      const resultValue = parseToolResultValue(result);
+      const progress = state.requirementProgress && typeof state.requirementProgress === 'object' ? state.requirementProgress : {};
+      const files = Array.isArray(progress.files) ? progress.files.slice() : [];
+      const skills = progress.skills && typeof progress.skills === 'object' ? { ...progress.skills } : {};
+      let changed = false;
+
+      const readPath = name === 'read' && typeof args.path === 'string'
+        ? args.path
+        : (name === 'str_replace_editor' && args.command === 'view' && typeof args.path === 'string' ? args.path : '');
+      if (readPath && requirements.some((requirement) => requirement.kind === 'file' && matchesRequirementPath(requirement.path, readPath))) {
+        if (!files.some((path) => matchesRequirementPath(path, readPath))) {
+          files.push(readPath);
+          changed = true;
+        }
+      }
+
+      const skillName = (name === 'skill' || name === 'skill_load') && typeof args.name === 'string' ? args.name : name;
+      if (skillName && requirements.some((requirement) => requirement.kind === 'skill' && requirement.name === skillName)) {
+        const entry = skills[skillName] && typeof skills[skillName] === 'object'
+          ? { ...skills[skillName] }
+          : { count: 0, trueFields: {} };
+        entry.count = (entry.count || 0) + 1;
+        const trueFields = entry.trueFields && typeof entry.trueFields === 'object' ? { ...entry.trueFields } : {};
+        if (resultValue && typeof resultValue === 'object') {
+          for (const requirement of requirements) {
+            if (requirement.kind !== 'skill' || requirement.name !== skillName || !requirement.requireTrueField) continue;
+            const field = requirement.trueField || 'ok';
+            if (resultValue[field] === true) trueFields[field] = true;
+            else if (trueFields[field] !== true) trueFields[field] = false;
+          }
+        }
+        entry.trueFields = trueFields;
+        skills[skillName] = entry;
+        changed = true;
+      }
+
+      if (changed) writeState(agent, { requirementProgress: { files, skills } });
     }
 
     /** Persist a per-state model selection so the client model selector follows immediately. */
@@ -556,6 +711,7 @@ export default {
         workspace: workspaceOf(agent, defaultWorkspace),
         dynamicPlan: { scope: 'state', stateId, items: [], updatedAt: Date.now() },
         pendingProtocol: null,
+        requirementProgress: {},
       };
       if (!goalRef) {
         const prompt = effectiveStatePrompt(state, workflowId, stateId, stateDef) || `当前状态：${stateId}`;
@@ -619,10 +775,8 @@ export default {
         log(`读取 feature intent 以生成待确认协议失败：${(err && err.message) || err}`);
       }
       return {
-        taskMode: parsed.taskMode,
         summary: parsed.summary,
         featureIntentFile: parsed.featureIntentFile,
-        model: parsed.model,
         userWords: fields.userWords,
         understanding: fields.understanding,
         checklist: fields.checklist,
@@ -631,6 +785,11 @@ export default {
 
     async function submitGoalTool(agent, toolName, args) {
       const before = readState(agent);
+      const stateDefForSubmit = registryFor(agent).stateOf(before.workflowId, before.phase);
+      const unmet = unmetStateRequirements(before, stateDefForSubmit);
+      if (unmet.length > 0) {
+        throw new Error(`阶段进展需求未完成：${unmet.map(requirementLabel).join('；')}`);
+      }
       const submitted = await goalEngine.submit(toolName, args, before, envFor(agent, before));
       if (!submitted.ok) throw new Error(submitted.reason);
       const { result, parsed } = submitted;
@@ -790,6 +949,12 @@ export default {
       }
       if (stagePrompt) lines.push('', '当前阶段说明：', stagePrompt);
       if (autoGuide) lines.push('', autoGuide);
+      const requirementList = effectiveStateRequirements(state, state.workflowId, state.phase, stateDef);
+      if (requirementList.length > 0) {
+        const remainingLabels = new Set(unmetStateRequirements(state, stateDef).map((req) => requirementLabel(req)));
+        lines.push('', '阶段进展需求：');
+        lines.push(...requirementList.map((req) => `  - [${remainingLabels.has(requirementLabel(req)) ? ' ' : 'x'}] ${requirementLabel(req)}`));
+      }
       if (state.goal && state.goal.status === 'active') lines.push('', '当前目标：', goalPrompt);
       if (state.goal && state.goal.status === 'active' && (state.goal.toolCount || 0) >= 10) {
         const submitName = guideGoalDef && guideGoalDef.submitTool ? guideGoalDef.submitTool.name : 'submit_state';
@@ -966,6 +1131,7 @@ export default {
       async execute(_args, exec) {
         const registry = registryFor(exec.agent);
         return JSON.stringify({
+          ok: true,
           workspace: workspaceOf(exec.agent, defaultWorkspace),
           workflows: registry.listForModal().map((wf) => ({
             id: wf.id, label: wf.label, description: wf.description, startState: wf.startState, ui: wf.ui || {},
@@ -982,6 +1148,7 @@ export default {
       async execute(_args, exec) {
         const state = readState(exec.agent);
         return JSON.stringify({
+          ok: true,
           workflowId: state.workflowId,
           phase: state.phase,
           target: state.target,
@@ -1036,11 +1203,13 @@ export default {
       parameters: {},
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute() {
-        if (!presetActionSkills.length) return '（暂无 preset action）';
-        return JSON.stringify(presetActionSkills.map((skill) => ({
-          id: skill.id, name: skill.name, title: skill.title, description: skill.description,
-          match: skill.match, model: skill.model, reasoning_effort: skill.reasoningEffort, content: skill.content,
-        })), null, 2);
+        return JSON.stringify({
+          ok: true,
+          actions: presetActionSkills.map((skill) => ({
+            id: skill.id, name: skill.name, title: skill.title, description: skill.description,
+            match: skill.match, model: skill.model, reasoning_effort: skill.reasoningEffort, content: skill.content,
+          })),
+        }, null, 2);
       },
     }));
 
@@ -1068,7 +1237,7 @@ export default {
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute() {
         const intents = await featureIntents.list();
-        return JSON.stringify({ dir: featureIntents.dir, intents }, null, 2);
+        return JSON.stringify({ ok: true, dir: featureIntents.dir, intents }, null, 2);
       },
     }));
 
@@ -1079,7 +1248,7 @@ export default {
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args) {
         const resolved = featureIntents.get(args.name);
-        return JSON.stringify({ name: resolved.name, file: resolved.file, path: resolved.path, content: resolved.content }, null, 2);
+        return JSON.stringify({ ok: true, name: resolved.name, file: resolved.file, path: resolved.path, content: resolved.content }, null, 2);
       },
     }));
 
@@ -1116,8 +1285,6 @@ export default {
       parameters: {
         protocol: { type: 'string', required: true, description: '固定为 requirement-recognition。' },
         version: { type: 'number', required: true, description: '固定为 1。' },
-        task_mode: { type: 'string', enum: ['simple', 'complex'], required: true, description: 'simple / complex。' },
-        model_override: { type: 'object', additionalProperties: true, description: '可选模型覆盖。' },
         feature_intent_file: { type: 'string', required: true, description: '本次查看/追加过的 feature intent 文件名。' },
         summary: { type: 'string', required: true, description: '一句话任务摘要。' },
       },
@@ -1159,14 +1326,21 @@ export default {
         let project = requested;
         if (!project) {
           const projects = projectExperience.listProjects();
-          if (projects.length === 0) throw new Error(`project-experience 目录为空：${projectExperience.root}。请先创建 feature intent 记录。`);
+          if (projects.length === 0) {
+            return JSON.stringify({ ok: false, error: `project-experience 目录为空：${projectExperience.root}。请先创建 feature intent 记录。` }, null, 2);
+          }
           if (projects.length > 1) {
-            return JSON.stringify({ projects: projects.map((p) => p.project), hint: '存在多个项目，请指定 project 参数。' }, null, 2);
+            return JSON.stringify({ ok: false, projects: projects.map((p) => p.project), hint: '存在多个项目，请指定 project 参数。' }, null, 2);
           }
           project = projects[0].project;
         }
-        const result = projectExperience.readProject(project);
-        return JSON.stringify({ ...result, dir: result.dir, files: result.files }, null, 2);
+        let result;
+        try {
+          result = projectExperience.readProject(project);
+        } catch (err) {
+          return JSON.stringify({ ok: false, error: (err && err.message) || String(err) }, null, 2);
+        }
+        return JSON.stringify({ ok: true, ...result, dir: result.dir, files: result.files }, null, 2);
       },
     }));
 
@@ -1352,6 +1526,8 @@ export default {
           writeState(agent, patch);
         }
 
+        if (result && result.isError !== true) recordStateRequirementProgress(agent, exec, result);
+
         const def = goalEngine.defFor(state);
         if (!def) return decision;
         // Only read_project_experience counts a failed call as a valid attempt
@@ -1370,7 +1546,8 @@ export default {
         }
         if (result && result.isError === true) return decision;
         const after = readState(agent);
-        if (goalEngine.isAutoCompleted(after, def)) {
+        const afterStateDef = registryFor(agent).stateOf(after.workflowId, after.phase);
+        if (unmetStateRequirements(after, afterStateDef).length === 0 && goalEngine.isAutoCompleted(after, def)) {
           const raw = await goalEngine.autoComplete(after, envFor(agent, after));
           if (raw) await completeGoal(agent, raw);
         }

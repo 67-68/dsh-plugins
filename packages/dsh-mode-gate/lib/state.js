@@ -24,12 +24,6 @@ export const DEFAULT_MODEL_CATALOG = [
   },
 ];
 
-/** task_mode -> default model id. Per-task model_override can override these. */
-export const DEFAULT_TASK_MODES = {
-  simple: { model: 'deepseek-v4-flash' },
-  complex: { model: 'deepseek-v4-pro' },
-};
-
 export function normalizeModelCatalog(value) {
   if (!Array.isArray(value)) return DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
   const out = [];
@@ -49,20 +43,68 @@ export function normalizeModelCatalog(value) {
   return out.length > 0 ? out : DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
 }
 
-export function normalizeTaskModes(value) {
-  const source = value && typeof value === 'object' ? value : DEFAULT_TASK_MODES;
-  const out = {};
-  for (const mode of ['simple', 'complex']) {
-    const entry = source[mode];
-    out[mode] = {
-      model: entry && typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : DEFAULT_TASK_MODES[mode].model,
-    };
+/** User-editable per-state prompt + auto-guide toggle + model override, persisted top-level. */
+export const WORKFLOW_REASONING_EFFORTS = new Set(['high', 'low', 'no', 'max']);
+
+/**
+ * One stage progress requirement:
+ *   { kind: 'file', path }
+ *   { kind: 'skill', name, requireTrueField, trueField }
+ */
+export function normalizeRequirements(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (raw.kind === 'file') {
+      const path = typeof raw.path === 'string' ? raw.path.trim() : '';
+      if (path.length > 0) out.push({ kind: 'file', path });
+      continue;
+    }
+    if (raw.kind === 'skill') {
+      const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+      if (name.length === 0) continue;
+      const requireTrueField = raw.requireTrueField === true;
+      const rawField = typeof raw.trueField === 'string' ? raw.trueField.trim() : '';
+      out.push({
+        kind: 'skill',
+        name,
+        requireTrueField,
+        trueField: requireTrueField ? (rawField || 'ok') : '',
+      });
+    }
   }
   return out;
 }
 
-/** User-editable per-state prompt + auto-guide toggle + model override, persisted top-level. */
-export const WORKFLOW_REASONING_EFFORTS = new Set(['high', 'low', 'no', 'max']);
+function normalizeOverrideFields(override) {
+  const next = {};
+  if (!override || typeof override !== 'object') return next;
+  if (typeof override.prompt === 'string') next.prompt = override.prompt.trim();
+  if (typeof override.autoGuide === 'boolean') next.autoGuide = override.autoGuide;
+  if (typeof override.model === 'string' && override.model.trim()) next.model = override.model.trim();
+  if (typeof override.reasoningEffort === 'string' && WORKFLOW_REASONING_EFFORTS.has(override.reasoningEffort.trim())) {
+    next.reasoningEffort = override.reasoningEffort.trim();
+  }
+  if (Array.isArray(override.requirements)) next.requirements = normalizeRequirements(override.requirements);
+  return next;
+}
+
+/** Stable stage id: `<workflowId>.<stateId>`; a workflow state references one stage definition. */
+export function stageIdFor(workflowId, stateId) {
+  return `${workflowId}.${stateId}`;
+}
+
+export function normalizeStageOverrides(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const [stageId, override] of Object.entries(value)) {
+    if (typeof stageId !== 'string' || stageId.length === 0) continue;
+    const next = normalizeOverrideFields(override);
+    if (Object.keys(next).length > 0) out[stageId] = next;
+  }
+  return out;
+}
 
 export function normalizeWorkflowOverrides(value) {
   const out = {};
@@ -71,19 +113,37 @@ export function normalizeWorkflowOverrides(value) {
     if (!states || typeof states !== 'object') continue;
     const nextStates = {};
     for (const [stateId, override] of Object.entries(states)) {
-      if (!override || typeof override !== 'object') continue;
-      const next = {};
-      if (typeof override.prompt === 'string') next.prompt = override.prompt.trim();
-      if (typeof override.autoGuide === 'boolean') next.autoGuide = override.autoGuide;
-      if (typeof override.model === 'string' && override.model.trim()) next.model = override.model.trim();
-      if (typeof override.reasoningEffort === 'string' && WORKFLOW_REASONING_EFFORTS.has(override.reasoningEffort.trim())) {
-        next.reasoningEffort = override.reasoningEffort.trim();
-      }
+      const next = normalizeOverrideFields(override);
       if (Object.keys(next).length > 0) nextStates[stateId] = next;
     }
     if (Object.keys(nextStates).length > 0) out[workflowId] = nextStates;
   }
   return out;
+}
+
+/**
+ * Migrate legacy per-(workflow,state) overrides into stage-scoped overrides.
+ * A stage already carrying a different override is a conflict: keep the legacy
+ * entry instead of guessing which one wins, so no user config is lost.
+ */
+export function migrateWorkflowOverridesToStageOverrides(workflowOverrides, stageOverrides) {
+  const nextStage = { ...(stageOverrides || {}) };
+  const nextLegacy = {};
+  for (const [workflowId, states] of Object.entries(workflowOverrides || {})) {
+    if (!states || typeof states !== 'object') continue;
+    for (const [stateId, override] of Object.entries(states)) {
+      const stageId = stageIdFor(workflowId, stateId);
+      const existing = nextStage[stageId];
+      if (existing === void 0) {
+        nextStage[stageId] = { ...override };
+        continue;
+      }
+      if (JSON.stringify(existing) !== JSON.stringify(override)) {
+        nextLegacy[workflowId] = { ...(nextLegacy[workflowId] || {}), [stateId]: override };
+      }
+    }
+  }
+  return { stageOverrides: nextStage, workflowOverrides: nextLegacy };
 }
 
 function emptyStaticPlan() {
@@ -142,7 +202,6 @@ export function normalizeSessionEntry(entry) {
     loopMemory: source.loopMemory && typeof source.loopMemory === 'object' ? source.loopMemory : emptyLoopMemory(),
     selectedModel: source.selectedModel && typeof source.selectedModel === 'object' ? source.selectedModel : null,
     featureIntentFile: typeof source.featureIntentFile === 'string' ? source.featureIntentFile : null,
-    taskMode: typeof source.taskMode === 'string' ? source.taskMode : null,
     requirementSummary: typeof source.requirementSummary === 'string' ? source.requirementSummary : null,
     chosenPresetAction: typeof source.chosenPresetAction === 'string' ? source.chosenPresetAction : null,
     presetActionTitle: typeof source.presetActionTitle === 'string' ? source.presetActionTitle : null,
@@ -150,6 +209,7 @@ export function normalizeSessionEntry(entry) {
     workspace: typeof source.workspace === 'string' ? source.workspace : null,
     migrationNotice: migrated.migrationNotice || (typeof source.migrationNotice === 'string' ? source.migrationNotice : null),
     pendingProtocol: source.pendingProtocol && typeof source.pendingProtocol === 'object' ? source.pendingProtocol : null,
+    requirementProgress: source.requirementProgress && typeof source.requirementProgress === 'object' ? source.requirementProgress : {},
   };
 }
 
@@ -160,20 +220,24 @@ export function loadStateStore() {
     bashDenyList: undefined,
     modelCatalog: normalizeModelCatalog(),
     workflowOverrides: normalizeWorkflowOverrides(),
-    taskModes: normalizeTaskModes(),
+    stageOverrides: {},
     workflowRegistryVersion: 1,
   };
   try {
     if (!existsSync(STATE_FILE)) return base;
     const parsed = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
     if (!parsed || typeof parsed !== 'object') return base;
+    const migrated = migrateWorkflowOverridesToStageOverrides(
+      normalizeWorkflowOverrides(parsed.workflowOverrides),
+      normalizeStageOverrides(parsed.stageOverrides),
+    );
     return {
       version: 2,
       sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
       bashDenyList: parsed.bashDenyList,
       modelCatalog: normalizeModelCatalog(parsed.modelCatalog),
-      workflowOverrides: normalizeWorkflowOverrides(parsed.workflowOverrides),
-      taskModes: normalizeTaskModes(parsed.taskModes),
+      workflowOverrides: migrated.workflowOverrides,
+      stageOverrides: migrated.stageOverrides,
       workflowRegistryVersion: parsed.workflowRegistryVersion || 1,
     };
   } catch (_err) {
@@ -201,7 +265,7 @@ export function readState(agent) {
   const sessionId = agent?.session?.id;
   const entry = readSessionEntry(sessionId);
   const store = loadStateStore();
-  return { ...entry, modelCatalog: store.modelCatalog, taskModes: store.taskModes, workflowOverrides: store.workflowOverrides };
+  return { ...entry, modelCatalog: store.modelCatalog, workflowOverrides: store.workflowOverrides, stageOverrides: store.stageOverrides };
 }
 
 export function writeState(agent, patch) {

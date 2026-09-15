@@ -50,17 +50,9 @@ window.__ModuleLoader__.load({
 			modelProviderPlaceholder: "deepseek-official",
 			modelDescriptionPlaceholder: "快速轻量模型",
 			addModel: "添加模型",
-			taskModeTitle: "任务模式默认模型",
-			taskModeDesc: "simple / complex 的默认模型；若协议填写 model_override 则覆盖这里的配置。",
-			simpleMode: "simple",
-			complexMode: "complex",
-			taskModeModelPlaceholder: "模型 ID（必须存在于模型目录）",
-			saveTaskModes: "保存任务模式",
 			saveModelCatalog: "保存模型目录",
 			loadModelCatalogFailed: "读取模型目录失败",
 			saveModelCatalogFailed: "保存模型目录失败",
-			loadTaskModesFailed: "读取任务模式失败",
-			saveTaskModesFailed: "保存任务模式失败",
 			workflowSettingsTitle: "工作流阶段设置",
 			workflowSettingsDesc: "点击工作流展开阶段表格。Prompt 会作为该阶段的 runtime context 注入并喂给 Agent（即使当前 agent preset 使用 complete persona 也能到达模型）；开启自动命令指引后，系统会根据该阶段的 goal 动态生成需要执行/提交的命令清单。",
 			expandWorkflow: "展开",
@@ -79,6 +71,15 @@ window.__ModuleLoader__.load({
 			loadWorkflowSettingsFailed: "读取工作流设置失败",
 			saveWorkflowSettingsFailed: "保存工作流设置失败",
 			workflowSettingsSaveSuccess: "已保存",
+			progressRequirementsTitle: "进展需求",
+			reqAdd: "＋ 添加需求",
+			reqAddFile: "查看过某个文件",
+			reqAddSkill: "执行过某个 skill",
+			reqFilePathPlaceholder: "文件路径，如 src/index.js",
+			reqSkillNamePlaceholder: "skill / 工具名称，如 read_project_experience",
+			reqTrueField: "只有 skill 返回指定 true field 才算通过",
+			reqTrueFieldPlaceholder: "字段名，如 ok",
+			reqDelete: "删除",
 			pendingProtocolTitle: "需求识别协议待确认",
 			pendingProtocolDesc: "Agent 已提交以下阶段进展，请确认是否接受。接受后进入研究阶段；在下方输入框发送任意内容将视为拒绝，Agent 会继续修改需求理解。",
 			accept: "接受",
@@ -137,17 +138,9 @@ window.__ModuleLoader__.load({
 			modelProviderPlaceholder: "deepseek-official",
 			modelDescriptionPlaceholder: "Fast lightweight model",
 			addModel: "Add model",
-			taskModeTitle: "Task-mode default models",
-			taskModeDesc: "Default models for simple / complex. A protocol model_override overrides these.",
-			simpleMode: "simple",
-			complexMode: "complex",
-			taskModeModelPlaceholder: "Model id (must exist in catalog)",
-			saveTaskModes: "Save task modes",
 			saveModelCatalog: "Save model catalog",
 			loadModelCatalogFailed: "Failed to load model catalog",
 			saveModelCatalogFailed: "Failed to save model catalog",
-			loadTaskModesFailed: "Failed to load task modes",
-			saveTaskModesFailed: "Failed to save task modes",
 			workflowSettingsTitle: "Workflow phase settings",
 			workflowSettingsDesc: "Expand a workflow to edit each phase prompt. The prompt is injected as runtime context for the agent (it reaches the model even when the agent preset uses a complete persona); enable auto command guide and the system generates the required tool/submit commands from the phase goal.",
 			expandWorkflow: "Expand",
@@ -166,6 +159,15 @@ window.__ModuleLoader__.load({
 			loadWorkflowSettingsFailed: "Failed to load workflow settings",
 			saveWorkflowSettingsFailed: "Failed to save workflow settings",
 			workflowSettingsSaveSuccess: "Saved",
+			progressRequirementsTitle: "Progress requirements",
+			reqAdd: "+ Add requirement",
+			reqAddFile: "Viewed a file",
+			reqAddSkill: "Executed a skill",
+			reqFilePathPlaceholder: "File path, e.g. src/index.js",
+			reqSkillNamePlaceholder: "Skill / tool name, e.g. read_project_experience",
+			reqTrueField: "Only pass when the skill returns the specified true field",
+			reqTrueFieldPlaceholder: "Field name, e.g. ok",
+			reqDelete: "Delete",
 			pendingProtocolTitle: "Requirement protocol pending",
 			pendingProtocolDesc: "The agent submitted the following phase progress. Accept to enter research; sending any message in the composer rejects it and the agent continues revising the requirement.",
 			accept: "Accept",
@@ -302,43 +304,6 @@ window.__ModuleLoader__.load({
 			return { entries, error, refresh, save };
 		}
 
-		/** Read and update task-mode default models through the Remote service. */
-		function useTaskModes(api) {
-			const [modes, setModes] = react.useState({ simple: { model: "" }, complex: { model: "" } });
-			const [error, setError] = react.useState("");
-
-			const refresh = react.useCallback(async () => {
-				try {
-					const result = await api().getTaskModes();
-					if (result && result.ok && result.value && result.value.modes) {
-						setModes(result.value.modes);
-					} else {
-						setModes({ simple: { model: "" }, complex: { model: "" } });
-					}
-				} catch (err) {
-					setError(String((err && err.message) || err));
-				}
-			}, [api]);
-
-			react.useEffect(() => { refresh(); }, [refresh]);
-
-			const save = react.useCallback(async (nextModes) => {
-				try {
-					const result = await api().setTaskModes({ modes: nextModes });
-					if (result && result.ok && result.value && result.value.modes) {
-						setModes(result.value.modes);
-						setError("");
-					} else {
-						setError("saveTaskModesFailed");
-					}
-				} catch (err) {
-					setError(String((err && err.message) || err));
-				}
-			}, [api]);
-
-			return { modes, error, refresh, save };
-		}
-
 		/** Read and update per-state workflow prompts + auto-guide toggles through the Remote service. */
 		function useWorkflowSettings(api) {
 			const [data, setData] = react.useState({ workflows: [], overrides: {}, workspace: null });
@@ -378,13 +343,30 @@ window.__ModuleLoader__.load({
 				}
 			}, [api]);
 
+			const saveStage = react.useCallback(async (stageId, patch) => {
+				try {
+					const result = await api().setStageOverride({ stageId, patch });
+					if (result && result.ok === false) {
+						setError(String(result.error || "saveWorkflowSettingsFailed"));
+						return false;
+					}
+					setError("");
+					setSavedAt(Date.now());
+					return true;
+				} catch (err) {
+					setError(String((err && err.message) || err));
+					return false;
+				}
+			}, [api]);
+
+
 			react.useEffect(() => {
 				refresh();
 				const timer = setInterval(refresh, 4000);
 				return () => clearInterval(timer);
 			}, [refresh]);
 
-			return { ...data, error, refresh, saveOverride, savedAt };
+			return { ...data, error, refresh, saveOverride, saveStage, savedAt };
 		}
 
 
@@ -570,7 +552,6 @@ window.__ModuleLoader__.load({
 			const { t, api } = props;
 			const deny = useBashDenyList(api);
 			const modelCatalog = useModelCatalog(api);
-			const taskModes = useTaskModes(api);
 
 			const [draft, setDraft] = react.useState([]);
 			const [newCommands, setNewCommands] = react.useState("");
@@ -579,8 +560,6 @@ window.__ModuleLoader__.load({
 			const [modelDraft, setModelDraft] = react.useState([]);
 			const [newModel, setNewModel] = react.useState({ id: "", name: "", provider: "deepseek-official", description: "" });
 
-			const [taskDraft, setTaskDraft] = react.useState({ simple: { model: "" }, complex: { model: "" } });
-
 			react.useEffect(() => {
 				setDraft((deny.entries || []).map((entry) => ({ ...entry, commands: [...entry.commands] })));
 			}, [deny.entries]);
@@ -588,13 +567,6 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => {
 				setModelDraft((modelCatalog.entries || []).map((entry) => ({ ...entry })));
 			}, [modelCatalog.entries]);
-
-			react.useEffect(() => {
-				setTaskDraft({
-					simple: { model: taskModes.modes && taskModes.modes.simple ? taskModes.modes.simple.model : "" },
-					complex: { model: taskModes.modes && taskModes.modes.complex ? taskModes.modes.complex.model : "" },
-				});
-			}, [taskModes.modes]);
 
 			const updateCommands = (idx, value) => setDraft((prev) => prev.map((entry, i) => (
 				i === idx ? { ...entry, commands: value.split(/[\s,]+/).filter(Boolean) } : entry
@@ -636,12 +608,6 @@ window.__ModuleLoader__.load({
 			};
 			const saveModelCatalog = async () => { await modelCatalog.save(modelDraft); };
 
-			const setTaskModel = (mode, value) => setTaskDraft((prev) => ({
-				...prev,
-				[mode]: { model: value },
-			}));
-			const saveTaskModes = async () => { await taskModes.save(taskDraft); };
-
 			const head = react.createElement("p", { style: styles.desc }, t("desc"));
 
 			// model catalog
@@ -681,18 +647,6 @@ window.__ModuleLoader__.load({
 			const modelSaveButton = react.createElement("button", { style: styles.button, onClick: saveModelCatalog }, t("saveModelCatalog"));
 			const modelErrorLine = modelCatalog.error ? react.createElement("p", { style: styles.error }, typeof modelCatalog.error === "string" ? modelCatalog.error : t("loadModelCatalogFailed")) : null;
 
-			// task modes
-			const taskHead = react.createElement("h3", { style: styles.denyHead }, t("taskModeTitle"));
-			const taskDesc = react.createElement("p", { style: styles.desc }, t("taskModeDesc"));
-			const taskRow = (labelKey, modeKey) => react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
-				react.createElement("code", { style: styles.code }, t(labelKey)),
-				react.createElement("input", { style: styles.input, placeholder: t("taskModeModelPlaceholder"), value: taskDraft[modeKey].model, onChange: (e) => setTaskModel(modeKey, e.target.value) }),
-			);
-			const taskSimple = taskRow("simpleMode", "simple");
-			const taskComplex = taskRow("complexMode", "complex");
-			const taskSaveButton = react.createElement("button", { style: styles.button, onClick: saveTaskModes }, t("saveTaskModes"));
-			const taskErrorLine = taskModes.error ? react.createElement("p", { style: styles.error }, typeof taskModes.error === "string" ? taskModes.error : t("loadTaskModesFailed")) : null;
-
 			// bash deny list
 			const denyHead = react.createElement("h3", { style: styles.denyHead }, t("denyTitle"));
 			const denyDesc = react.createElement("p", { style: styles.desc }, t("denyDesc"));
@@ -725,7 +679,6 @@ window.__ModuleLoader__.load({
 			return react.createElement("div", { style: styles.section },
 				head,
 				modelHead, modelDesc, modelTable, modelAddRow, modelSaveButton, modelErrorLine,
-				taskHead, taskDesc, taskSimple, taskComplex, taskSaveButton, taskErrorLine,
 				denyHead, denyDesc, denyTable, addRow, saveButton, errorLine,
 			);
 		}
@@ -733,7 +686,249 @@ window.__ModuleLoader__.load({
 		/** 「所有模式」tab 的临时内容：后续 checklist 会替换为阶段卡片 UI。 */
 		function ModeGateAllModesTab(props) {
 			const { t, api } = props;
-			return react.createElement(WorkflowSettingsView, { t, api });
+			return react.createElement(ModeGateStageCardsView, { t, api });
+		}
+
+		/** 「所有模式」：按工作流列出模式，展开后是每个阶段的卡片。 */
+		function ModeGateStageCardsView(props) {
+			const { t, api } = props;
+			const settings = useWorkflowSettings(api);
+			const [expanded, setExpanded] = react.useState({});
+			const [drafts, setDrafts] = react.useState({});
+			const initialized = react.useRef(false);
+
+			react.useEffect(() => {
+				if (!Array.isArray(settings.workflows) || settings.workflows.length === 0) return;
+				if (initialized.current) return;
+				const next = {};
+				for (const wf of settings.workflows) {
+					next[wf.id] = (wf.states || []).map((state) => ({
+						stateId: state.id,
+						stageId: state.stageId || `${wf.id}.${state.id}`,
+						stateLabel: state.label || state.id,
+						stateDescription: state.description || "",
+						prompt: state.prompt || "",
+						autoGuide: typeof state.autoGuide === "boolean" ? state.autoGuide : Boolean(state.goalRef || state.hasTransitions),
+						model: typeof state.model === "string" ? state.model : "",
+						reasoningEffort: typeof state.reasoningEffort === "string" ? state.reasoningEffort : "",
+						requirements: (Array.isArray(state.requirements) ? state.requirements : [])
+							.filter((requirement) => requirement && (requirement.kind === "file" || requirement.kind === "skill"))
+							.map((requirement) => requirement.kind === "file"
+								? { kind: "file", path: requirement.path || "" }
+								: { kind: "skill", name: requirement.name || "", requireTrueField: Boolean(requirement.requireTrueField), trueField: requirement.trueField || "ok" }),
+					}));
+				}
+				setDrafts(next);
+				initialized.current = true;
+			}, [settings.workflows, settings.overrides]);
+
+			const updateDraft = (workflowId, index, patch) => {
+				setDrafts((prev) => {
+					const wfDrafts = prev[workflowId] || [];
+					return { ...prev, [workflowId]: wfDrafts.map((row, i) => (i === index ? { ...row, ...patch } : row)) };
+				});
+			};
+
+			const saveWorkflow = async (workflowId) => {
+				const rows = drafts[workflowId] || [];
+				for (const row of rows) {
+					await settings.saveStage(row.stageId, {
+						prompt: row.prompt,
+						autoGuide: row.autoGuide,
+						model: row.model,
+						reasoningEffort: row.reasoningEffort,
+						requirements: row.requirements || [],
+					});
+				}
+				await settings.refresh();
+			};
+
+			const settingsError = typeof settings.error === "string" && settings.error
+				? (settings.error === "loadWorkflowSettingsFailed" || settings.error === "saveWorkflowSettingsFailed"
+					? t(settings.error)
+					: settings.error)
+				: "";
+
+			const updateRequirement = (workflowId, stateIndex, reqIndex, patch) => {
+				setDrafts((prev) => {
+					const wfDrafts = prev[workflowId] || [];
+					return {
+						...prev,
+						[workflowId]: wfDrafts.map((row, i) => {
+							if (i !== stateIndex) return row;
+							const requirements = (row.requirements || []).map((requirement, j) => (j === reqIndex ? { ...requirement, ...patch } : requirement));
+							return { ...row, requirements };
+						}),
+					};
+				});
+			};
+
+			const addRequirement = (workflowId, stateIndex, kind) => {
+				setDrafts((prev) => {
+					const wfDrafts = prev[workflowId] || [];
+					return {
+						...prev,
+						[workflowId]: wfDrafts.map((row, i) => {
+							if (i !== stateIndex) return row;
+							const requirement = kind === "file"
+								? { kind: "file", path: "" }
+								: { kind: "skill", name: "", requireTrueField: false, trueField: "ok" };
+							return { ...row, requirements: [...(row.requirements || []), requirement] };
+						}),
+					};
+				});
+			};
+
+			const removeRequirement = (workflowId, stateIndex, reqIndex) => {
+				setDrafts((prev) => {
+					const wfDrafts = prev[workflowId] || [];
+					return {
+						...prev,
+						[workflowId]: wfDrafts.map((row, i) => {
+							if (i !== stateIndex) return row;
+							return { ...row, requirements: (row.requirements || []).filter((_requirement, j) => j !== reqIndex) };
+						}),
+					};
+				});
+			};
+
+			const effortSelect = (value, onChange) => react.createElement("select", {
+				style: styles.input,
+				value: value || "",
+				onChange: (e) => onChange(e.target.value),
+			},
+				react.createElement("option", { value: "" }, t("effortDefault")),
+				react.createElement("option", { value: "high" }, t("effortHigh")),
+				react.createElement("option", { value: "low" }, t("effortLow")),
+				react.createElement("option", { value: "no" }, t("effortNo")),
+				react.createElement("option", { value: "max" }, t("effortMax")),
+			);
+
+			if (settings.workflows.length === 0) {
+				return react.createElement("div", null,
+					react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
+					react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
+					react.createElement("p", { style: styles.error }, settingsError || t("loadWorkflowSettingsFailed")),
+				);
+			}
+
+			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+				react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
+				react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
+				settings.workflows.map((wf) => {
+					const isOpen = Boolean(expanded[wf.id]);
+					const rows = drafts[wf.id] || [];
+					return react.createElement("div", {
+						key: wf.id,
+						style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden" },
+					},
+						react.createElement("button", {
+							type: "button",
+							onClick: () => setExpanded((prev) => ({ ...prev, [wf.id]: !prev[wf.id] })),
+							style: { ...styles.button, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, border: "none", borderRadius: 0, padding: "10px 12px" },
+						},
+							react.createElement("span", { style: { fontSize: 12, lineHeight: "18px" } }, isOpen ? "▾" : "▸"),
+							react.createElement("code", { style: styles.code }, wf.label || wf.id),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, wf.description || wf.id),
+						),
+						isOpen && react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px" } },
+							rows.map((row, idx) => react.createElement("div", {
+								key: row.stateId,
+								style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 },
+							},
+								react.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" } },
+									react.createElement("code", { style: styles.code }, row.stateId),
+									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, row.stateLabel),
+								),
+								row.stateDescription ? react.createElement("p", { style: { ...styles.desc, margin: 0 } }, row.stateDescription) : null,
+								react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("promptColumn")),
+									react.createElement("textarea", {
+										style: { ...styles.input, minHeight: 72, resize: "vertical" },
+										value: row.prompt,
+										onChange: (e) => updateDraft(wf.id, idx, { prompt: e.target.value }),
+									}),
+								),
+								react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+									react.createElement("input", {
+										type: "checkbox",
+										checked: Boolean(row.autoGuide),
+										onChange: (e) => updateDraft(wf.id, idx, { autoGuide: e.target.checked }),
+									}),
+									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("autoGuideColumn")),
+								),
+								react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("modelThinkingColumn")),
+									react.createElement("input", {
+										style: styles.input,
+										placeholder: t("workflowModelPlaceholder"),
+										value: row.model || "",
+										onChange: (e) => updateDraft(wf.id, idx, { model: e.target.value }),
+									}),
+									effortSelect(row.reasoningEffort, (value) => updateDraft(wf.id, idx, { reasoningEffort: value })),
+								),
+								react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("progressRequirementsTitle")),
+									(row.requirements || []).map((requirement, reqIdx) => react.createElement("div", {
+										key: `req-${reqIdx}`,
+										style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
+									},
+										requirement.kind === "file"
+											? react.createElement("input", {
+												style: { ...styles.input, flex: 1, minWidth: 160 },
+												placeholder: t("reqFilePathPlaceholder"),
+												value: requirement.path || "",
+												onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { path: e.target.value }),
+											})
+											: react.createElement(react.Fragment, null,
+												react.createElement("input", {
+													style: { ...styles.input, flex: 1, minWidth: 140 },
+													placeholder: t("reqSkillNamePlaceholder"),
+													value: requirement.name || "",
+													onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { name: e.target.value }),
+												}),
+												react.createElement("label", { style: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--dsw-alias-label-secondary)" } },
+													react.createElement("input", {
+														type: "checkbox",
+														checked: Boolean(requirement.requireTrueField),
+														onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { requireTrueField: e.target.checked }),
+													}),
+													t("reqTrueField"),
+												),
+												requirement.requireTrueField
+													? react.createElement("input", {
+														style: { ...styles.input, width: 110 },
+														placeholder: t("reqTrueFieldPlaceholder"),
+														value: requirement.trueField || "",
+														onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { trueField: e.target.value }),
+													})
+													: null,
+											),
+										react.createElement("button", { style: styles.button, onClick: () => removeRequirement(wf.id, idx, reqIdx) }, t("reqDelete")),
+									)),
+									react.createElement("select", {
+										style: { ...styles.input, maxWidth: 220 },
+										value: "",
+										onChange: (e) => {
+											const kind = e.target.value;
+											if (kind) addRequirement(wf.id, idx, kind);
+										},
+									},
+										react.createElement("option", { value: "" }, t("reqAdd")),
+										react.createElement("option", { value: "file" }, t("reqAddFile")),
+										react.createElement("option", { value: "skill" }, t("reqAddSkill")),
+									),
+								),
+							)),
+							react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+								react.createElement("button", { style: styles.button, onClick: () => saveWorkflow(wf.id) }, t("saveWorkflow")),
+								settings.savedAt ? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, t("workflowSettingsSaveSuccess")) : null,
+							),
+						),
+					);
+				}),
+				settingsError ? react.createElement("p", { style: styles.error }, settingsError) : null,
+			);
 		}
 
 		/** 独立的「设置 → 模式门禁」页面：顶部「当前配置 / 所有模式」两个 tab。 */
@@ -809,10 +1004,9 @@ window.__ModuleLoader__.load({
 				remoteArgsDescriptor("setBashDenyList", "SetBashDenyListResult"),
 				remoteDescriptor("getModelCatalog", "GetModelCatalogResult"),
 				remoteArgsDescriptor("setModelCatalog", "SetModelCatalogResult"),
-				remoteDescriptor("getTaskModes", "GetTaskModesResult"),
-				remoteArgsDescriptor("setTaskModes", "SetTaskModesResult"),
 				remoteDescriptor("getWorkflowSettings", "GetWorkflowSettingsResult"),
 				remoteArgsDescriptor("setWorkflowOverride", "SetWorkflowOverrideResult"),
+				remoteArgsDescriptor("setStageOverride", "SetStageOverrideResult"),
 				remoteArgsDescriptor("approveRequirementProtocol", "ApproveRequirementProtocolResult"),
 				remoteArgsDescriptor("rejectRequirementProtocol", "RejectRequirementProtocolResult"),
 			],
@@ -1047,10 +1241,8 @@ window.__ModuleLoader__.load({
 				react.createElement("div", { style: { width: "100%", maxWidth: 720, display: "flex", flexDirection: "column", gap: 14 } },
 					react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 20, fontWeight: 600 } }, t("pendingProtocolTitle")),
 					react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, lineHeight: "20px" } }, t("pendingProtocolDesc")),
-					field(t("fieldTaskMode"), display && display.taskMode),
 					field(t("fieldFeatureIntentFile"), display && display.featureIntentFile),
 					field(t("fieldSummary"), display && display.summary),
-					field(t("fieldModel"), display && display.model && `${display.model.model || ""} (${display.model.provider || ""})`),
 					field(t("fieldUserWords"), display && display.userWords),
 					field(t("fieldUnderstanding"), display && display.understanding),
 					react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
@@ -1465,14 +1657,14 @@ window.__ModuleLoader__.load({
 				return modeGate;
 			};
 
-			ctx.slots.inject("settings.plugins.tab", () => ctx.slots.register({
-				name: "settings.plugins.tab",
+			ctx.slots.inject("settings.section", () => ctx.slots.register({
+				name: "settings.section",
 				id: "mode-gate",
-				order: 40,
+				order: 50,
 				label: () => t("tab"),
 				locale: NS,
 				inject: () => ({ api })
-			}, ModeGateSettingsTab));
+			}, ModeGateSettingsSection));
 
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
 				name: "sidebar.footer.action",
