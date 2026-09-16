@@ -60,6 +60,7 @@ window.__ModuleLoader__.load({
 			phaseColumn: "阶段",
 			promptColumn: "阶段 Prompt（可编辑）",
 			autoGuideColumn: "自动生成命令指引",
+			autoGuidePreview: "自动生成内容预览",
 			modelThinkingColumn: "模型 / thinking",
 			workflowModelPlaceholder: "model id（留空用默认）",
 			effortDefault: "默认",
@@ -71,6 +72,12 @@ window.__ModuleLoader__.load({
 			loadWorkflowSettingsFailed: "读取工作流设置失败",
 			saveWorkflowSettingsFailed: "保存工作流设置失败",
 			workflowSettingsSaveSuccess: "已保存",
+			workflowRefsTitle: "工作流与阶段引用",
+			workflowRefsDesc: "点击工作流展开它引用的阶段；每个阶段对应「所有模式」里的一个模式。",
+			openStage: "打开对应阶段",
+			allModesTitle: "所有模式",
+			allModesDesc: "点击任意模式展开/收起阶段卡片；这些模式被工作流以 stageId 引用。",
+			workflowOfMode: "所属工作流",
 			progressRequirementsTitle: "进展需求",
 			reqAdd: "＋ 添加需求",
 			reqAddFile: "查看过某个文件",
@@ -148,6 +155,7 @@ window.__ModuleLoader__.load({
 			phaseColumn: "Phase",
 			promptColumn: "Phase prompt (editable)",
 			autoGuideColumn: "Auto command guide",
+			autoGuidePreview: "Generated guide preview",
 			modelThinkingColumn: "Model / thinking",
 			workflowModelPlaceholder: "model id (empty = default)",
 			effortDefault: "default",
@@ -159,6 +167,12 @@ window.__ModuleLoader__.load({
 			loadWorkflowSettingsFailed: "Failed to load workflow settings",
 			saveWorkflowSettingsFailed: "Failed to save workflow settings",
 			workflowSettingsSaveSuccess: "Saved",
+			workflowRefsTitle: "Workflow and stage references",
+			workflowRefsDesc: "Expand a workflow to see the stages it references; each stage maps to one mode in All modes.",
+			openStage: "Open stage",
+			allModesTitle: "All modes",
+			allModesDesc: "Click any mode to expand/collapse its stage card; workflows reference these modes by stageId.",
+			workflowOfMode: "Workflow",
 			progressRequirementsTitle: "Progress requirements",
 			reqAdd: "+ Add requirement",
 			reqAddFile: "Viewed a file",
@@ -547,9 +561,66 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/** Static settings tab: phase permissions, model catalog, task modes, bash deny-list. */
+		/** Workflow → stage references shown in the「当前配置」tab. */
+		function WorkflowReferenceListView(props) {
+			const { t, api, onOpenStage } = props;
+			const settings = useWorkflowSettings(api);
+			const [expanded, setExpanded] = react.useState({});
+
+			if (!Array.isArray(settings.workflows) || settings.workflows.length === 0) {
+				return react.createElement("div", null,
+					react.createElement("h3", { style: styles.denyHead }, t("workflowRefsTitle")),
+					react.createElement("p", { style: styles.desc }, t("workflowRefsDesc")),
+					react.createElement("p", { style: styles.error }, t("loadWorkflowSettingsFailed")),
+				);
+			}
+
+			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+				react.createElement("h3", { style: styles.denyHead }, t("workflowRefsTitle")),
+				react.createElement("p", { style: styles.desc }, t("workflowRefsDesc")),
+				settings.workflows.map((wf) => {
+					const isOpen = Boolean(expanded[wf.id]);
+					return react.createElement("div", {
+						key: wf.id,
+						style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden" },
+					},
+						react.createElement("button", {
+							type: "button",
+							onClick: () => setExpanded((prev) => ({ ...prev, [wf.id]: !prev[wf.id] })),
+							style: { ...styles.button, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, border: "none", borderRadius: 0, padding: "10px 12px" },
+						},
+							react.createElement("span", { style: { fontSize: 12, lineHeight: "18px" } }, isOpen ? "▾" : "▸"),
+							react.createElement("code", { style: styles.code }, wf.label || wf.id),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, wf.description || wf.id),
+						),
+						isOpen && react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, padding: "10px 12px" } },
+							(wf.states || []).map((state) => {
+								const stageId = state.stageId || `${wf.id}.${state.id}`;
+								const label = state.label || state.id;
+								return react.createElement("div", {
+									key: state.id,
+									style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", border: "1px solid var(--dsw-alias-border-l1)", borderRadius: 8 },
+								},
+									react.createElement("code", { style: styles.code }, stageId),
+									react.createElement("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 13, flex: 1 } }, label),
+									react.createElement("button", {
+										type: "button",
+										style: styles.button,
+										onClick: () => { if (typeof onOpenStage === "function") onOpenStage(stageId); },
+									}, t("openStage")),
+								);
+							}),
+							(wf.states || []).length === 0 && react.createElement("p", { style: styles.desc }, "（无阶段引用）"),
+						),
+					);
+				}),
+			);
+		}
+
+
+		/** Static settings tab: workflow → stage references + model catalog + bash deny-list. */
 		function ModeGateSettingsTab(props) {
-			const { t, api } = props;
+			const { t, api, onOpenStage } = props;
 			const deny = useBashDenyList(api);
 			const modelCatalog = useModelCatalog(api);
 
@@ -609,6 +680,7 @@ window.__ModuleLoader__.load({
 			const saveModelCatalog = async () => { await modelCatalog.save(modelDraft); };
 
 			const head = react.createElement("p", { style: styles.desc }, t("desc"));
+			const workflowRefs = react.createElement(WorkflowReferenceListView, { t, api, onOpenStage });
 
 			// model catalog
 			const modelHead = react.createElement("h3", { style: styles.denyHead }, t("modelCatalogTitle"));
@@ -678,68 +750,94 @@ window.__ModuleLoader__.load({
 
 			return react.createElement("div", { style: styles.section },
 				head,
+				workflowRefs,
 				modelHead, modelDesc, modelTable, modelAddRow, modelSaveButton, modelErrorLine,
 				denyHead, denyDesc, denyTable, addRow, saveButton, errorLine,
 			);
 		}
 
-		/** 「所有模式」tab 的临时内容：后续 checklist 会替换为阶段卡片 UI。 */
+		/** 「所有模式」tab：平铺展示所有阶段（模式）列表。 */
 		function ModeGateAllModesTab(props) {
-			const { t, api } = props;
-			return react.createElement(ModeGateStageCardsView, { t, api });
+			const { t, api, focusStageId } = props;
+			return react.createElement(ModeGateStageCardsView, { t, api, focusStageId });
 		}
 
-		/** 「所有模式」：按工作流列出模式，展开后是每个阶段的卡片。 */
+		/** 「所有模式」：把每个工作流引用的阶段拉平为模式 list，点击模式展开阶段卡片。 */
 		function ModeGateStageCardsView(props) {
-			const { t, api } = props;
+			const { t, api, focusStageId } = props;
 			const settings = useWorkflowSettings(api);
 			const [expanded, setExpanded] = react.useState({});
 			const [drafts, setDrafts] = react.useState({});
 			const initialized = react.useRef(false);
 
+			const modes = react.useMemo(() => {
+				const list = [];
+				for (const wf of settings.workflows) {
+					for (const state of wf.states || []) {
+						list.push({
+							stageId: state.stageId || wf.id + "." + state.id,
+							workflowId: wf.id,
+							workflowLabel: wf.label || wf.id,
+							stateId: state.id,
+							stateLabel: state.label || state.id,
+							stateDescription: state.description || "",
+							prompt: state.prompt || "",
+							autoGuide: typeof state.autoGuide === "boolean" ? state.autoGuide : Boolean(state.goalRef || state.hasTransitions),
+							autoGuideText: typeof state.autoGuideText === "string" ? state.autoGuideText : "",
+							model: typeof state.model === "string" ? state.model : "",
+							reasoningEffort: typeof state.reasoningEffort === "string" ? state.reasoningEffort : "",
+							requirements: (Array.isArray(state.requirements) ? state.requirements : [])
+								.filter((requirement) => requirement && (requirement.kind === "file" || requirement.kind === "skill"))
+								.map((requirement) => requirement.kind === "file"
+									? { kind: "file", path: requirement.path || "" }
+									: { kind: "skill", name: requirement.name || "", requireTrueField: Boolean(requirement.requireTrueField), trueField: requirement.trueField || "ok" }),
+						});
+					}
+				}
+				return list;
+			}, [settings.workflows]);
+
 			react.useEffect(() => {
-				if (!Array.isArray(settings.workflows) || settings.workflows.length === 0) return;
+				if (modes.length === 0) return;
 				if (initialized.current) return;
 				const next = {};
-				for (const wf of settings.workflows) {
-					next[wf.id] = (wf.states || []).map((state) => ({
-						stateId: state.id,
-						stageId: state.stageId || `${wf.id}.${state.id}`,
-						stateLabel: state.label || state.id,
-						stateDescription: state.description || "",
-						prompt: state.prompt || "",
-						autoGuide: typeof state.autoGuide === "boolean" ? state.autoGuide : Boolean(state.goalRef || state.hasTransitions),
-						model: typeof state.model === "string" ? state.model : "",
-						reasoningEffort: typeof state.reasoningEffort === "string" ? state.reasoningEffort : "",
-						requirements: (Array.isArray(state.requirements) ? state.requirements : [])
-							.filter((requirement) => requirement && (requirement.kind === "file" || requirement.kind === "skill"))
-							.map((requirement) => requirement.kind === "file"
-								? { kind: "file", path: requirement.path || "" }
-								: { kind: "skill", name: requirement.name || "", requireTrueField: Boolean(requirement.requireTrueField), trueField: requirement.trueField || "ok" }),
-					}));
+				for (const mode of modes) {
+					next[mode.stageId] = { ...mode };
 				}
 				setDrafts(next);
 				initialized.current = true;
-			}, [settings.workflows, settings.overrides]);
+			}, [modes]);
 
-			const updateDraft = (workflowId, index, patch) => {
+			react.useEffect(() => {
+				if (typeof focusStageId !== "string" || !focusStageId) return;
+				setExpanded((prev) => ({ ...prev, [focusStageId]: true }));
+				const timer = setTimeout(() => {
+					if (typeof document === "undefined") return;
+					const el = document.getElementById("mode-gate-stage-" + focusStageId);
+					if (el && typeof el.scrollIntoView === "function") {
+						el.scrollIntoView({ block: "start", behavior: "smooth" });
+					}
+				}, 120);
+				return () => clearTimeout(timer);
+			}, [focusStageId]);
+
+			const updateDraft = (stageId, patch) => {
 				setDrafts((prev) => {
-					const wfDrafts = prev[workflowId] || [];
-					return { ...prev, [workflowId]: wfDrafts.map((row, i) => (i === index ? { ...row, ...patch } : row)) };
+					const row = prev[stageId] || {};
+					return { ...prev, [stageId]: { ...row, ...patch } };
 				});
 			};
 
-			const saveWorkflow = async (workflowId) => {
-				const rows = drafts[workflowId] || [];
-				for (const row of rows) {
-					await settings.saveStage(row.stageId, {
-						prompt: row.prompt,
-						autoGuide: row.autoGuide,
-						model: row.model,
-						reasoningEffort: row.reasoningEffort,
-						requirements: row.requirements || [],
-					});
-				}
+			const saveStage = async (stageId) => {
+				const row = drafts[stageId];
+				if (!row) return;
+				await settings.saveStage(stageId, {
+					prompt: row.prompt,
+					autoGuide: row.autoGuide,
+					model: row.model,
+					reasoningEffort: row.reasoningEffort,
+					requirements: row.requirements || [],
+				});
 				await settings.refresh();
 			};
 
@@ -749,46 +847,28 @@ window.__ModuleLoader__.load({
 					: settings.error)
 				: "";
 
-			const updateRequirement = (workflowId, stateIndex, reqIndex, patch) => {
+			const updateRequirement = (stageId, reqIndex, patch) => {
 				setDrafts((prev) => {
-					const wfDrafts = prev[workflowId] || [];
-					return {
-						...prev,
-						[workflowId]: wfDrafts.map((row, i) => {
-							if (i !== stateIndex) return row;
-							const requirements = (row.requirements || []).map((requirement, j) => (j === reqIndex ? { ...requirement, ...patch } : requirement));
-							return { ...row, requirements };
-						}),
-					};
+					const row = prev[stageId] || {};
+					const requirements = (row.requirements || []).map((requirement, j) => (j === reqIndex ? { ...requirement, ...patch } : requirement));
+					return { ...prev, [stageId]: { ...row, requirements } };
 				});
 			};
 
-			const addRequirement = (workflowId, stateIndex, kind) => {
+			const addRequirement = (stageId, kind) => {
 				setDrafts((prev) => {
-					const wfDrafts = prev[workflowId] || [];
-					return {
-						...prev,
-						[workflowId]: wfDrafts.map((row, i) => {
-							if (i !== stateIndex) return row;
-							const requirement = kind === "file"
-								? { kind: "file", path: "" }
-								: { kind: "skill", name: "", requireTrueField: false, trueField: "ok" };
-							return { ...row, requirements: [...(row.requirements || []), requirement] };
-						}),
-					};
+					const row = prev[stageId] || {};
+					const requirement = kind === "file"
+						? { kind: "file", path: "" }
+						: { kind: "skill", name: "", requireTrueField: false, trueField: "ok" };
+					return { ...prev, [stageId]: { ...row, requirements: [...(row.requirements || []), requirement] } };
 				});
 			};
 
-			const removeRequirement = (workflowId, stateIndex, reqIndex) => {
+			const removeRequirement = (stageId, reqIndex) => {
 				setDrafts((prev) => {
-					const wfDrafts = prev[workflowId] || [];
-					return {
-						...prev,
-						[workflowId]: wfDrafts.map((row, i) => {
-							if (i !== stateIndex) return row;
-							return { ...row, requirements: (row.requirements || []).filter((_requirement, j) => j !== reqIndex) };
-						}),
-					};
+					const row = prev[stageId] || {};
+					return { ...prev, [stageId]: { ...row, requirements: (row.requirements || []).filter((_requirement, j) => j !== reqIndex) } };
 				});
 			};
 
@@ -804,124 +884,125 @@ window.__ModuleLoader__.load({
 				react.createElement("option", { value: "max" }, t("effortMax")),
 			);
 
-			if (settings.workflows.length === 0) {
+			if (modes.length === 0) {
 				return react.createElement("div", null,
-					react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
-					react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
+					react.createElement("h3", { style: styles.denyHead }, t("allModesTitle")),
+					react.createElement("p", { style: styles.desc }, t("allModesDesc")),
 					react.createElement("p", { style: styles.error }, settingsError || t("loadWorkflowSettingsFailed")),
 				);
 			}
 
 			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
-				react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
-				react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
-				settings.workflows.map((wf) => {
-					const isOpen = Boolean(expanded[wf.id]);
-					const rows = drafts[wf.id] || [];
+				react.createElement("h3", { style: styles.denyHead }, t("allModesTitle")),
+				react.createElement("p", { style: styles.desc }, t("allModesDesc")),
+				modes.map((mode) => {
+					const isOpen = Boolean(expanded[mode.stageId]);
+					const row = drafts[mode.stageId] || mode;
 					return react.createElement("div", {
-						key: wf.id,
+						key: mode.stageId,
+						id: "mode-gate-stage-" + mode.stageId,
 						style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden" },
 					},
 						react.createElement("button", {
 							type: "button",
-							onClick: () => setExpanded((prev) => ({ ...prev, [wf.id]: !prev[wf.id] })),
+							onClick: () => setExpanded((prev) => ({ ...prev, [mode.stageId]: !prev[mode.stageId] })),
 							style: { ...styles.button, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, border: "none", borderRadius: 0, padding: "10px 12px" },
 						},
 							react.createElement("span", { style: { fontSize: 12, lineHeight: "18px" } }, isOpen ? "▾" : "▸"),
-							react.createElement("code", { style: styles.code }, wf.label || wf.id),
-							react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, wf.description || wf.id),
+							react.createElement("code", { style: styles.code }, mode.stageId),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 13 } }, mode.stateLabel),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, t("workflowOfMode") + ": " + mode.workflowLabel),
 						),
 						isOpen && react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px" } },
-							rows.map((row, idx) => react.createElement("div", {
-								key: row.stateId,
-								style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 },
-							},
-								react.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" } },
-									react.createElement("code", { style: styles.code }, row.stateId),
-									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, row.stateLabel),
-								),
-								row.stateDescription ? react.createElement("p", { style: { ...styles.desc, margin: 0 } }, row.stateDescription) : null,
-								react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
-									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("promptColumn")),
-									react.createElement("textarea", {
-										style: { ...styles.input, minHeight: 72, resize: "vertical" },
-										value: row.prompt,
-										onChange: (e) => updateDraft(wf.id, idx, { prompt: e.target.value }),
-									}),
-								),
-								react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-									react.createElement("input", {
-										type: "checkbox",
-										checked: Boolean(row.autoGuide),
-										onChange: (e) => updateDraft(wf.id, idx, { autoGuide: e.target.checked }),
-									}),
-									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("autoGuideColumn")),
-								),
-								react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
-									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("modelThinkingColumn")),
-									react.createElement("input", {
-										style: styles.input,
-										placeholder: t("workflowModelPlaceholder"),
-										value: row.model || "",
-										onChange: (e) => updateDraft(wf.id, idx, { model: e.target.value }),
-									}),
-									effortSelect(row.reasoningEffort, (value) => updateDraft(wf.id, idx, { reasoningEffort: value })),
-								),
-								react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
-									react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("progressRequirementsTitle")),
-									(row.requirements || []).map((requirement, reqIdx) => react.createElement("div", {
-										key: `req-${reqIdx}`,
-										style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
-									},
-										requirement.kind === "file"
-											? react.createElement("input", {
-												style: { ...styles.input, flex: 1, minWidth: 160 },
-												placeholder: t("reqFilePathPlaceholder"),
-												value: requirement.path || "",
-												onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { path: e.target.value }),
-											})
-											: react.createElement(react.Fragment, null,
+							mode.stateDescription ? react.createElement("p", { style: { ...styles.desc, margin: 0 } }, mode.stateDescription) : null,
+							react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("promptColumn")),
+								react.createElement("textarea", {
+									style: { ...styles.input, minHeight: 72, resize: "vertical" },
+									value: row.prompt,
+									onChange: (e) => updateDraft(mode.stageId, { prompt: e.target.value }),
+								}),
+							),
+							react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+								react.createElement("input", {
+									type: "checkbox",
+									checked: Boolean(row.autoGuide),
+									onChange: (e) => updateDraft(mode.stageId, { autoGuide: e.target.checked }),
+								}),
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("autoGuideColumn")),
+							),
+							react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("autoGuidePreview")),
+								react.createElement("textarea", {
+									style: { ...styles.input, minHeight: 64, resize: "vertical", color: "var(--dsw-alias-label-secondary)" },
+									value: row.autoGuideText || "",
+									readOnly: true,
+								}),
+							),
+							react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("modelThinkingColumn")),
+								react.createElement("input", {
+									style: styles.input,
+									placeholder: t("workflowModelPlaceholder"),
+									value: row.model || "",
+									onChange: (e) => updateDraft(mode.stageId, { model: e.target.value }),
+								}),
+								effortSelect(row.reasoningEffort, (value) => updateDraft(mode.stageId, { reasoningEffort: value })),
+							),
+							react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("progressRequirementsTitle")),
+								(row.requirements || []).map((requirement, reqIdx) => react.createElement("div", {
+									key: "req-" + reqIdx,
+									style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
+								},
+									requirement.kind === "file"
+										? react.createElement("input", {
+											style: { ...styles.input, flex: 1, minWidth: 160 },
+											placeholder: t("reqFilePathPlaceholder"),
+											value: requirement.path || "",
+											onChange: (e) => updateRequirement(mode.stageId, reqIdx, { path: e.target.value }),
+										})
+										: react.createElement(react.Fragment, null,
+											react.createElement("input", {
+												style: { ...styles.input, flex: 1, minWidth: 140 },
+												placeholder: t("reqSkillNamePlaceholder"),
+												value: requirement.name || "",
+												onChange: (e) => updateRequirement(mode.stageId, reqIdx, { name: e.target.value }),
+											}),
+											react.createElement("label", { style: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--dsw-alias-label-secondary)" } },
 												react.createElement("input", {
-													style: { ...styles.input, flex: 1, minWidth: 140 },
-													placeholder: t("reqSkillNamePlaceholder"),
-													value: requirement.name || "",
-													onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { name: e.target.value }),
+													type: "checkbox",
+													checked: Boolean(requirement.requireTrueField),
+													onChange: (e) => updateRequirement(mode.stageId, reqIdx, { requireTrueField: e.target.checked }),
 												}),
-												react.createElement("label", { style: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--dsw-alias-label-secondary)" } },
-													react.createElement("input", {
-														type: "checkbox",
-														checked: Boolean(requirement.requireTrueField),
-														onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { requireTrueField: e.target.checked }),
-													}),
-													t("reqTrueField"),
-												),
-												requirement.requireTrueField
-													? react.createElement("input", {
-														style: { ...styles.input, width: 110 },
-														placeholder: t("reqTrueFieldPlaceholder"),
-														value: requirement.trueField || "",
-														onChange: (e) => updateRequirement(wf.id, idx, reqIdx, { trueField: e.target.value }),
-													})
-													: null,
+												t("reqTrueField"),
 											),
-										react.createElement("button", { style: styles.button, onClick: () => removeRequirement(wf.id, idx, reqIdx) }, t("reqDelete")),
-									)),
-									react.createElement("select", {
-										style: { ...styles.input, maxWidth: 220 },
-										value: "",
-										onChange: (e) => {
-											const kind = e.target.value;
-											if (kind) addRequirement(wf.id, idx, kind);
-										},
+											requirement.requireTrueField
+												? react.createElement("input", {
+													style: { ...styles.input, width: 110 },
+													placeholder: t("reqTrueFieldPlaceholder"),
+													value: requirement.trueField || "",
+													onChange: (e) => updateRequirement(mode.stageId, reqIdx, { trueField: e.target.value }),
+												})
+												: null,
+										),
+									react.createElement("button", { style: styles.button, onClick: () => removeRequirement(mode.stageId, reqIdx) }, t("reqDelete")),
+								)),
+								react.createElement("select", {
+									style: { ...styles.input, maxWidth: 220 },
+									value: "",
+									onChange: (e) => {
+										const kind = e.target.value;
+										if (kind) addRequirement(mode.stageId, kind);
 									},
-										react.createElement("option", { value: "" }, t("reqAdd")),
-										react.createElement("option", { value: "file" }, t("reqAddFile")),
-										react.createElement("option", { value: "skill" }, t("reqAddSkill")),
-									),
+								},
+									react.createElement("option", { value: "" }, t("reqAdd")),
+									react.createElement("option", { value: "file" }, t("reqAddFile")),
+									react.createElement("option", { value: "skill" }, t("reqAddSkill")),
 								),
-							)),
+							),
 							react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
-								react.createElement("button", { style: styles.button, onClick: () => saveWorkflow(wf.id) }, t("saveWorkflow")),
+								react.createElement("button", { style: styles.button, onClick: () => saveStage(mode.stageId) }, t("saveWorkflow")),
 								settings.savedAt ? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, t("workflowSettingsSaveSuccess")) : null,
 							),
 						),
@@ -935,6 +1016,11 @@ window.__ModuleLoader__.load({
 		function ModeGateSettingsSection(props) {
 			const { t, api } = props;
 			const [activeTab, setActiveTab] = react.useState("current");
+			const [focusStageId, setFocusStageId] = react.useState("");
+			const openStage = (stageId) => {
+				if (typeof stageId === "string" && stageId) setFocusStageId(stageId);
+				setActiveTab("all");
+			};
 			const tabButton = (id, label) => react.createElement("button", {
 				key: id,
 				type: "button",
@@ -956,8 +1042,8 @@ window.__ModuleLoader__.load({
 					tabButton("all", t("tabAllModes")),
 				),
 				activeTab === "current"
-					? react.createElement(ModeGateSettingsTab, { t, api })
-					: react.createElement(ModeGateAllModesTab, { t, api }),
+					? react.createElement(ModeGateSettingsTab, { t, api, onOpenStage: openStage })
+					: react.createElement(ModeGateAllModesTab, { t, api, focusStageId }),
 			);
 		}
 

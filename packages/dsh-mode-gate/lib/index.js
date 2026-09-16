@@ -61,6 +61,30 @@ function firstLine(text) {
   return line.replace(/^\[目标\]\s*/, '') || line;
 }
 
+/** Best-effort extract the human text from a user/message event. */
+function extractUserText(event) {
+  const data = event && event.data && typeof event.data === 'object' ? event.data : {};
+  if (typeof data.text === 'string' && data.text.trim()) return data.text.trim();
+  if (typeof data.content === 'string' && data.content.trim()) return data.content.trim();
+  if (Array.isArray(data.content)) {
+    const text = data.content
+      .map((block) => (typeof block === 'string' ? block : block && typeof block.text === 'string' ? block.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    if (text) return text;
+  }
+  if (typeof data.message === 'string' && data.message.trim()) return data.message.trim();
+  return '';
+}
+
+/** Collected user inputs for the current workflow run (auto user_words). */
+function collectUserWords(agent) {
+  const state = readState(agent);
+  const inputs = Array.isArray(state.userInputs) ? state.userInputs : [];
+  return inputs.join('\n\n');
+}
+
 /** No-decorator Remote marker shim. */
 function markRemoteMethods(cls, methodNames) {
   const initializers = [];
@@ -213,6 +237,21 @@ class ModeGateGateway extends TypertRemoteService {
           const legacyOverride = (store.workflowOverrides && store.workflowOverrides[wf.id] && store.workflowOverrides[wf.id][state.id]) || {};
           const override = { ...legacyOverride, ...stageOverride };
           const defaultAuto = Boolean(state.goal || (Array.isArray(state.transitions) && state.transitions.length > 0));
+          const goalEngine = this.options.goalEngine;
+          const goalRef = state.goal && state.goal.ref ? state.goal.ref : null;
+          const goalDef = goalEngine && typeof goalEngine.get === 'function' ? goalEngine.get(goalRef) : null;
+          const builtinRequirements = goalDef && Array.isArray(goalDef.requiredCalls)
+            ? goalDef.requiredCalls.map((req) => ({ kind: 'skill', name: req.tool, requireTrueField: false, trueField: 'ok' }))
+            : [];
+          const hasOverrideRequirements = Object.prototype.hasOwnProperty.call(override, 'requirements');
+          const requirements = normalizeRequirements(
+            hasOverrideRequirements
+              ? override.requirements
+              : (Array.isArray(state.requirements) ? state.requirements : builtinRequirements),
+          );
+          const autoGuideText = typeof this.options.buildAutoGuide === 'function'
+            ? this.options.buildAutoGuide(state, goalDef)
+            : '';
           return {
             id: state.id,
             stageId,
@@ -220,6 +259,7 @@ class ModeGateGateway extends TypertRemoteService {
             description: typeof state.description === 'string' ? state.description : '',
             prompt: typeof override.prompt === 'string' ? override.prompt : (typeof state.prompt === 'string' ? state.prompt : ''),
             autoGuide: typeof override.autoGuide === 'boolean' ? override.autoGuide : defaultAuto,
+            autoGuideText,
             goalRef: state.goal && state.goal.ref ? state.goal.ref : null,
             hasTransitions: Array.isArray(state.transitions) && state.transitions.length > 0,
             permissions: state.permissions || null,
@@ -227,7 +267,7 @@ class ModeGateGateway extends TypertRemoteService {
             reasoningEffort: typeof override.reasoningEffort === 'string'
               ? override.reasoningEffort
               : (state.model && state.model.reasoningEffort ? state.model.reasoningEffort : ''),
-            requirements: normalizeRequirements(override.requirements),
+            requirements,
           };
         }),
       })),
@@ -532,11 +572,24 @@ export default {
       return actual === required || actual.endsWith(`/${required}`) || required.endsWith(`/${actual}`);
     }
 
+    function builtinGoalRequirements(stateDef) {
+      const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
+      if (!goalRef) return [];
+      const def = goalEngine.get(goalRef);
+      if (!def || !Array.isArray(def.requiredCalls) || def.requiredCalls.length === 0) return [];
+      return def.requiredCalls.map((req) => ({
+        kind: 'skill',
+        name: req.tool,
+        requireTrueField: false,
+        trueField: 'ok',
+      }));
+    }
+
     function effectiveStateRequirements(state, workflowId, stateId, stateDef) {
       const override = stateOverride(state, workflowId, stateId);
       if (override && Array.isArray(override.requirements)) return normalizeRequirements(override.requirements);
       if (stateDef && Array.isArray(stateDef.requirements)) return normalizeRequirements(stateDef.requirements);
-      return [];
+      return builtinGoalRequirements(stateDef);
     }
 
     function parseToolResultValue(result) {
@@ -704,6 +757,7 @@ export default {
       const registry = registryFor(agent);
       const stateDef = registry.stateOf(workflowId, stateId);
       const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
+      const previousWorkflow = state.workflowId || 'IDLE';
       const basePatch = {
         workflowId,
         phase: stateId,
@@ -712,10 +766,16 @@ export default {
         dynamicPlan: { scope: 'state', stateId, items: [], updatedAt: Date.now() },
         pendingProtocol: null,
         requirementProgress: {},
+        userInputs: previousWorkflow === workflowId ? (state.userInputs || []) : [],
       };
       if (!goalRef) {
+        const isIdle = workflowId === 'IDLE' || stateId === 'IDLE';
         const prompt = effectiveStatePrompt(state, workflowId, stateId, stateDef) || `当前状态：${stateId}`;
-        writeState(agent, { ...basePatch, goal: null, target: { target: prompt, mode: stateId } });
+        writeState(agent, {
+          ...basePatch,
+          goal: null,
+          target: isIdle ? null : { target: prompt, mode: stateId },
+        });
         applyStateModelSelection(agent, workflowId, stateId);
         void injectModeGateContext(agent, 'state');
         return { prompt, messages: [] };
@@ -1254,21 +1314,27 @@ export default {
 
     ctx.tools.register(defineTool({
       name: 'update_feature_intent',
-      description: '向 feature intent 追加一条记录，包含三个 field：用户原话、Agent 理解、可验收 checklist。文件新建时会自动创建 project-experience 文件夹与 intro。',
+      description: '向 feature intent 追加一条记录。用户原话由系统自动收集，Agent 只需提供 Agent 理解与可验收 checklist。文件新建时会自动创建 project-experience 文件夹与 intro。',
       parameters: {
         name: { type: 'string', required: true, description: 'feature intent 文件名（不带目录，可选 .md 后缀）。' },
-        user_words: { type: 'string', required: true, description: '用户原话（尽量逐字保留）。' },
+        user_words: { type: 'string', description: '已废弃：用户原话由系统自动收集，传入也会被自动收集值覆盖。' },
         understanding: { type: 'string', required: true, description: 'Agent 对需求的理解与拆解。' },
         checklist: { type: 'array', items: { type: 'string' }, required: true, description: '可验收节点，例如「按钮在 xx 处出现」。' },
         project_overview: { type: 'string', description: '仅当文件不存在时必填：项目概述，同时写入 project-experience/intro.md。' },
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute(args) {
+      async execute(args, exec) {
         const checklist = Array.isArray(args.checklist) ? args.checklist.filter((s) => typeof s === 'string' && s.trim()) : [];
         if (checklist.length === 0) throw new Error('checklist 不能为空，请提供至少一个可验收节点。');
+        const agent = exec && exec.agent;
+        const collected = agent ? collectUserWords(agent) : '';
+        const userWords = collected || (typeof args.user_words === 'string' ? args.user_words.trim() : '');
+        if (!userWords) {
+          throw new Error('未能自动收集到用户原话；请确认会话中已存在本次工作流的用户输入。');
+        }
         const result = featureIntents.append(
           args.name,
-          { userWords: args.user_words, understanding: args.understanding, checklist },
+          { userWords, understanding: args.understanding, checklist },
           args.project_overview,
         );
         let project = null;
@@ -1558,6 +1624,7 @@ export default {
     });
 
     // ── feature-intent approval: sending a user message rejects the pending protocol ──
+    // ── user-input collection: non-IDLE user messages become the auto user_words ──
     ctx.on('session/event', (session, event) => {
       try {
         if (!event || event.type !== 'user/message') return;
@@ -1568,6 +1635,12 @@ export default {
           : (session && (session.id ?? session.sessionId));
         if (typeof sessionId !== 'string') return;
         const entry = readSessionEntry(sessionId);
+        const text = extractUserText(event);
+        if (text && entry.workflowId && entry.workflowId !== 'IDLE') {
+          writeState(agentFor(sessionId), {
+            userInputs: [...(entry.userInputs || []), text],
+          });
+        }
         if (!entry || !entry.pendingProtocol) return;
         rejectPendingProtocol(sessionId)
           .then((result) => log(`用户发送消息，已拒绝待确认需求协议：${sessionId} -> ${result && result.workflowId}/${result && result.phase}`))
@@ -1642,6 +1715,8 @@ export default {
       activateStateGoal,
       approveRequirementProtocol: approvePendingProtocol,
       rejectRequirementProtocol: rejectPendingProtocol,
+      goalEngine,
+      buildAutoGuide,
     });
   },
 };

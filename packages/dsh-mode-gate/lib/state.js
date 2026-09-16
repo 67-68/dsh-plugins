@@ -210,6 +210,7 @@ export function normalizeSessionEntry(entry) {
     migrationNotice: migrated.migrationNotice || (typeof source.migrationNotice === 'string' ? source.migrationNotice : null),
     pendingProtocol: source.pendingProtocol && typeof source.pendingProtocol === 'object' ? source.pendingProtocol : null,
     requirementProgress: source.requirementProgress && typeof source.requirementProgress === 'object' ? source.requirementProgress : {},
+    userInputs: Array.isArray(source.userInputs) ? source.userInputs.filter((s) => typeof s === 'string' && s.trim()) : [],
   };
 }
 

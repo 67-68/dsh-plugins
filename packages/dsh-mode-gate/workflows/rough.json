@@ -72,7 +72,7 @@
     {
       "id": "REQUIREMENT_RECOGNITION",
       "label": "需求分解（单 goal）",
-      "description": "调研代码库与 feature intent；只识别 1 个 goal，同模块多个需求合并为 1 个可验收节点；写入三字段并提交协议。本阶段完全禁用 bash，专心分解需求。",
+      "description": "调研代码库与 feature intent；只识别 1 个 goal，同模块多个需求合并为 1 个可验收节点；写入 Agent 理解与 checklist（用户原话由系统自动收集）并提交协议。本阶段只使用只读调研与 feature intent 工具。",
       "permissions": {
         "write": false,
         "bash": "none",
@@ -107,7 +107,7 @@
       "goal": {
         "ref": "rough.requirement-recognition"
       },
-      "prompt": "[System Directive: Rough Scheduler]\n你是 ROUGH 轻量工作流的任务拆解员。把用户的自然语言需求转化为 1 个（且只能 1 个）可验收 Goal。同模块的多个需求（例如“修改 UI 的某几个地方”）必须合并进这 1 个 goal 的验收文本里，不要拆成多个 goal。\n\n绝对禁忌：\n- 禁止技术设计：不猜测或设计具体 API、文件路径、类名或数据结构，这是后续阶段的工作。\n- 禁止可行性废话：不输出“可能面临 XX 风险”“需要调研 XX”。\n- 禁止过程指导：Goal 必须是名词/结果态（如“rough 工作流出现在工作流选择界面且只含四个状态”），不能是动词/过程态（如“去 workflows 目录新建 rough.json”）。\n\n流程：\n1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；\n2. 用只读工具（本阶段完全禁用 bash）调研代码库，确认 1 个 goal 的可验收边界；\n3. 用 update_feature_intent 写入三个 field：user_words、understanding、checklist；checklist 只能有 1 项，且该项把同模块多个改动点合并描述；\n4. 调用 submit_requirement_protocol 提交协议，等待用户确认。",
+      "prompt": "[System Directive: Rough Scheduler]\n你是 ROUGH 轻量工作流的任务拆解员。把用户的自然语言需求转化为 1 个（且只能 1 个）可验收 Goal。同模块的多个需求（例如“修改 UI 的某几个地方”）必须合并进这 1 个 goal 的验收文本里，不要拆成多个 goal。\n\n绝对禁忌：\n- 禁止技术设计：不猜测或设计具体 API、文件路径、类名或数据结构，这是后续阶段的工作。\n- 禁止可行性废话：不输出“可能面临 XX 风险”“需要调研 XX”。\n- 禁止过程指导：Goal 必须是名词/结果态（如“rough 工作流出现在工作流选择界面且只含四个状态”），不能是动词/过程态（如“去 workflows 目录新建 rough.json”）。\n\n流程：\n1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；\n2. 用只读工具调研代码库，确认 1 个 goal 的可验收边界；\n3. 用 update_feature_intent 写入：用户原话字段由系统自动收集，你只需要提供 Agent 理解与 checklist；checklist 只能有 1 项，且该项把同模块多个改动点合并描述；\n4. 调用 submit_requirement_protocol 提交协议，等待用户确认。",
       "transitions": [
         {
           "when": {
