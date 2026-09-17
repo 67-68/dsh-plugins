@@ -1,6 +1,6 @@
 {
   "name": "dsh-mode-gate",
-  "description": "Multi-workflow mode gate: IDLE / SIMPLE-ACTION / CREATE flat state machine with goal engine, workflow registry, feature-intent checklist plans, project-experience and model switching",
+  "description": "Multi-workflow mode gate: IDLE / SIMPLE-ACTION / CREATE flat state machine with goal engine, workflow registry, feature-intent checklist plans and model switching",
   "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",

@@ -209,6 +209,12 @@ export function normalizeSessionEntry(entry) {
     workspace: typeof source.workspace === 'string' ? source.workspace : null,
     migrationNotice: migrated.migrationNotice || (typeof source.migrationNotice === 'string' ? source.migrationNotice : null),
     pendingProtocol: source.pendingProtocol && typeof source.pendingProtocol === 'object' ? source.pendingProtocol : null,
+    patternSelfCheck: source.patternSelfCheck && typeof source.patternSelfCheck === 'object' ? source.patternSelfCheck : null,
+    patternRound: source.patternRound && typeof source.patternRound === 'object' ? source.patternRound : null,
+    architectureSelfCheck: source.architectureSelfCheck && typeof source.architectureSelfCheck === 'object' ? source.architectureSelfCheck : null,
+    contextUsage: source.contextUsage && typeof source.contextUsage === 'object' ? source.contextUsage : null,
+    contextBudget: source.contextBudget && typeof source.contextBudget === 'object' ? source.contextBudget : null,
+    compression: source.compression && typeof source.compression === 'object' ? source.compression : null,
     requirementProgress: source.requirementProgress && typeof source.requirementProgress === 'object' ? source.requirementProgress : {},
     userInputs: Array.isArray(source.userInputs) ? source.userInputs.filter((s) => typeof s === 'string' && s.trim()) : [],
   };

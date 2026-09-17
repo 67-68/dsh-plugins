@@ -19,6 +19,7 @@
     "scope": "workflow-instance",
     "enabled": true,
     "injectAtStates": [
+      "INIT",
       "RESEARCH",
       "EXECUTE",
       "DEBUG",
@@ -90,7 +91,7 @@
     {
       "id": "REQUIREMENT_RECOGNITION",
       "label": "需求分解",
-      "description": "调研代码库与 feature intent；写入 Agent 理解与可验收 checklist（用户原话由系统自动收集），并把 checklist 注册为 staticPlan。本阶段只使用只读调研与 feature intent 工具。",
+      "description": "调研代码库与 feature intent；写入 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist（用户原话由系统自动收集），并把 checklist 注册为 staticPlan。本阶段只使用只读调研与 feature intent 工具。",
       "permissions": {
         "write": false,
         "bash": "none",
@@ -125,7 +126,7 @@
       "goal": {
         "ref": "feature-intent.read-and-decompose"
       },
-      "prompt": "[System Directive: Master Scheduler]\n你是一个只看结果、极度冷酷的任务拆解员。你的唯一目标是将用户的自然语言需求，转化为 OODA 执行器可验证的 Goal Queue。在拆解需求的时候注意模块解耦，把不同模块的内容拆分到不同的阶段。\n🚫 绝对禁忌 (Anti-patterns):\n禁止技术设计： 绝对不准猜测或设计具体的 API、文件路径、类名或数据结构！这是下一阶段执行者的工作。\n禁止可行性废话： 不准输出“这个需求可能面临 XX 风险”、“我们需要调研 XX”。闭嘴！只输出目标！\n禁止过程指导： 你的 Goal 必须是名词/结果态（如“鉴权中间件拦截非法请求”），绝对不能是动词/过程态（如“去 router.ts 里写一个 if 判断”）。用 list_feature_intents / get_feature_intent 阅读相关 feature intent，并用 read/grep/glob/web_search/read_url 等只读工具调研代码库。然后用 update_feature_intent 写入：用户原话字段由系统自动收集，你只需要提供 Agent 理解与可验收 checklist。最后用 submit_requirement_protocol 提交协议。",
+      "prompt": "[System Directive: Master Scheduler]\n你是一个只看结果、极度冷酷的任务拆解员。你的唯一目标是将用户的自然语言需求，转化为 OODA 执行器可验证的 Goal Queue。在拆解需求的时候注意模块解耦，把不同模块的内容拆分到不同的阶段。\n🚫 绝对禁忌 (Anti-patterns):\n禁止技术设计： 绝对不准猜测或设计具体的 API、文件路径、类名或数据结构！这是下一阶段执行者的工作。\n禁止可行性废话： 不准输出“这个需求可能面临 XX 风险”、“我们需要调研 XX”。闭嘴！只输出目标！\n禁止过程指导： 你的 Goal 必须是名词/结果态（如“鉴权中间件拦截非法请求”），绝对不能是动词/过程态（如“去 router.ts 里写一个 if 判断”）。用 list_feature_intents / get_feature_intent 阅读相关 feature intent，并用 read/grep/glob/web_search/read_url 等只读工具调研代码库。然后用 update_feature_intent 写入：用户原话字段由系统自动收集，你只需要提供 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist。最后用 submit_requirement_protocol 提交协议。",
       "transitions": [
         {
           "when": {
@@ -133,7 +134,43 @@
           },
           "to": {
             "workflow": "$self",
-            "state": "RESEARCH"
+            "state": "FEATURE_UPDATE"
+          }
+        }
+      ]
+    },
+    {
+      "id": "FEATURE_UPDATE",
+      "label": "更新功能列表",
+      "description": "根据已审核的 feature intent 更新总体 user_visible_behavior 与 feature_intent，并把 status 置为 in_progress。",
+      "permissions": {
+        "write": false,
+        "bash": "none",
+        "tools": [
+          "update_feature_list",
+          "read",
+          "grep",
+          "glob",
+          "skill_load",
+          "skill_search",
+          "str_replace_editor:view"
+        ]
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "create.feature-update"
+      },
+      "prompt": "用 update_feature_list 更新总体 user_visible_behavior 与 feature_intent，并将 status 置为 in_progress；完成后 submit_state。",
+      "transitions": [
+        {
+          "when": {
+            "type": "goal.completed"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "INIT"
           }
         }
       ]
@@ -141,12 +178,11 @@
     {
       "id": "RESEARCH",
       "label": "研究",
-      "description": "重新阅读 project-experience，为当前 checklist goal 调研，并产出本 goal 的 dynamic plan。",
+      "description": "为当前 checklist goal 调研，并产出本 goal 的 dynamic plan。",
       "permissions": {
         "write": false,
         "bash": "read-only",
         "tools": [
-          "read_project_experience",
           "read",
           "grep",
           "glob",
@@ -165,7 +201,8 @@
           "skill_load",
           "skill_search",
           "bash",
-          "str_replace_editor:view"
+          "str_replace_editor:view",
+          "dependency_map"
         ]
       },
       "model": {
@@ -175,7 +212,7 @@
         "ref": "create.research",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "重新阅读 project-experience，围绕当前 checklist goal 用只读工具充分调研，然后 todo_write 出本 goal 的 dynamic plan（第一项 in_progress），最后 submit_state。",
+      "prompt": "围绕当前 checklist goal 用只读工具充分调研，然后 todo_write 出本 goal 的 dynamic plan（第一项 in_progress），最后 submit_state。",
       "transitions": [
         {
           "when": {
@@ -233,32 +270,64 @@
         "ref": "create.debug",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "验证当前 checklist goal 的验收标准。能自行修复就修复；无法解决时，把复现步骤和需要用户做什么写清楚，请求用户协助。",
+      "prompt": "验证当前 checklist goal 的验收标准。能自行修复就修复；无法解决时，把复现步骤和需要用户做什么写清楚，请求用户协助。验证通过后，先调用 git_commit 工具（由 mode-gate-git-commit skill 提供）完成本轮 commit + push（直接执行 git 修改命令会被拒绝），再调用 submit_state 提交。提交后：默认直接进入下一轮 RESEARCH（还有待办）或结束回 IDLE；只有上下文超过硬编码预算时才转 ACCUMULATION 压缩沉淀。",
       "transitions": [
         {
           "when": {
-            "type": "goal.completed"
+            "type": "context.overBudget"
           },
           "to": {
             "workflow": "$self",
             "state": "ACCUMULATION"
           }
+        },
+        {
+          "when": {
+            "type": "staticPlan.pending",
+            "op": ">",
+            "value": 0
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "RESEARCH"
+          },
+          "loop": {
+            "increment": "iteration"
+          }
+        },
+        {
+          "when": {
+            "type": "staticPlan.pending",
+            "op": "==",
+            "value": 0
+          },
+          "to": {
+            "workflow": "IDLE",
+            "state": "IDLE"
+          },
+          "complete": true
         }
       ]
     },
     {
       "id": "ACCUMULATION",
       "label": "总结沉淀",
-      "description": "把本轮经验追加到 project-experience；若需覆盖既有内容，走 diff 申请等用户批准。",
+      "description": "先自查本轮是否有用户强调或纠正过的模式，再沉淀行为模式；单次最多 3 行，每行正文不超过 20 字，允许 0/1 行。进展流水改写入 journal。",
       "permissions": {
         "write": false,
         "bash": "read-only",
         "tools": [
-          "update_project_experience",
-          "read_project_experience",
+          "pattern_reason",
+          "pattern_write",
+          "pattern_overwrite",
+          "pattern_audit",
+          "journal_append",
+          "architecture_reason",
+          "architecture_write",
+          "architecture_audit",
+          "compress_context",
           "skill_load",
-          "bash",
-          "str_replace_editor:view"
+          "skill_search"
         ]
       },
       "model": {
@@ -268,7 +337,48 @@
         "ref": "create.accumulate",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "用 update_project_experience 把本轮变化追加到 project-experience。如需修改既有内容，提出 diff 或全量覆盖申请，等待用户批准。",
+      "prompt": "先主动检查本轮是否有用户强调或纠正过的模式（默认鼓励不写）。写入前必须先调用 pattern_reason 提交 reason 说明是哪一条用户强调/纠正，reason 只用于审计、不写入模式文件，缺少 reason 时写入会被拒绝。需要写入时用 pattern_write 两步完成：第一步 step=facts 传 trigger/wrong/right 得到 pattern_id（若「trigger → right」超 20 字，额外传 body 短摘要 ≤20 字）；第二步 step=rationale 传 pattern_id/why/evidence 附加到同一条规则。只要写了 facts 就必须补 rationale，存在五字段不全的规则时 submit_state 会被拒绝。内容属于进展流水会被拒绝，请改用 journal_append 写入 journal。不做相似度判断。发现已有规则过期时用 pattern_overwrite 覆盖（mode=retire 只清除过期行，mode=replace 清除并写入新规则，必填 reason 作为审计说明；覆盖只移出热文件，明细与审计保留，可用 pattern_audit 查看）。没有可写模式则完成自查后调用一次 pattern_write skip=true。同时检查本轮是否产生了稳定结构事实（模块职责 / 依赖方向与禁止边 / 关键 invariant / entrypoint / 不要碰的目录等）：默认不写，确需沉淀时先调用 architecture_reason 提交 reason（说明为何值得长期留存），再用 architecture_write 写入（mode=section 只更新一个结构 section，推荐；mode=replace 整篇替换）；reason 只写 audit，不写入 architecture.md，文档不得混入功能状态或进展流水且不得超过 120 行/约 1000 tokens。没有结构变化时无需调用 architecture_write。长期文档整理完成后，调用 compress_context 压缩上下文（顺序强制：必须先完成 pattern_reason + pattern_write）；压缩会精简 hot loopMemory 并尽力压缩 harness 旧会话，不可用时静默降级。然后 submit_state；引擎会进入 INIT。",
+      "transitions": [
+        {
+          "when": {
+            "type": "always"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "INIT"
+          }
+        }
+      ]
+    },
+    {
+      "id": "INIT",
+      "label": "初始化上下文",
+      "description": "压缩完成后（或项目开始）读取长期文档与最近一次 feature intent，不读取完整短期对话；journal/changelog/history 等短期冷数据默认不进入 hot 上下文；决定进入下一轮 RESEARCH 或结束。",
+      "permissions": {
+        "write": false,
+        "bash": "read-only",
+        "tools": [
+          "read",
+          "grep",
+          "glob",
+          "list_feature_intents",
+          "get_feature_intent",
+          "dependency_map",
+          "todo_write",
+          "skill_load",
+          "skill_search",
+          "bash",
+          "str_replace_editor:view"
+        ]
+      },
+      "model": {
+        "reasoningEffort": "low"
+      },
+      "goal": {
+        "ref": "create.init",
+        "operatesOn": "staticPlan.current"
+      },
+      "prompt": "只读取长期文档与最近一次 feature intent（architecture.md 已作为常驻 limited prompt 注入；可用 list_feature_intents / get_feature_intent 读取最近一次需求）。不要读取完整短期对话；需要代码导航时调用 dependency_map。然后 submit_state：还有待办进入下一轮 RESEARCH，全部完成则结束。",
       "transitions": [
         {
           "when": {

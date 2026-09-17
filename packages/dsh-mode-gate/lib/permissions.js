@@ -25,7 +25,7 @@ export const READ_ONLY_TOOLS = new Set([
   'read', 'grep', 'glob', 'skill', 'skill_search', 'skill_load', 'read_image',
   'web_search', 'list_agents', 'get_goal', 'job_list', 'job_output', 'ask_user_question',
   'read_url', 'read_url_batch', 'read_url_links', 'read_url_site', 'dev_tool_search',
-  'list_feature_intents', 'get_feature_intent', 'read_project_experience', 'get_workflow_state',
+  'list_feature_intents', 'get_feature_intent', 'get_workflow_state',
   'list_workflows',
 ]);
 

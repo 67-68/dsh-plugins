@@ -115,6 +115,8 @@ export function createFeatureIntentStore(featureIntentDir) {
       record = buildEntryMarkdown({
         userWords: entry.userWords || entry.user_words,
         understanding: entry.understanding || entry.agentUnderstanding,
+        userVisibleBehavior: entry.userVisibleBehavior || entry.user_visible_behavior,
+        featureIntent: entry.featureIntent || entry.feature_intent,
         checklist: entry.checklist,
       });
     } else {

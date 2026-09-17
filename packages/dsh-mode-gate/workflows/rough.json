@@ -38,12 +38,14 @@
     {
       "id": "BASE_READ",
       "label": "了解项目基准",
-      "description": "一次性读取 project-experience 的系统拓扑、血泪法则、核心状态树。",
+      "description": "确认项目基准；只做只读调研，不写任何文件。",
       "permissions": {
         "write": false,
         "bash": "read-only",
         "tools": [
-          "read_project_experience",
+          "read",
+          "grep",
+          "glob",
           "skill_load",
           "skill_search",
           "bash",
@@ -54,9 +56,9 @@
         "reasoningEffort": "high"
       },
       "goal": {
-        "ref": "project-experience.dump"
+        "ref": "base-read.noop"
       },
-      "prompt": "找到本项目的 project-experience 文件夹，一次性 dump 系统拓扑、血泪法则、核心状态树三个文件。这是 ROUGH 轻量工作流，只读取一次基准，后续不做沉淀。",
+      "prompt": "确认项目基准；可用只读工具查看仓库与 feature intent，确认后 submit_state。这是 ROUGH 轻量工作流，只读取一次基准，后续不做沉淀。",
       "transitions": [
         {
           "when": {
@@ -72,7 +74,7 @@
     {
       "id": "REQUIREMENT_RECOGNITION",
       "label": "需求分解（单 goal）",
-      "description": "调研代码库与 feature intent；只识别 1 个 goal，同模块多个需求合并为 1 个可验收节点；写入 Agent 理解与 checklist（用户原话由系统自动收集）并提交协议。本阶段只使用只读调研与 feature intent 工具。",
+      "description": "调研代码库与 feature intent；只识别 1 个 goal，同模块多个需求合并为 1 个可验收节点；写入 Agent 理解、user_visible_behavior、feature_intent 与 checklist（用户原话由系统自动收集）并提交协议。本阶段只使用只读调研与 feature intent 工具。",
       "permissions": {
         "write": false,
         "bash": "none",
@@ -107,7 +109,7 @@
       "goal": {
         "ref": "rough.requirement-recognition"
       },
-      "prompt": "[System Directive: Rough Scheduler]\n你是 ROUGH 轻量工作流的任务拆解员。把用户的自然语言需求转化为 1 个（且只能 1 个）可验收 Goal。同模块的多个需求（例如“修改 UI 的某几个地方”）必须合并进这 1 个 goal 的验收文本里，不要拆成多个 goal。\n\n绝对禁忌：\n- 禁止技术设计：不猜测或设计具体 API、文件路径、类名或数据结构，这是后续阶段的工作。\n- 禁止可行性废话：不输出“可能面临 XX 风险”“需要调研 XX”。\n- 禁止过程指导：Goal 必须是名词/结果态（如“rough 工作流出现在工作流选择界面且只含四个状态”），不能是动词/过程态（如“去 workflows 目录新建 rough.json”）。\n\n流程：\n1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；\n2. 用只读工具调研代码库，确认 1 个 goal 的可验收边界；\n3. 用 update_feature_intent 写入：用户原话字段由系统自动收集，你只需要提供 Agent 理解与 checklist；checklist 只能有 1 项，且该项把同模块多个改动点合并描述；\n4. 调用 submit_requirement_protocol 提交协议，等待用户确认。",
+      "prompt": "[System Directive: Rough Scheduler]\n你是 ROUGH 轻量工作流的任务拆解员。把用户的自然语言需求转化为 1 个（且只能 1 个）可验收 Goal。同模块的多个需求（例如“修改 UI 的某几个地方”）必须合并进这 1 个 goal 的验收文本里，不要拆成多个 goal。\n\n绝对禁忌：\n- 禁止技术设计：不猜测或设计具体 API、文件路径、类名或数据结构，这是后续阶段的工作。\n- 禁止可行性废话：不输出“可能面临 XX 风险”“需要调研 XX”。\n- 禁止过程指导：Goal 必须是名词/结果态（如“rough 工作流出现在工作流选择界面且只含四个状态”），不能是动词/过程态（如“去 workflows 目录新建 rough.json”）。\n\n流程：\n1. 用 list_feature_intents / get_feature_intent 找到并阅读本次任务的 feature intent 文档；\n2. 用只读工具调研代码库，确认 1 个 goal 的可验收边界；\n3. 用 update_feature_intent 写入：用户原话字段由系统自动收集，你需要提供 Agent 理解、user_visible_behavior、feature_intent 与 checklist；checklist 只能有 1 项，且该项把同模块多个改动点合并描述；\n4. 调用 submit_requirement_protocol 提交协议，等待用户确认。",
       "transitions": [
         {
           "when": {
@@ -123,12 +125,11 @@
     {
       "id": "RESEARCH",
       "label": "研究",
-      "description": "重新阅读 project-experience，为当前 goal 调研，并产出本 goal 的 dynamic plan。",
+      "description": "为当前 goal 调研，并产出本 goal 的 dynamic plan。",
       "permissions": {
         "write": false,
         "bash": "read-only",
         "tools": [
-          "read_project_experience",
           "read",
           "grep",
           "glob",
@@ -147,7 +148,8 @@
           "skill_load",
           "skill_search",
           "bash",
-          "str_replace_editor:view"
+          "str_replace_editor:view",
+          "dependency_map"
         ]
       },
       "model": {
@@ -157,7 +159,7 @@
         "ref": "rough.research",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "重新阅读 project-experience，围绕当前 goal 用只读工具充分调研，然后 todo_write 出本 goal 的 dynamic plan（第一项 in_progress），最后 submit_state。ROUGH 工作流只实现不测试，调研时不要把测试/沉淀列为计划。",
+      "prompt": "围绕当前 goal 用只读工具充分调研，然后 todo_write 出本 goal 的 dynamic plan（第一项 in_progress），最后 submit_state。ROUGH 工作流只实现不测试，调研时不要把测试/沉淀列为计划。",
       "transitions": [
         {
           "when": {
@@ -186,7 +188,7 @@
         "ref": "rough.implement",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "执行当前 goal，只做验收文本范围内的事。用 todo_write 维护本 goal 的 dynamic plan：开始一项标记 in_progress，完成一项立即标记 completed。完成后直接向用户清晰呈现改动内容与使用方式；不要运行测试，不要写 project-experience，然后调用 submit_state 结束本工作流。",
+      "prompt": "执行当前 goal，只做验收文本范围内的事。用 todo_write 维护本 goal 的 dynamic plan：开始一项标记 in_progress，完成一项立即标记 completed。实现完成后，先调用 git_commit 工具（由 mode-gate-git-commit skill 提供）完成 commit + push（直接执行 git 修改命令会被拒绝），再向用户清晰呈现改动内容与使用方式；不要运行测试，不要写长期记忆，然后调用 submit_state 结束本工作流。",
       "transitions": [
         {
           "when": {

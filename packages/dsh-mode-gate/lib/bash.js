@@ -82,7 +82,17 @@ const MUTATING_VERBS = new Set([
   'touch', 'mkdir', 'rmdir', 'tee', 'truncate',
 ]);
 const DANGEROUS_VERBS = new Set(['sudo', 'mkfs', 'dd']);
-const MUTATING_GIT_SUBCOMMANDS = new Set(['add', 'commit', 'mv', 'rm']);
+/**
+ * git 子命令只读白名单。白名单外的 git 子命令都视为修改命令：
+ * add/commit/push/rm/mv/reset/clean/merge/rebase/cherry-pick/revert/stash/
+ * checkout/switch/restore/pull/apply/am 等会被分类为 mutating 或 dangerous，
+ * 由 index.js 的 bashDecision 拒绝（Agent 只允许通过 git_commit 工具提交）。
+ */
+const GIT_READ_ONLY_SUBCOMMANDS = new Set([
+  'status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'describe',
+  'reflog', 'shortlog', 'grep', 'cat-file', 'count-objects', 'fsck', 'var',
+  'version', 'help',
+]);
 const DANGEROUS_GIT_SUBCOMMANDS = new Set(['push', 'reset', 'clean']);
 const DOWNLOAD_VERBS = new Set(['curl', 'wget']);
 const SHELL_VERBS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
@@ -347,6 +357,24 @@ function worstSubstitutionKind(tokens) {
   return worst;
 }
 
+/** 跳过 git 的全局选项（-C/--git-dir/--work-tree 等），返回第一个子命令。 */
+function gitSubcommand(tokens) {
+  let i = 0;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (token === '-C' || token === '--git-dir' || token === '--work-tree' || token === '-c' || token === '--config-env' || token === '--exec-path' || token === '--namespace' || token === '--super-prefix' || token === '--list-cmds') {
+      i += 2;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    return token;
+  }
+  return undefined;
+}
+
 function analyzeSimpleCommand(tokens) {
   let commandWord = null;
   let commandWordIndex = -1;
@@ -403,9 +431,23 @@ function analyzeSimpleCommand(tokens) {
   if (MUTATING_VERBS.has(base)) return { kind: subKind === 'dangerous' ? 'dangerous' : 'mutating' };
 
   if (base === 'git') {
-    const sub = commandTokens[commandWordIndex + 1];
-    if (DANGEROUS_GIT_SUBCOMMANDS.has(sub)) return { kind: 'dangerous' };
-    if (MUTATING_GIT_SUBCOMMANDS.has(sub)) return { kind: 'mutating' };
+    const tail = commandTokens.slice(commandWordIndex + 1);
+    const sub = gitSubcommand(tail);
+    if (sub) {
+      const positional = tail.slice(tail.indexOf(sub) + 1).filter((token) => !String(token).startsWith('-'));
+      // 只列不改的常见子命令：git branch -a / git tag -l / git remote -v 视为只读。
+      if ((sub === 'branch' || sub === 'tag' || sub === 'remote') && positional.length === 0) {
+        return { kind: subKind };
+      }
+      if (sub === 'stash' && (positional[0] === 'list' || positional[0] === 'show')) {
+        return { kind: subKind };
+      }
+      if (sub === 'worktree' && positional[0] === 'list') {
+        return { kind: subKind };
+      }
+      if (DANGEROUS_GIT_SUBCOMMANDS.has(sub)) return { kind: 'dangerous' };
+      if (!GIT_READ_ONLY_SUBCOMMANDS.has(sub)) return { kind: 'mutating' };
+    }
   }
 
   if (mutatingRedirect) return { kind: subKind === 'dangerous' ? 'dangerous' : 'mutating' };
@@ -505,6 +547,13 @@ function classifyCommand(command) {
   const base = classifyCommandBase(command);
   if (commandHasWriteGuard(command)) return base === 'dangerous' ? 'dangerous' : 'mutating';
   return base;
+}
+
+/** True when the command directly invokes a mutating/dangerous git subcommand. */
+export function isGitMutation(command) {
+  const verbs = extractCommandVerbs(command);
+  if (!verbs.includes('git')) return false;
+  return classifyCommand(command) !== 'read-only';
 }
 
 export { classifyCommand, extractCommandVerbs, matchBashDeny, normalizeDenyList, stringArray };

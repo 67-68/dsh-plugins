@@ -6,10 +6,20 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 import { createFeatureIntentStore } from './feature-intent-store.js';
+import { createFeatureListStore, defaultFeatureListDir } from './feature-list-store.js';
+import { createPatternStore, defaultPatternDir } from './pattern-store.js';
+import { createJournalStore, defaultJournalDir } from './journal-store.js';
+import { createHistoryStore, defaultHistoryDir } from './history-store.js';
+import { readHeadCommit } from './git-commit.js';
+import { runGitUpdate } from './git-update.js';
+import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh } from './architecture-store.js';
+import { generateDependencyMap, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
+import { budgetDecision, estimateMessagesTokens } from './context-budget.js';
+import { compressContext, assertLongTermDocsFirst } from './context-compressor.js';
+import { assertNotProgress, assertReasonValid, assertSelfCheckFresh } from './pattern-gate.js';
 import { createGoalEngine } from './goal-engine.js';
 import { createBuiltinGoals } from './goals.js';
 import { createWorkflowRegistry, expandHome, BUILTIN_WORKFLOW_DIR } from './workflows.js';
-import { createProjectExperienceStore, defaultProjectExperienceDir } from './project-experience.js';
 import {
   createDynamicPlan,
   extractEntryFields,
@@ -43,6 +53,7 @@ import {
   classifyCommand,
   extractCommandVerbs,
   isAlwaysAllowedBash,
+  isGitMutation,
   matchBashDeny,
   normalizeDenyList,
   undeclaredBashVerbs,
@@ -396,10 +407,30 @@ export default {
         : join(homedir(), '.dsh', 'preset-actions'),
     );
     const defaultWorkspace = dirname(resolve(featureIntentDir));
-    const projectExperienceDir = expandHome(
-      typeof cfg.projectExperienceDir === 'string' && cfg.projectExperienceDir.trim()
-        ? cfg.projectExperienceDir.trim()
-        : (defaultProjectExperienceDir(featureIntentDir)),
+    const featureListDir = expandHome(
+      typeof cfg.featureListDir === 'string' && cfg.featureListDir.trim()
+        ? cfg.featureListDir.trim()
+        : defaultFeatureListDir(featureIntentDir),
+    );
+    const patternDir = expandHome(
+      typeof cfg.patternDir === 'string' && cfg.patternDir.trim()
+        ? cfg.patternDir.trim()
+        : defaultPatternDir(featureIntentDir),
+    );
+    const journalDir = expandHome(
+      typeof cfg.journalDir === 'string' && cfg.journalDir.trim()
+        ? cfg.journalDir.trim()
+        : defaultJournalDir(featureIntentDir),
+    );
+    const historyDir = expandHome(
+      typeof cfg.historyDir === 'string' && cfg.historyDir.trim()
+        ? cfg.historyDir.trim()
+        : defaultHistoryDir(featureIntentDir),
+    );
+    const architecturePath = expandHome(
+      typeof cfg.architecturePath === 'string' && cfg.architecturePath.trim()
+        ? cfg.architecturePath.trim()
+        : defaultArchitecturePath(featureIntentDir),
     );
     const globalWorkflowDir = expandHome(
       typeof cfg.workflowsDir === 'string' && cfg.workflowsDir.trim()
@@ -408,7 +439,11 @@ export default {
     );
 
     const featureIntents = createFeatureIntentStore(featureIntentDir);
-    const projectExperience = createProjectExperienceStore(projectExperienceDir);
+    const featureList = createFeatureListStore(featureListDir);
+    const patternStore = createPatternStore(patternDir);
+    const journal = createJournalStore(journalDir);
+    const history = createHistoryStore(historyDir);
+    const architecture = createArchitectureStore(architecturePath);
     const workflowRegistry = createWorkflowRegistry({
       builtinDir: BUILTIN_WORKFLOW_DIR,
       globalDir: globalWorkflowDir,
@@ -497,22 +532,32 @@ export default {
       }
     }
 
+    // ── git update skill（checklist-15）──────────────────────────────────
+    // Agent 禁止直接执行 git 修改命令；每轮更新由本 skill 指导调用
+    // git_commit 工具完成 add -A + commit + push，并输出可审计 update。
     try {
       ctx.skills.register({
-        name: 'project-experience',
-        description: '一次性读取项目 project-experience 的系统拓扑、血泪法则、核心状态树。',
+        name: 'mode-gate-git-commit',
+        description: 'Git 更新 skill：每轮改动通过 git_commit 工具完成 commit + push，输出可审计 update，commit hash 自动进入功能列表；Agent 禁止直接执行 git 修改命令。',
         source: 'mode-gate',
-        invocation: { modelInvocable: true, userInvocable: true },
+        invocation: { modelInvocable: true, userInvocable: false },
         content: [
-          '# project-experience',
+          '# mode-gate-git-commit',
           '',
-          '调用 `read_project_experience` 工具一次性获取当前项目的 intro / 系统拓扑 / 血泪法则 / 核心状态树。',
-          '省略 `project` 参数时会自动选择唯一项目，或在多个项目时列出候选。',
+          '每轮更新结束时，用 git_commit 工具提交并推送本轮改动。',
+          '',
+          '规则：',
+          '- 不要直接执行 git add / commit / push / rm / mv / reset / clean 等修改命令，模式门禁会拒绝。',
+          '- 调用 git_commit 工具（可选 message，省略时由工具按当前 feature 与 checklist goal 自动生成）。',
+          '- 工具会执行 git add -A、git commit、git push，并返回可审计 update（commit hash、分支、message、push 结果）。',
+          '- commit hash 会自动写入功能列表 features/<feature-id>.md 与 features.md 索引行。',
+          '- 把工具返回的 update 原样呈现给用户。',
         ].join('\n'),
       });
     } catch (err) {
-      log(`注册 project-experience skill 失败：${(err && err.message) || err}`);
+      log(`注册 git skill 失败：${(err && err.message) || err}`);
     }
+
 
     // ── goal engine ──────────────────────────────────────────────────────
     const goalEngine = createGoalEngine({ goals: createBuiltinGoals(), log });
@@ -520,7 +565,11 @@ export default {
     function envFor(agent, state) {
       return {
         featureIntents,
-        projectExperience,
+        featureList,
+        patternStore,
+        journal,
+        history,
+        architecture,
         presetActionSkills,
         registry: registryFor(agent),
         workspace: workspaceOf(agent, defaultWorkspace),
@@ -801,11 +850,20 @@ export default {
       const stateDef = registry.stateOf(state.workflowId, state.phase);
       const wf = registry.get(state.workflowId);
       const signal = rawResult.signal || {};
+      // checklist-11/12：每次阶段转移都按硬编码预算表判定，并计算压缩边界。
+      // 只有「超预算 且 当前阶段是迭代边界」才把 overBudget=true 注入 transitions，
+      // 因此 RESEARCH→EXECUTE / EXECUTE→DEBUG 等迭代内部即使超预算也绝不会压缩；
+      // DEBUG→下一轮 RESEARCH（或结束）才允许压缩，由 transitions 的 context.overBudget 决定。
+      const contextBudget = budgetDecision({
+        workflowId: state.workflowId,
+        stateId: state.phase,
+        contextTokens: state.contextUsage && state.contextUsage.tokens,
+      });
       const { nextWorkflow, nextState, loopIncrement, complete } = resolveTransition({
         state,
         stateDef,
         workflowDef: wf,
-        signal,
+        signal: { ...signal, overBudget: contextBudget.compressionAllowed },
       });
       if (loopIncrement) {
         const memory = state.loopMemory || { iteration: 0, blocks: [], updatedAt: 0 };
@@ -822,12 +880,18 @@ export default {
         goal: null,
         pendingProtocol: null,
         dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
+        contextBudget: {
+          ...contextBudget,
+          from: `${state.workflowId}/${state.phase}`,
+          to: `${nextWorkflow}/${nextState}`,
+          decidedAt: Date.now(),
+        },
       });
       return activateStateGoal(agent, nextWorkflow, nextState);
     }
 
     async function buildPendingProtocolDisplay(agent, parsed) {
-      let fields = { userWords: '', understanding: '', checklist: [] };
+      let fields = { userWords: '', understanding: '', userVisibleBehavior: '', featureIntent: '', checklist: [] };
       try {
         const file = await featureIntents.get(parsed.featureIntentFile);
         fields = extractEntryFields(latestEntry(file.content));
@@ -839,6 +903,8 @@ export default {
         featureIntentFile: parsed.featureIntentFile,
         userWords: fields.userWords,
         understanding: fields.understanding,
+        userVisibleBehavior: fields.userVisibleBehavior,
+        featureIntent: fields.featureIntent,
         checklist: fields.checklist,
       };
     }
@@ -855,6 +921,20 @@ export default {
       const { result, parsed } = submitted;
       if (toolName === 'submit_requirement_protocol') {
         const display = await buildPendingProtocolDisplay(agent, parsed);
+        // checklist-16：feature intent 提交时自动整理历史对话到冷库。
+        // 失败只记日志，不阻塞协议提交。
+        try {
+          history.append(parsed.featureIntentFile, {
+            summary: parsed.summary,
+            userWords: display.userWords,
+            understanding: display.understanding,
+            userVisibleBehavior: display.userVisibleBehavior,
+            featureIntent: display.featureIntent,
+            checklist: display.checklist,
+          });
+        } catch (err) {
+          log(`历史对话自动整理失败：${(err && err.message) || err}`);
+        }
         writeState(agent, {
           goal: null,
           pendingProtocol: {
@@ -871,7 +951,10 @@ export default {
       }
       await completeGoal(agent, result);
       const after = readState(agent);
-      if (toolName === 'submit_state' && (before.phase === 'ACCUMULATION' || (before.workflowId === 'rough' && before.phase === 'IMPLEMENT'))) {
+      if (toolName === 'submit_state' && (
+        (before.workflowId === 'create' && (before.phase === 'DEBUG' || before.phase === 'ACCUMULATION'))
+        || (before.workflowId === 'rough' && before.phase === 'IMPLEMENT')
+      )) {
         syncStaticPlanToDshTodos(agent, after);
       }
       return result;
@@ -937,6 +1020,13 @@ export default {
     function bashDecision(command, stateDef, state) {
       const deny = matchBashDeny(command, readBashDenyList());
       if (deny) return { kind: 'deny', reason: deny.reason || `命令 ${deny.commands.join('/')} 已被禁止。` };
+      // checklist-15：Agent 禁止直接执行 git 修改命令；每轮更新走 git_commit 工具。
+      if (isGitMutation(command)) {
+        return {
+          kind: 'deny',
+          reason: 'Agent 禁止直接执行 git 修改命令（如 add/commit/push/rm/mv/reset/clean/merge/rebase/checkout 等）。每轮更新请使用 git_commit 工具（由 mode-gate-git-commit skill 提供）完成 commit + push。',
+        };
+      }
       const policy = (stateDef && stateDef.permissions && stateDef.permissions.bash) || 'declared';
       if (policy === 'none') {
         const requirementRecognition = Boolean(stateDef && stateDef.id === 'REQUIREMENT_RECOGNITION');
@@ -1002,7 +1092,8 @@ export default {
         '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请。',
         '- 始终可用：skill_search、switch_mode、dev_tool_search / request_extra、submit_state。',
         '当前禁止的 bash 命令：',
-        denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`).join('\n') : '  （无）',
+        ...(denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`) : ['  （无）']),
+        '  - git 修改命令（add/commit/push/rm/mv/reset/clean/merge/rebase/checkout 等）：Agent 禁止直接执行，请使用 git_commit 工具（mode-gate-git-commit skill）完成 commit + push。',
       ];
       if (awaitingUser) {
         lines.push('', '当前有需求协议正在等待用户确认。请停止工具调用，等待用户在“工作流”界面点击“接受”，或发送消息以修改需求。');
@@ -1048,6 +1139,23 @@ export default {
       name: 'mode-gate:policy',
       order: 95,
       text: (assembleCtx) => buildModeGatePolicyText(assembleCtx && assembleCtx.agent),
+    });
+
+    /**
+     * architecture.md 作为**常驻 limited prompt** 独立注入：
+     * 走 limitedDigest() 硬截断，内容超预算也不会影响上下文大小。
+     */
+    ctx.systemPrompt.context({
+      name: 'mode-gate:architecture',
+      order: 96,
+      text: () => {
+        try {
+          return architecture.prompt();
+        } catch (err) {
+          log(`architecture limited prompt 读取失败：${(err && err.message) || err}`);
+          return '';
+        }
+      },
     });
 
     async function modeGateContextDelivered(agent) {
@@ -1314,13 +1422,15 @@ export default {
 
     ctx.tools.register(defineTool({
       name: 'update_feature_intent',
-      description: '向 feature intent 追加一条记录。用户原话由系统自动收集，Agent 只需提供 Agent 理解与可验收 checklist。文件新建时会自动创建 project-experience 文件夹与 intro。',
+      description: '向 feature intent 追加一条记录。用户原话由系统自动收集，Agent 需提供 Agent 理解、用户可见行为、功能意图与可验收 checklist。',
       parameters: {
         name: { type: 'string', required: true, description: 'feature intent 文件名（不带目录，可选 .md 后缀）。' },
         user_words: { type: 'string', description: '已废弃：用户原话由系统自动收集，传入也会被自动收集值覆盖。' },
         understanding: { type: 'string', required: true, description: 'Agent 对需求的理解与拆解。' },
+        user_visible_behavior: { type: 'string', required: true, description: '用户在新工作流下如何工作/如何感知本次改动（展示字段）。' },
+        feature_intent: { type: 'string', required: true, description: '对本次功能修改意图的展示描述（展示字段）。' },
         checklist: { type: 'array', items: { type: 'string' }, required: true, description: '可验收节点，例如「按钮在 xx 处出现」。' },
-        project_overview: { type: 'string', description: '仅当文件不存在时必填：项目概述，同时写入 project-experience/intro.md。' },
+        project_overview: { type: 'string', description: '仅当文件不存在时必填：项目概述，会写入 feature intent 文件的 Project Overview 段。' },
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
@@ -1332,22 +1442,445 @@ export default {
         if (!userWords) {
           throw new Error('未能自动收集到用户原话；请确认会话中已存在本次工作流的用户输入。');
         }
+        const userVisibleBehavior = typeof args.user_visible_behavior === 'string' ? args.user_visible_behavior.trim() : '';
+        if (!userVisibleBehavior) throw new Error('user_visible_behavior 不能为空。');
+        const featureIntent = typeof args.feature_intent === 'string' ? args.feature_intent.trim() : '';
+        if (!featureIntent) throw new Error('feature_intent 不能为空。');
         const result = featureIntents.append(
           args.name,
-          { userWords, understanding: args.understanding, checklist },
+          { userWords, understanding: args.understanding, userVisibleBehavior, featureIntent, checklist },
           args.project_overview,
         );
-        let project = null;
-        if (result.created) {
-          project = projectExperience.ensureProject(result.name, args.project_overview);
+        return JSON.stringify({ ok: true, ...result, message: `已追加到 ${result.file}${result.created ? '（新建文件）' : ''}` }, null, 2);
+      },
+    }));
+
+    // ── behavior-pattern self-check（专用自查 skill）──────────────────────
+    // 写入行为模式前必须先提交 reason 完成「这是否是用户强调/纠正过的模式」自查。
+    // reason 只存在 state 里用于审计，绝不写入 patterns 目标文件。
+    const MAX_PATTERNS_PER_ROUND = 3;
+    ctx.tools.register(defineTool({
+      name: 'pattern_reason',
+      description: '行为模式写入前的专用自查。必填 reason，说明本轮要写的模式为何是用户强调或纠正过的模式。reason 只用于审计，不写入任何行为模式文件。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件名。' },
+        reason: { type: 'string', required: true, description: '自查结论：为什么这是用户强调/纠正过的模式（4-200 字）。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile || '';
+        const reason = assertReasonValid(args.reason);
+        const goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
+        writeState(agent, {
+          patternSelfCheck: {
+            reason,
+            project,
+            goalId: goal ? goal.id : null,
+            goalStartedAt: goal ? goal.startedAt : null,
+            at: Date.now(),
+          },
+        });
+        return JSON.stringify(
+          {
+            ok: true,
+            project,
+            message: '自查已记录（reason 不会写入行为模式文件）。现在可以调用 pattern_write；没有值得复用的模式时传 skip=true。',
+          },
+          null,
+          2,
+        );
+      },
+    }));
+
+    // ── journal（冷层）：进展流水的落点 ───────────────────────────────────
+    ctx.tools.register(defineTool({
+      name: 'journal_append',
+      description: '把进展流水写入 journal 冷层（不进入 hot 上下文）。行为模式拒绝进展流水时会指向这里。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件名。' },
+        text: { type: 'string', required: true, description: '进展内容。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const state = readState(exec.agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile || '';
+        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
+        const text = typeof args.text === 'string' ? args.text.trim() : '';
+        if (!text) throw new Error('journal 内容不能为空。');
+        const result = journal.append(project, text);
+        return JSON.stringify({ ok: true, ...result }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'pattern_write',
+      description: '两步写入行为模式。第一步 step=facts 必填 trigger/wrong/right，返回 pattern_id；第二步 step=rationale 必填 pattern_id/why/evidence，自动附加到同一条规则明细。skip=true 表示本轮没有值得写入的模式。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件名。' },
+        skip: { type: 'boolean', description: '本轮没有值得写入的模式时传 true。' },
+        step: { type: 'string', enum: ['facts', 'rationale'], description: '第一步 facts，第二步 rationale；默认 facts。' },
+        pattern_id: { type: 'string', description: '第一步返回的 pattern id；第二步必填。' },
+        body: { type: 'string', description: '热文件行摘要，≤20 字；省略时用「trigger → right」，超长会被拒绝。' },
+        trigger: { type: 'string', description: '触发条件。' },
+        wrong: { type: 'string', description: '错误做法。' },
+        right: { type: 'string', description: '正确做法。' },
+        why: { type: 'string', description: '为什么。' },
+        evidence: { type: 'string', description: '证据。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
+        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
+        const step = args.step === 'rationale' ? 'rationale' : 'facts';
+        // 写入前自查门禁：必须是本 goal 激活期内提交过 pattern_reason。
+        const goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
+        assertSelfCheckFresh(state.patternSelfCheck, goal);
+        if (args.skip === true) {
+          return JSON.stringify({ ok: true, project, skipped: true, written: 0 }, null, 2);
         }
-        return JSON.stringify({ ok: true, ...result, project: project ? project.name : null, message: `已追加到 ${result.file}${result.created ? '（新建文件）' : ''}` }, null, 2);
+        if (step === 'rationale') {
+          const patternId = typeof args.pattern_id === 'string' ? args.pattern_id.trim() : '';
+          if (!patternId) throw new Error('第二步必须提供 pattern_id（第一步返回的 id）。');
+          const result = patternStore.addRationale(project, patternId, { why: args.why, evidence: args.evidence });
+          return JSON.stringify({ ok: true, project, ...result }, null, 2);
+        }
+        // 进展流水不得进入行为模式热层：命中 marker 即拒绝并指向 journal。
+        assertNotProgress({ body: args.body, trigger: args.trigger, wrong: args.wrong, right: args.right }, journal.filePath(project));
+        // 热文件预算：单次（本轮 ACCUMULATE）最多写入 3 行。
+        const startedAt = goal ? goal.startedAt : null;
+        const round = state.patternRound && state.patternRound.goalStartedAt === startedAt
+          ? state.patternRound
+          : { goalStartedAt: startedAt, ids: [] };
+        if (round.ids.length >= MAX_PATTERNS_PER_ROUND) {
+          throw new Error(
+            `单次最多写入 ${MAX_PATTERNS_PER_ROUND} 行行为模式（本轮已写入 ${round.ids.length} 条）。` +
+              '请只保留最值得复用的，其余改写入 journal 或留到下一轮。',
+          );
+        }
+        const result = patternStore.addRule(project, {
+          trigger: args.trigger,
+          wrong: args.wrong,
+          right: args.right,
+          body: args.body,
+        });
+        writeState(agent, { patternRound: { goalStartedAt: startedAt, ids: [...round.ids, result.id] } });
+        return JSON.stringify({ ok: true, project, ...result, roundWritten: round.ids.length + 1 }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'pattern_overwrite',
+      description: '覆盖行为模式：清除过期规则行。mode=retire（默认）只把过期行移出热文件，明细保留并标记 retired；mode=replace 同时写入一条完整的新规则并互相留引用。必填 reason 作为可审计的变更说明；所有变更写入 audit 冷文件。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件名。' },
+        pattern_id: { type: 'string', required: true, description: '要覆盖的规则 id，例如 P001。' },
+        reason: { type: 'string', required: true, description: '为什么覆盖/清除这条规则（可审计的变更说明）。' },
+        mode: { type: 'string', enum: ['retire', 'replace'], description: 'retire 只清除；replace 清除并写入新规则（需同时提供完整五字段）。' },
+        body: { type: 'string', description: 'replace 时新规则的热文件行摘要，≤20 字。' },
+        trigger: { type: 'string', description: 'replace 时新规则的触发条件。' },
+        wrong: { type: 'string', description: 'replace 时新规则的错误做法。' },
+        right: { type: 'string', description: 'replace 时新规则的正确做法。' },
+        why: { type: 'string', description: 'replace 时新规则的 why。' },
+        evidence: { type: 'string', description: 'replace 时新规则的 evidence。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const state = readState(exec.agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
+        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
+        const patternId = typeof args.pattern_id === 'string' ? args.pattern_id.trim() : '';
+        if (!patternId) throw new Error('覆盖必须提供 pattern_id。');
+        const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+        if (!reason) throw new Error('覆盖必须提供 reason，作为可审计的变更说明。');
+        if (args.mode === 'replace') {
+          assertNotProgress({ body: args.body, trigger: args.trigger, wrong: args.wrong, right: args.right }, journal.filePath(project));
+          const result = patternStore.replace(project, patternId, {
+            trigger: args.trigger,
+            wrong: args.wrong,
+            right: args.right,
+            body: args.body,
+            why: args.why,
+            evidence: args.evidence,
+            reason,
+          });
+          return JSON.stringify({ ok: true, project, mode: 'replace', ...result }, null, 2);
+        }
+        const result = patternStore.retire(project, patternId, { reason });
+        return JSON.stringify({ ok: true, project, mode: 'retire', ...result }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'pattern_audit',
+      description: '查看行为模式的变更记录（audit 冷文件）：create / rationale / retire / replace 的完整流水。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件名。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const state = readState(exec.agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
+        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
+        const text = patternStore.readAudit(project);
+        return text || `（${project} 暂无变更记录）`;
+      },
+    }));
+
+    // ── architecture（结构层）写入：专用 reason 自查 + 有界写入 ────────────
+    // 与行为模式同构：先 architecture_reason 完成必要性自查，再 architecture_write。
+    // reason 只存 state 与 architecture.audit.md，绝不写入 architecture.md。
+    ctx.tools.register(defineTool({
+      name: 'architecture_reason',
+      description: '写入 architecture.md 前的专用必要性自查。必填 reason，说明本轮为何要沉淀/修改某条稳定结构事实。reason 只用于门禁与审计，不写入 architecture.md。',
+      parameters: {
+        reason: { type: 'string', required: true, description: '自查结论：为什么这是值得长期沉淀的稳定结构事实（4-200 字，不能是进展流水）。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const reason = assertArchitectureReason(args.reason);
+        const goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
+        writeState(agent, {
+          architectureSelfCheck: {
+            reason,
+            goalId: goal ? goal.id : null,
+            goalStartedAt: goal ? goal.startedAt : null,
+            at: Date.now(),
+          },
+        });
+        return JSON.stringify(
+          {
+            ok: true,
+            message: '必要性自查已记录（reason 不会写入 architecture.md）。确认确有稳定结构事实后再调用 architecture_write；没有结构变化时无需调用写入。',
+          },
+          null,
+          2,
+        );
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'architecture_write',
+      description: '写入 architecture.md。必须先在本 goal 激活期调用 architecture_reason 提交 reason，否则拒绝。mode=section 只更新一个结构 section（推荐），mode=replace 整篇替换。写入前校验 ≤120 行/约 1000 tokens 且不混入进展流水；reason 只写 audit，不写文档。',
+      parameters: {
+        mode: { type: 'string', enum: ['section', 'replace'], description: 'section（默认）更新单节；replace 整篇替换。' },
+        section: { type: 'string', description: 'mode=section 时要 upsert 的 section（id 或中文标题，如 modules / 模块职责）。' },
+        content: { type: 'string', required: true, description: 'mode=section 时为该节正文；mode=replace 时为整篇 architecture.md 内容。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
+        assertArchitectureSelfCheckFresh(state.architectureSelfCheck, goal);
+        const reason = state.architectureSelfCheck.reason;
+        if (args.mode === 'replace') {
+          const result = architecture.write(args.content, { reason, action: 'replace' });
+          return JSON.stringify({ ok: true, mode: 'replace', ...result, note: 'reason 已写入 audit，未写入 architecture.md。' }, null, 2);
+        }
+        const result = architecture.writeSection(args.section, args.content, { reason });
+        return JSON.stringify({ ok: true, mode: 'section', section: args.section, ...result, note: 'reason 已写入 audit，未写入 architecture.md。' }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'architecture_audit',
+      description: '查看 architecture.md 的变更记录（audit 冷文件）：每次写入的时间、行数/tokens 与 reason。',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute() {
+        const text = architecture.readAudit();
+        return text || '（architecture.md 暂无变更记录）';
+      },
+    }));
+
+    // ── 按需轻量依赖图（代码导航）────────────────────────────────────────
+    // 不常驻注入；只在调用时生成，单次输出硬上限 1024 tokens。
+    ctx.tools.register(defineTool({
+      name: 'dependency_map',
+      description: `按需生成轻量代码依赖图（源码相对 import/require 关系），用于代码导航；单次输出硬上限 ${MAX_DEPENDENCY_TOKENS} tokens，超预算自动截断并提示用 focus 收窄。`,
+      parameters: {
+        root: { type: 'string', description: '相对 workspace 的扫描根目录；省略时扫描整个 workspace。' },
+        focus: { type: 'string', description: '只看与某个路径/模块相关的子图（命中文件及其 1 跳邻居）。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const workspace = workspaceOf(exec.agent, defaultWorkspace);
+        const requested = typeof args.root === 'string' && args.root.trim() ? args.root.trim() : '.';
+        const root = resolve(workspace, requested);
+        const result = generateDependencyMap(root, {
+          focus: args.focus,
+          maxTokens: MAX_DEPENDENCY_TOKENS,
+        });
+        return result.text;
+      },
+    }));
+
+    // ── 上下文压缩（ACCUMULATE 收尾动作）────────────────────────────────
+    // 顺序门禁：必须先完成长期文档整理（pattern_reason + pattern_write）才允许压缩。
+    // 压缩 hot loopMemory，并尽力压缩 harness 旧会话；结果写入 state.compression。
+    ctx.tools.register(defineTool({
+      name: 'compress_context',
+      description: 'ACCUMULATE 的上下文压缩（专用）。必须先完成长期文档整理（pattern_reason + pattern_write）才能调用。压缩后引擎会进入 INIT。',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(_args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        assertLongTermDocsFirst((state.goal && state.goal.calls) || {});
+        const result = await compressContext(agent, ctx, state);
+        writeState(agent, { loopMemory: result.loopMemory, compression: result.compression });
+        return JSON.stringify({ ok: true, ...result.compression, message: '上下文压缩完成，可以 submit_state 进入 INIT。' }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'update_feature_list',
+      description: '更新功能列表总体条目：写入 user_visible_behavior 与 feature_intent，并把 status 置为 in_progress（再次更新意味着该功能进入新一轮工作，已 done 的功能会被重新打开）。commit 由系统自动生成，done 只能由 finish_feature 设置。',
+      parameters: {
+        feature_id: { type: 'string', description: 'feature id；省略时使用当前 feature intent 文件名。' },
+        title: { type: 'string', description: 'feature 标题。' },
+        module: { type: 'string', description: 'feature 所属模块。' },
+        user_visible_behavior: { type: 'string', required: true, description: '总体用户可见行为，不超过 500 字。' },
+        feature_intent: { type: 'string', required: true, description: '总体功能意图，不超过 50 字。' },
+        status: { type: 'string', enum: ['in_progress'], description: '功能状态；只能置为 in_progress，done 必须走 finish_feature。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile;
+        if (!featureId) throw new Error('无法确定 feature id：请传 feature_id，或先完成 feature intent 记录。');
+        // 字段级校验统一由 feature-list-store 负责（任何写入路径都受同一约束）。
+        const result = featureList.upsert({
+          id: featureId,
+          title: args.title,
+          module: args.module,
+          status: 'in_progress',
+          userVisibleBehavior: args.user_visible_behavior,
+          featureIntent: args.feature_intent,
+        });
+        return JSON.stringify({ ok: true, ...result }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'finish_feature',
+      description: '完成一个功能：必须提供真实证据（例如验证命令与结果）。系统会置 status=done、记录完成时间，并自动读取当前 HEAD 的 commit hash 写入功能列表。',
+      parameters: {
+        feature_id: { type: 'string', description: 'feature id；省略时使用当前 feature intent 文件名。' },
+        evidence: { type: 'string', required: true, description: '真实证据，例如验证命令、测试输出或可核对的结论。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile;
+        if (!featureId) throw new Error('无法确定 feature id：请传 feature_id，或先完成 feature intent 记录。');
+        const workspace = workspaceOf(agent, defaultWorkspace);
+        const commit = readHeadCommit(workspace);
+        const result = featureList.finish(featureId, { evidence: args.evidence, commit });
+        return JSON.stringify(
+          {
+            ok: true,
+            ...result,
+            commitAutoFilled: Boolean(commit),
+            note: commit
+              ? 'commit hash 已自动读取当前 HEAD 写入功能列表。'
+              : '当前工作区未取到 HEAD commit；checklist-15 的 git skill 完成 commit+push 后会用 setCommit 回填。',
+          },
+          null,
+          2,
+        );
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'git_commit',
+      description: 'Git 更新（checklist-15）：每轮更新用本工具完成 git add -A + commit + push，输出可审计 update，并把 commit hash 自动写入功能列表。Agent 不要直接执行 git 修改命令。',
+      parameters: {
+        message: { type: 'string', description: 'commit message；省略时按当前 feature 与 checklist goal 自动生成。' },
+        feature_id: { type: 'string', description: '要回填 commit 的 feature id；省略时使用当前 feature intent 文件名。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const agent = exec.agent;
+        const state = readState(agent);
+        const workspace = workspaceOf(agent, defaultWorkspace);
+        const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile || '';
+        let message = typeof args.message === 'string' ? args.message.trim() : '';
+        if (message && message.length > 200) throw new Error('commit message 不能超过 200 字。');
+        if (!message) {
+          const item = staticPlanCurrent(state.staticPlan);
+          const feature = featureId || 'update';
+          const goalText = item ? `${item.id} ${item.text}` : 'update';
+          message = `mode-gate(${feature}): ${goalText}`.slice(0, 140);
+        }
+        const update = runGitUpdate(workspace, message);
+        if (update.skipped) {
+          return JSON.stringify(
+            { ok: true, ...update, update: `[mode-gate git update] ${update.note || update.reason || '跳过 git update'}` },
+            null,
+            2,
+          );
+        }
+        let featureNote = '';
+        if (featureId) {
+          try {
+            const feature = featureList.setCommit(featureId, update.commit);
+            featureNote = `commit hash 已自动写入功能列表 ${feature.id}（索引行与详情）。`;
+          } catch (err) {
+            featureNote = `commit hash 未写入功能列表：${(err && err.message) || err}`;
+          }
+        } else {
+          featureNote = '无法确定 feature id，commit hash 未写入功能列表。';
+        }
+        const updateText = [
+          '[mode-gate git update]',
+          `commit: ${update.commit}`,
+          `branch: ${update.branch}`,
+          `message: ${update.message || '（无新提交，已推送现有提交）'}`,
+          `pushed: ${update.pushed}`,
+          featureNote,
+        ].join('\n');
+        return JSON.stringify({ ok: true, ...update, featureId, featureNote, update: updateText }, null, 2);
+      },
+    }));
+
+    ctx.tools.register(defineTool({
+      name: 'get_feature',
+      description: '独立查看入口：按 feature id 返回索引行与完整详情（user_visible_behavior / feature_intent / 完成证据等）。',
+      parameters: {
+        feature_id: { type: 'string', description: 'feature id；省略时使用当前 feature intent 文件名。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const state = readState(exec.agent);
+        const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile;
+        if (!featureId) throw new Error('无法确定 feature id：请传 feature_id，或先完成 feature intent 记录。');
+        const detail = featureList.get(featureId);
+        if (!detail) throw new Error(`feature "${featureId}" 不存在（可在 features.md 索引里查看已有 id）。`);
+        const row = featureList.list().find((entry) => entry.id === detail.id);
+        return [
+          `# feature ${detail.id}`,
+          '',
+          '## 索引行',
+          row ? `| ${row.id} | ${row.title} | ${row.module} | ${row.status} | ${row.commit} |` : '（索引中暂无此 id）',
+          '',
+          '## 详情',
+          readFileSync(detail.path, 'utf8'),
+        ].join('\n');
       },
     }));
 
     ctx.tools.register(defineTool({
       name: 'submit_requirement_protocol',
-      description: '提交需求识别协议。提交后会在“工作流”界面等待用户确认：接受则进入 RESEARCH，发送任意消息则视为拒绝并继续修改需求。',
+      description: '提交需求识别协议。提交后会在“工作流”界面等待用户确认：接受则进入功能列表更新，随后经 INIT 初始化本轮上下文再进入 RESEARCH；发送任意消息则视为拒绝并继续修改需求。',
       parameters: {
         protocol: { type: 'string', required: true, description: '固定为 requirement-recognition。' },
         version: { type: 'number', required: true, description: '固定为 1。' },
@@ -1377,59 +1910,6 @@ export default {
           staticPlan: state.staticPlan,
           ...(result.prompt ? { prompt: result.prompt } : {}),
         }, null, 2);
-      },
-    }));
-
-    ctx.tools.register(defineTool({
-      name: 'read_project_experience',
-      description: '一次性读取 project-experience：intro、系统拓扑、血泪法则、核心状态树。省略 project 时自动选择唯一项目或列出候选。',
-      parameters: {
-        project: { type: 'string', description: '项目文件夹名，通常与 feature intent 同名。' },
-      },
-      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute(args) {
-        const requested = typeof args.project === 'string' && args.project.trim() ? args.project.trim() : '';
-        let project = requested;
-        if (!project) {
-          const projects = projectExperience.listProjects();
-          if (projects.length === 0) {
-            return JSON.stringify({ ok: false, error: `project-experience 目录为空：${projectExperience.root}。请先创建 feature intent 记录。` }, null, 2);
-          }
-          if (projects.length > 1) {
-            return JSON.stringify({ ok: false, projects: projects.map((p) => p.project), hint: '存在多个项目，请指定 project 参数。' }, null, 2);
-          }
-          project = projects[0].project;
-        }
-        let result;
-        try {
-          result = projectExperience.readProject(project);
-        } catch (err) {
-          return JSON.stringify({ ok: false, error: (err && err.message) || String(err) }, null, 2);
-        }
-        return JSON.stringify({ ok: true, ...result, dir: result.dir, files: result.files }, null, 2);
-      },
-    }));
-
-    ctx.tools.register(defineTool({
-      name: 'update_project_experience',
-      description: '写入 project-experience。append 直接写入；overwrite / diff 会作为申请提交给用户批准。',
-      parameters: {
-        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件同名项目。' },
-        file: { type: 'string', required: true, description: 'intro / mapOfContent / antiPatterns / coreStateTree（或文件名）。' },
-        mode: { type: 'string', enum: ['append', 'overwrite', 'diff'], required: true, description: '写入模式。' },
-        content: { type: 'string', required: true, description: '要写入的内容。' },
-        reason: { type: 'string', description: 'overwrite/diff 时说明修改理由。' },
-      },
-      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute(args, exec) {
-        const agent = exec.agent;
-        const state = readState(agent);
-        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
-        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
-        if (args.mode === 'append') {
-          return JSON.stringify({ ok: true, ...projectExperience.append(project, args.file, args.content) }, null, 2);
-        }
-        return JSON.stringify({ ok: true, ...projectExperience.overwrite(project, args.file, args.content) }, null, 2);
       },
     }));
 
@@ -1495,24 +1975,6 @@ export default {
           kind: 'deny',
           reason: 'feature_intent 文件禁止直接修改。请使用 update_feature_intent 工具在文件末尾追加记录。',
         });
-      }
-
-      if (name === 'update_project_experience') {
-        const mode = exec.arguments && exec.arguments.mode;
-        if (mode === 'overwrite' || mode === 'diff') {
-          let summary = '';
-          try {
-            const project = (exec.arguments.project && exec.arguments.project.trim()) || state.featureIntentFile;
-            if (project) {
-              const d = projectExperience.diff(project, exec.arguments.file, exec.arguments.content);
-              summary = `（将删除约 ${d.removed} 行、新增约 ${d.added} 行）`;
-            }
-          } catch (_err) { /* preview is best-effort */ }
-          return Promise.resolve({
-            kind: 'ask',
-            reason: `是否允许 ${mode} 修改 project-experience/${exec.arguments.file}？${summary}${exec.arguments.reason ? `原因：${exec.arguments.reason}` : ''}`,
-          });
-        }
       }
 
       if (!stateDef || state.workflowId === IDLE_WORKFLOW_ID) {
@@ -1596,12 +2058,7 @@ export default {
 
         const def = goalEngine.defFor(state);
         if (!def) return decision;
-        // Only read_project_experience counts a failed call as a valid attempt
-        // (empty project-experience must still allow BASE_READ to submit_state).
-        // Other required calls (todo_write, update_feature_intent, ...) must
-        // actually succeed before submit_state will accept them.
-        const countErrorCall = name === 'read_project_experience';
-        if (!(result && result.isError === true) || countErrorCall) {
+        if (!(result && result.isError === true)) {
           const beforeCount = (state.goal && state.goal.toolCount) || 0;
           const recorded = goalEngine.recordCall(state, name);
           if (recorded !== state) {
@@ -1658,6 +2115,19 @@ export default {
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
           let state = readState(agent);
+          // checklist-11：记录本次请求的上下文规模估算，供阶段转移时的硬编码预算判定使用。
+          const requestMessages = Array.isArray(_payload && _payload.messages) ? _payload.messages : [];
+          if (requestMessages.length > 0) {
+            const contextTokens = estimateMessagesTokens(requestMessages);
+            writeState(agent, {
+              contextUsage: {
+                tokens: contextTokens,
+                at: Date.now(),
+                workflowId: state.workflowId,
+                stateId: state.phase,
+              },
+            });
+          }
           // Safety net for the feature-intent approval gate: a new user message
           // while the protocol is awaiting user confirmation rejects it and
           // re-activates REQUIREMENT_RECOGNITION so the agent can revise.

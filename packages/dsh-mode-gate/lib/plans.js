@@ -30,7 +30,7 @@ export function parseChecklist(markdown) {
   return items;
 }
 
-/** Extract the three feature-intent fields from one appended entry. */
+/** Extract the feature-intent fields from one appended entry. */
 export function extractEntryFields(entry) {
   const text = String(entry || '');
   const section = (name) => {
@@ -43,17 +43,21 @@ export function extractEntryFields(entry) {
   };
   const userWords = section('用户原话') || section('user words') || section('用户原话记录');
   const understanding = section('Agent 理解') || section('理解') || section('agent understanding');
+  const userVisibleBehavior = section('用户可见行为') || section('user visible behavior') || section('user_visible_behavior');
+  const featureIntent = section('功能意图') || section('feature intent') || section('feature_intent');
   const checklistText = section('Checklist') || section('checklist') || section('计划列表');
   const checklist = parseChecklist(`## Checklist\n${checklistText}`);
-  return { userWords, understanding, checklist };
+  return { userWords, understanding, userVisibleBehavior, featureIntent, checklist };
 }
 
 /** Build the markdown written by update_feature_intent. */
-export function buildEntryMarkdown({ userWords, understanding, checklist }) {
+export function buildEntryMarkdown({ userWords, understanding, userVisibleBehavior, featureIntent, checklist }) {
   const items = Array.isArray(checklist) ? checklist.filter((item) => typeof item === 'string' && item.trim()) : [];
   const blocks = [];
   if (userWords) blocks.push(`### 用户原话\n\n${String(userWords).trim()}`);
   if (understanding) blocks.push(`### Agent 理解\n\n${String(understanding).trim()}`);
+  if (userVisibleBehavior) blocks.push(`### 用户可见行为\n\n${String(userVisibleBehavior).trim()}`);
+  if (featureIntent) blocks.push(`### 功能意图\n\n${String(featureIntent).trim()}`);
   if (items.length > 0) blocks.push(`### Checklist\n\n${items.map((item) => `- [ ] ${item}`).join('\n')}`);
   return blocks.join('\n\n');
 }
@@ -155,6 +159,8 @@ export function evaluateCondition(when, context) {
       return compare(staticPlanPendingCount(context.staticPlan), when.op, value);
     case 'dynamicPlan.pending':
       return compare(dynamicPlanPendingCount(context.dynamicPlan), when.op, value);
+    case 'context.overBudget':
+      return Boolean(context.overBudget);
     case 'user.approved':
       return Boolean(context.userApproved);
     case 'user.replied':
