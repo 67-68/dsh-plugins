@@ -161,6 +161,8 @@ export function evaluateCondition(when, context) {
       return compare(dynamicPlanPendingCount(context.dynamicPlan), when.op, value);
     case 'context.overBudget':
       return Boolean(context.overBudget);
+    case 'featureIntent.missing':
+      return !context.featureIntentFile;
     case 'user.approved':
       return Boolean(context.userApproved);
     case 'user.replied':

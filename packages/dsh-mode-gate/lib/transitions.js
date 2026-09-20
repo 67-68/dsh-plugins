@@ -14,6 +14,7 @@ export function resolveTransition({ state, stateDef, workflowDef, signal }) {
     ...(signal || {}),
     staticPlan: state && state.staticPlan,
     dynamicPlan: state && state.dynamicPlan,
+    featureIntentFile: state && state.featureIntentFile,
   };
   let target = null;
   for (const tr of (stateDef && stateDef.transitions) || []) {

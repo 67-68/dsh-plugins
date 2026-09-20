@@ -3,21 +3,18 @@
  *
  * A state declares `permissions: { write, bash, tools }`.
  * - `write: false` denies known write tools.
- * - `bash`: none | read-only | declared | unrestricted (resolved in index.js).
+ * - `bash`: none | read-only | read-only-strict | declared | unrestricted (resolved in index.js).
+ *   (`declared` no longer gates on declared verbs since the declare_target
+ *   mechanism was removed: non-dangerous commands are allowed, dangerous ones ask.)
  * - `tools`: "*" means no extra restriction; otherwise a whitelist. Entries may
  *   be exact tool names or `<name>:view` (only str_replace_editor view).
  */
 
-/** Tools that are always allowed regardless of state / declared target. */
+/** Tools that are always allowed regardless of state. */
 export const ALWAYS_ALLOWED = new Set([
-  'declare_target', 'switch_mode', 'skill_search', 'request_extra', 'dev_tool_search',
+  'switch_mode', 'skill_search', 'request_extra', 'dev_tool_search',
   'submit_state', 'list_workflows', 'get_workflow_state', 'select_workflow',
-]);
-
-/** Tools allowed without a declared target (IDLE helper set). */
-export const ALLOWED_WITHOUT_TARGET = new Set([
-  'ask_user_question', 'get_goal', 'todo_write', 'skill_search', 'request_extra',
-  'dev_tool_search', 'list_workflows', 'get_workflow_state', 'select_workflow',
+  'goto_accumulation', 'accumulation_and_init',
 ]);
 
 /** Tools considered safe in read-only states. */

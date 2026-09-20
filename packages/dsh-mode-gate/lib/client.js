@@ -11,23 +11,29 @@ window.__ModuleLoader__.load({
 			tab: "模式门禁",
 			tabCurrent: "当前配置",
 			tabAllModes: "所有模式",
+			tabAliases: "模型代号映射",
+			restrictionRef: "引用限制",
+			restrictionNone: "无（不引用）",
+			restrictionView: "展开查看",
+			restrictionHide: "收起",
+			restrictionEmpty: "暂无限制套件，先去「限制」tab 新建",
+			tabRestrictions: "限制",
+			tabCompression: "模型压缩上下文",
 			title: "dsh-mode-gate 阶段权限",
 			desc: "维护各工作流阶段的 Prompt 与自动命令指引，以及模型目录、任务模式默认模型和 bash 禁止命令列表。",
 			phasePresetAction: "PRESET_ACTION",
 			phaseRequirementRecognition: "REQUIREMENT_RECOGNITION",
 			phaseImplement: "IMPLEMENT",
 			permPresetAction: "仅 list_preset_actions / submit_preset_action；bash 禁用；命中 skill 直接进入实现阶段",
-			permRequirementRecognition: "只读 + 规划 + feature intent 工具；bash 仅允许已声明的只读命令；禁止写文件",
+			permRequirementRecognition: "只读 + 规划 + feature intent 工具；bash 仅允许只读命令；禁止写文件",
 			permImplement: "可写；危险 bash 命令仍需人工授权；feature_intent 目录仍禁止直接写",
 			wfIdle: "IDLE（后端不限制，modal 遮罩纯 UI）",
 			wfSimpleAction: "SIMPLE-ACTION：PRESET_ACTION → ACTION_EXECUTE → IDLE",
 			permSimpleAction: "PRESET_ACTION 只允许 list/submit preset action；ACTION_EXECUTE 可写",
-			wfCreate: "CREATE：BASE_READ → REQUIREMENT_RECOGNITION → (RESEARCH → EXECUTE → DEBUG → ACCUMULATION)*n → IDLE",
-			permCreate: "BASE_READ/REQUIREMENT_RECOGNITION/RESEARCH 只读；EXECUTE/DEBUG 可写；ACCUMULATION 不写长期记忆，直接提交",
+			wfCreate: "CREATE：INIT → REQUIREMENT_RECOGNITION → (RESEARCH → EXECUTE → DEBUG → ACCUMULATION)*n → IDLE",
+			permCreate: "INIT/REQUIREMENT_RECOGNITION/RESEARCH 只读且不看代码；EXECUTE/DEBUG 可写；ACCUMULATION 不写长期记忆，直接提交",
 			modeLabel: "阶段",
 			permLabel: "权限",
-			targetLabel: "当前 Target / 阶段",
-			noTarget: "（尚未声明）",
 			denyTitle: "禁止的 bash 命令",
 			denyDesc: "命中以下命令时直接拒绝执行，原因会显示给 agent。一个条目可以包含多个命令。",
 			denyCommands: "命令",
@@ -53,6 +59,22 @@ window.__ModuleLoader__.load({
 			saveModelCatalog: "保存模型目录",
 			loadModelCatalogFailed: "读取模型目录失败",
 			saveModelCatalogFailed: "保存模型目录失败",
+			modelAliasesTitle: "模型代号映射",
+			modelAliasesDesc: "工作流阶段只引用左侧的字符串代号；右侧选择该代号实际使用的具体模型（列出当前所有 provider 的全部模型）。改这里即可换模型，无需改工作流配置。",
+			restrictionDesc: "一套限制为黑名单（禁命令/禁 skill）或白名单（仅允许某些 skill）之一，两者互斥。INIT 等阶段可引用某套限制复用。",
+			restrictionBlacklist: "黑名单",
+			restrictionWhitelist: "白名单",
+			restrictionDenyCommands: "禁命令（逗号分隔动词）",
+			restrictionDenySkills: "禁 skill（逗号分隔）",
+			restrictionAllowSkills: "仅允许的 skill（逗号分隔）",
+			restrictionNewId: "新限制 id",
+			restrictionNewLabel: "展示名",
+			modelAliasColumn: "代号",
+			modelAliasTargetColumn: "具体模型",
+			modelAliasPlaceholder: "kimi-code",
+			addModelAlias: "添加映射",
+			saveModelAliases: "保存代号映射",
+			loadProviderModelsFailed: "读取 provider 模型列表失败",
 			workflowSettingsTitle: "工作流阶段设置",
 			workflowSettingsDesc: "点击工作流展开阶段表格。Prompt 会作为该阶段的 runtime context 注入并喂给 Agent（即使当前 agent preset 使用 complete persona 也能到达模型）；开启自动命令指引后，系统会根据该阶段的 goal 动态生成需要执行/提交的命令清单。",
 			expandWorkflow: "展开",
@@ -62,7 +84,7 @@ window.__ModuleLoader__.load({
 			autoGuideColumn: "自动生成命令指引",
 			autoGuidePreview: "自动生成内容预览",
 			modelThinkingColumn: "模型 / thinking",
-			workflowModelPlaceholder: "model id（留空用默认）",
+			workflowModelPlaceholder: "模型代号（留空用默认）",
 			effortDefault: "默认",
 			effortHigh: "high",
 			effortLow: "low",
@@ -108,23 +130,29 @@ window.__ModuleLoader__.load({
 			tab: "Mode Gate",
 			tabCurrent: "Current",
 			tabAllModes: "All modes",
+			tabAliases: "Model codenames",
+			restrictionRef: "Referenced restriction",
+			restrictionNone: "None",
+			restrictionView: "View",
+			restrictionHide: "Collapse",
+			restrictionEmpty: "No restriction sets yet — create one in the Restrictions tab",
+			tabRestrictions: "Restrictions",
+			tabCompression: "Compression context",
 			title: "dsh-mode-gate phase permissions",
 			desc: "Edit per-workflow phase prompts and auto command guides, plus model catalog, task-mode default models, and bash deny-list.",
 			phasePresetAction: "PRESET_ACTION",
 			phaseRequirementRecognition: "REQUIREMENT_RECOGNITION",
 			phaseImplement: "IMPLEMENT",
 			permPresetAction: "Only list_preset_actions / submit_preset_action; bash disabled; matched skill jumps to implement",
-			permRequirementRecognition: "Read-only + planning + feature intent tools; bash read-only declared commands only; no file writes",
+			permRequirementRecognition: "Read-only + planning + feature intent tools; bash read-only commands only; no file writes",
 			permImplement: "Write allowed; dangerous bash requires approval; feature_intent directory stays write-protected",
 			wfIdle: "IDLE (backend unrestricted, modal is pure UI)",
 			wfSimpleAction: "SIMPLE-ACTION: PRESET_ACTION -> ACTION_EXECUTE -> IDLE",
 			permSimpleAction: "PRESET_ACTION only list/submit preset action; ACTION_EXECUTE writable",
-			wfCreate: "CREATE: BASE_READ -> REQUIREMENT_RECOGNITION -> (RESEARCH -> EXECUTE -> DEBUG -> ACCUMULATION)*n -> IDLE",
-			permCreate: "BASE_READ/REQUIREMENT_RECOGNITION/RESEARCH read-only; EXECUTE/DEBUG writable; ACCUMULATION does not write long-term memory, submit directly",
+			wfCreate: "CREATE: INIT -> REQUIREMENT_RECOGNITION -> (RESEARCH -> EXECUTE -> DEBUG -> ACCUMULATION)*n -> IDLE",
+			permCreate: "INIT/REQUIREMENT_RECOGNITION/RESEARCH read-only without code reading; EXECUTE/DEBUG writable; ACCUMULATION does not write long-term memory, submit directly",
 			modeLabel: "Phase",
 			permLabel: "Permissions",
-			targetLabel: "Current target / phase",
-			noTarget: "(not declared yet)",
 			denyTitle: "Denied bash commands",
 			denyDesc: "Matching commands are rejected immediately and the reason is shown to the agent. One entry can contain multiple commands.",
 			denyCommands: "Commands",
@@ -150,6 +178,22 @@ window.__ModuleLoader__.load({
 			saveModelCatalog: "Save model catalog",
 			loadModelCatalogFailed: "Failed to load model catalog",
 			saveModelCatalogFailed: "Failed to save model catalog",
+			modelAliasesTitle: "Model codename map",
+			modelAliasesDesc: "Workflow phases reference the codename on the left; pick the concrete model each codename uses on the right (lists every model from every provider). Change the mapping to switch models without touching workflow config.",
+			restrictionDesc: "One restriction set is either a blacklist (deny commands/skills) or a whitelist (only allow listed skills), mutually exclusive. Stages like INIT can reference a set for reuse.",
+			restrictionBlacklist: "Blacklist",
+			restrictionWhitelist: "Whitelist",
+			restrictionDenyCommands: "Denied commands (comma-separated verbs)",
+			restrictionDenySkills: "Denied skills (comma-separated)",
+			restrictionAllowSkills: "Allowed skills only (comma-separated)",
+			restrictionNewId: "New restriction id",
+			restrictionNewLabel: "Display name",
+			modelAliasColumn: "Codename",
+			modelAliasTargetColumn: "Concrete model",
+			modelAliasPlaceholder: "kimi-code",
+			addModelAlias: "Add mapping",
+			saveModelAliases: "Save codename map",
+			loadProviderModelsFailed: "Failed to load provider models",
 			workflowSettingsTitle: "Workflow phase settings",
 			workflowSettingsDesc: "Expand a workflow to edit each phase prompt. The prompt is injected as runtime context for the agent (it reaches the model even when the agent preset uses a complete persona); enable auto command guide and the system generates the required tool/submit commands from the phase goal.",
 			expandWorkflow: "Expand",
@@ -159,7 +203,7 @@ window.__ModuleLoader__.load({
 			autoGuideColumn: "Auto command guide",
 			autoGuidePreview: "Generated guide preview",
 			modelThinkingColumn: "Model / thinking",
-			workflowModelPlaceholder: "model id (empty = default)",
+			workflowModelPlaceholder: "model codename (empty = default)",
 			effortDefault: "default",
 			effortHigh: "high",
 			effortLow: "low",
@@ -322,7 +366,74 @@ window.__ModuleLoader__.load({
 			return { entries, error, refresh, save };
 		}
 
-		/** Read and update per-state workflow prompts + auto-guide toggles through the Remote service. */
+		/** Read and update the codename -> concrete model alias map through the Remote service. */
+		function useModelAliases(api) {
+			const [entries, setEntries] = react.useState([]);
+			const [error, setError] = react.useState("");
+
+			const refresh = react.useCallback(async () => {
+				try {
+					const result = await api().getModelAliases();
+					if (result && result.ok && result.value && Array.isArray(result.value.entries)) {
+						setEntries(result.value.entries);
+					} else {
+						setEntries([]);
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+
+			react.useEffect(() => { refresh(); }, [refresh]);
+
+			const save = react.useCallback(async (nextEntries) => {
+				try {
+					const result = await api().setModelAliases({ entries: nextEntries });
+					if (result && result.ok && result.value && Array.isArray(result.value.entries)) {
+						setEntries(result.value.entries);
+						setError("");
+					} else {
+						setError("saveModelAliasesFailed");
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+
+			return { entries, error, refresh, save };
+		}
+
+		/**
+		 * Load the Host-generation model catalog (all providers -> all models)
+		 * for populating the alias-target dropdown. Returns [] on failure.
+		 */
+		function useProviderModels(getModelCatalog) {
+			const [groups, setGroups] = react.useState([]);
+			const [error, setError] = react.useState("");
+
+			const refresh = react.useCallback(async () => {
+				if (typeof getModelCatalog !== "function") { setGroups([]); return; }
+				try {
+					const response = await getModelCatalog();
+					const value = response && response.value ? response.value : response;
+					if (value && Array.isArray(value.groups)) {
+						setGroups(value.groups.map((group) => ({
+							id: group.id,
+							models: Array.isArray(group.models) ? group.models.map((model) => ({ id: model.id, name: model.name })) : [],
+						})));
+					} else {
+						setGroups([]);
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+					setGroups([]);
+				}
+			}, [getModelCatalog]);
+
+			react.useEffect(() => { refresh(); }, [refresh]);
+
+			return { groups, error, refresh };
+		}
 		function useWorkflowSettings(api) {
 			const [data, setData] = react.useState({ workflows: [], overrides: {}, workspace: null });
 			const [error, setError] = react.useState("");
@@ -622,26 +733,17 @@ window.__ModuleLoader__.load({
 		}
 
 
-		/** Static settings tab: workflow → stage references + model catalog + bash deny-list. */
+		/** Static settings tab: workflow → stage references + bash deny-list. */
 		function ModeGateSettingsTab(props) {
 			const { t, api, onOpenStage } = props;
 			const deny = useBashDenyList(api);
-			const modelCatalog = useModelCatalog(api);
 
 			const [draft, setDraft] = react.useState([]);
 			const [newCommands, setNewCommands] = react.useState("");
 			const [newReason, setNewReason] = react.useState("");
-
-			const [modelDraft, setModelDraft] = react.useState([]);
-			const [newModel, setNewModel] = react.useState({ id: "", name: "", provider: "deepseek-official", description: "" });
-
 			react.useEffect(() => {
 				setDraft((deny.entries || []).map((entry) => ({ ...entry, commands: [...entry.commands] })));
 			}, [deny.entries]);
-
-			react.useEffect(() => {
-				setModelDraft((modelCatalog.entries || []).map((entry) => ({ ...entry })));
-			}, [modelCatalog.entries]);
 
 			const updateCommands = (idx, value) => setDraft((prev) => prev.map((entry, i) => (
 				i === idx ? { ...entry, commands: value.split(/[\s,]+/).filter(Boolean) } : entry
@@ -665,64 +767,8 @@ window.__ModuleLoader__.load({
 				setNewReason("");
 				await deny.save(next);
 			};
-
-			const updateModel = (idx, key, value) => setModelDraft((prev) => prev.map((entry, i) => (
-				i === idx ? { ...entry, [key]: value } : entry
-			)));
-			const addModel = async () => {
-				if (!newModel.id.trim()) return;
-				const next = [...modelDraft, { ...newModel, id: newModel.id.trim() }];
-				setModelDraft(next);
-				setNewModel({ id: "", name: "", provider: "deepseek-official", description: "" });
-				await modelCatalog.save(next);
-			};
-			const deleteModel = async (idx) => {
-				const next = modelDraft.filter((_, i) => i !== idx);
-				setModelDraft(next);
-				await modelCatalog.save(next);
-			};
-			const saveModelCatalog = async () => { await modelCatalog.save(modelDraft); };
-
 			const head = react.createElement("p", { style: styles.desc }, t("desc"));
 			const workflowRefs = react.createElement(WorkflowReferenceListView, { t, api, onOpenStage });
-
-			// model catalog
-			const modelHead = react.createElement("h3", { style: styles.denyHead }, t("modelCatalogTitle"));
-			const modelDesc = react.createElement("p", { style: styles.desc }, t("modelCatalogDesc"));
-			const modelRows = modelDraft.map((entry, idx) => react.createElement("tr", { key: entry.id || idx },
-				react.createElement("td", { style: styles.td },
-					react.createElement("input", { style: styles.input, value: entry.id || '', onChange: (e) => updateModel(idx, 'id', e.target.value) })),
-				react.createElement("td", { style: styles.td },
-					react.createElement("input", { style: styles.input, value: entry.name || '', onChange: (e) => updateModel(idx, 'name', e.target.value) })),
-				react.createElement("td", { style: styles.td },
-					react.createElement("input", { style: styles.input, value: entry.provider || '', onChange: (e) => updateModel(idx, 'provider', e.target.value) })),
-				react.createElement("td", { style: styles.td },
-					react.createElement("input", { style: styles.input, value: entry.description || '', onChange: (e) => updateModel(idx, 'description', e.target.value) })),
-				react.createElement("td", { style: styles.td },
-					react.createElement("button", { style: styles.button, onClick: () => deleteModel(idx) }, t("delete"))),
-			));
-			const modelTable = react.createElement("table", { style: styles.table },
-				react.createElement("thead", null,
-					react.createElement("tr", null,
-						react.createElement("th", { style: styles.th }, t("modelId")),
-						react.createElement("th", { style: styles.th }, t("modelName")),
-						react.createElement("th", { style: styles.th }, t("modelProvider")),
-						react.createElement("th", { style: styles.th }, t("modelDescription")),
-						react.createElement("th", { style: styles.th }, ""),
-					)
-				),
-				react.createElement("tbody", null, modelRows),
-			);
-			const modelAddRow = react.createElement("div", { style: styles.addRow },
-				react.createElement("input", { style: styles.input, placeholder: t("modelIdPlaceholder"), value: newModel.id, onChange: (e) => setNewModel((prev) => ({ ...prev, id: e.target.value })) }),
-				react.createElement("input", { style: styles.input, placeholder: t("modelNamePlaceholder"), value: newModel.name, onChange: (e) => setNewModel((prev) => ({ ...prev, name: e.target.value })) }),
-				react.createElement("input", { style: styles.input, placeholder: t("modelProviderPlaceholder"), value: newModel.provider, onChange: (e) => setNewModel((prev) => ({ ...prev, provider: e.target.value })) }),
-				react.createElement("input", { style: styles.input, placeholder: t("modelDescriptionPlaceholder"), value: newModel.description, onChange: (e) => setNewModel((prev) => ({ ...prev, description: e.target.value })) }),
-				react.createElement("button", { style: styles.button, onClick: addModel }, t("addModel")),
-			);
-			const modelSaveButton = react.createElement("button", { style: styles.button, onClick: saveModelCatalog }, t("saveModelCatalog"));
-			const modelErrorLine = modelCatalog.error ? react.createElement("p", { style: styles.error }, typeof modelCatalog.error === "string" ? modelCatalog.error : t("loadModelCatalogFailed")) : null;
-
 			// bash deny list
 			const denyHead = react.createElement("h3", { style: styles.denyHead }, t("denyTitle"));
 			const denyDesc = react.createElement("p", { style: styles.desc }, t("denyDesc"));
@@ -755,7 +801,6 @@ window.__ModuleLoader__.load({
 			return react.createElement("div", { style: styles.section },
 				head,
 				workflowRefs,
-				modelHead, modelDesc, modelTable, modelAddRow, modelSaveButton, modelErrorLine,
 				denyHead, denyDesc, denyTable, addRow, saveButton, errorLine,
 			);
 		}
@@ -790,6 +835,7 @@ window.__ModuleLoader__.load({
 							autoGuideText: typeof state.autoGuideText === "string" ? state.autoGuideText : "",
 							model: typeof state.model === "string" ? state.model : "",
 							reasoningEffort: typeof state.reasoningEffort === "string" ? state.reasoningEffort : "",
+							restriction: typeof state.restriction === "string" ? state.restriction : "",
 							requirements: (Array.isArray(state.requirements) ? state.requirements : [])
 								.filter((requirement) => requirement && (requirement.kind === "file" || requirement.kind === "skill"))
 								.map((requirement) => requirement.kind === "file"
@@ -841,9 +887,12 @@ window.__ModuleLoader__.load({
 					model: row.model,
 					reasoningEffort: row.reasoningEffort,
 					requirements: row.requirements || [],
+					restriction: row.restriction || "",
 				});
 				await settings.refresh();
 			};
+			const restrictionStore = useRestrictions(api);
+			const [restrictionOpen, setRestrictionOpen] = react.useState({});
 
 			const settingsError = typeof settings.error === "string" && settings.error
 				? (settings.error === "loadWorkflowSettingsFailed" || settings.error === "saveWorkflowSettingsFailed"
@@ -1005,6 +1054,38 @@ window.__ModuleLoader__.load({
 									react.createElement("option", { value: "skill" }, t("reqAddSkill")),
 								),
 							),
+							react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("restrictionRef")),
+								react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+									react.createElement("select", {
+										style: { ...styles.input, flex: 1 },
+										value: row.restriction || "",
+										onChange: (e) => updateDraft(mode.stageId, { restriction: e.target.value }),
+									},
+										react.createElement("option", { value: "" }, t("restrictionNone")),
+										restrictionStore.sets.map((entry) => react.createElement("option", { key: entry.id, value: entry.id },
+											(entry.label || entry.id) + " (" + entry.id + (entry.mode ? ", " + entry.mode : "") + ")")),
+									),
+									react.createElement("button", {
+										style: styles.button,
+										onClick: () => setRestrictionOpen((prev) => ({ ...prev, [mode.stageId]: !prev[mode.stageId] })),
+									}, restrictionOpen[mode.stageId] ? t("restrictionHide") : t("restrictionView")),
+								),
+								restrictionOpen[mode.stageId] && row.restriction ? (() => {
+									const hit = restrictionStore.sets.find((entry) => entry && entry.id === row.restriction);
+									if (!hit) return react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, t("restrictionEmpty"));
+									const parts = [];
+									parts.push(hit.mode === "whitelist" ? t("restrictionWhitelist") : t("restrictionBlacklist"));
+									if (hit.mode === "blacklist") {
+										if (Array.isArray(hit.denyTools) && hit.denyTools.length) parts.push("禁工具: " + hit.denyTools.join(", "));
+										if (Array.isArray(hit.denySkills) && hit.denySkills.length) parts.push("禁 skill: " + hit.denySkills.join(", "));
+										if (Array.isArray(hit.denyCommands) && hit.denyCommands.length) parts.push("禁命令: " + hit.denyCommands.map((e) => (e.commands || []).join(",")).join(" | "));
+									} else if (hit.mode === "whitelist") {
+										parts.push("仅允许 skill: " + (((hit.allowSkills || []).join(", ")) || "（空=全禁）"));
+									}
+									return react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12, whiteSpace: "pre-wrap" } }, parts.join("；"));
+								})() : null,
+							),
 							react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
 								react.createElement("button", { style: styles.button, onClick: () => saveStage(mode.stageId) }, t("saveWorkflow")),
 								settings.savedAt ? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } }, t("workflowSettingsSaveSuccess")) : null,
@@ -1016,9 +1097,443 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/** 独立的「设置 → 模式门禁」页面：顶部「当前配置 / 所有模式」两个 tab。 */
-		function ModeGateSettingsSection(props) {
+
+/** 模型压缩上下文设置页：动态全量表格，每行可填写自定义压缩点 */
+function ModelCompressionView(props) {
+const { t, api, getModelCatalog } = props;
+const [builtin, setBuiltin] = react.useState([]);
+const [overrides, setOverrides] = react.useState({});
+const [groups, setGroups] = react.useState([]);
+const [draft, setDraft] = react.useState({});
+const [status, setStatus] = react.useState('');
+const [loaded, setLoaded] = react.useState(false);
+
+const reload = async () => {
+let table = [];
+let ov = {};
+try {
+const result = await api().getModelCompressionTable();
+if (result && result.ok && result.value) {
+table = Array.isArray(result.value.table) ? result.value.table : [];
+if (result.value.overrides && typeof result.value.overrides === 'object') ov = result.value.overrides;
+}
+} catch (_err) {
+setStatus('读取压缩配置失败');
+}
+try {
+const ovResult = await api().getCompressionOverrides().catch(() => null);
+if (ovResult && ovResult.ok && ovResult.value && ovResult.value.overrides) ov = ovResult.value.overrides;
+} catch (_e2) {}
+setBuiltin(table);
+setOverrides(ov || {});
+const nextDraft = {};
+for (const key of Object.keys(ov || {})) nextDraft[key] = String(ov[key]);
+setDraft(nextDraft);
+try {
+if (typeof getModelCatalog === 'function') {
+const response = await getModelCatalog();
+const value = response && response.value ? response.value : response;
+if (value && Array.isArray(value.groups)) {
+setGroups(value.groups.map((group) => ({
+id: group.id,
+models: Array.isArray(group.models) ? group.models.map((model) => ({ id: model.id, name: model.name })) : [],
+})));
+}
+}
+} catch (_e3) {}
+setLoaded(true);
+};
+
+react.useEffect(() => { reload(); }, [api, getModelCatalog]);
+
+const byId = {};
+for (const entry of builtin) {
+if (entry && entry.modelId) byId[entry.modelId] = entry;
+}
+const rows = [];
+const seen = new Set();
+for (const group of groups) {
+for (const model of (group.models || [])) {
+if (!model || !model.id || seen.has(model.id)) continue;
+seen.add(model.id);
+const base = byId[model.id] || null;
+rows.push({
+modelId: model.id,
+provider: group.id,
+contextWindow: base && Number.isFinite(base.contextWindow) ? base.contextWindow : null,
+defaultPoint: base && Number.isFinite(base.defaultPoint) ? base.defaultPoint : 180000,
+label: base ? base.label : '自带',
+sourceUrl: base ? (base.sourceUrl || '') : '',
+});
+}
+}
+for (const entry of builtin) {
+if (!entry || !entry.modelId || seen.has(entry.modelId)) continue;
+seen.add(entry.modelId);
+rows.push({
+modelId: entry.modelId,
+provider: entry.provider || '-',
+contextWindow: Number.isFinite(entry.contextWindow) ? entry.contextWindow : null,
+defaultPoint: Number.isFinite(entry.defaultPoint) ? entry.defaultPoint : 180000,
+label: entry.label || '自带',
+sourceUrl: entry.sourceUrl || '',
+});
+}
+
+const formatNumber = (num) => {
+if (!Number.isFinite(num)) return '-';
+return num >= 1000 ? (num / 1000).toFixed(num % 1000 === 0 ? 0 : 1) + 'k' : String(num);
+};
+
+const getBadgeStyle = (tag) => {
+switch (tag) {
+case '证': return { background: '#52c41a', color: '#fff' };
+case '自定义': return { background: '#faad14', color: '#fff' };
+default: return { background: '#d9d9d9', color: '#333' };
+}
+};
+
+const updateDraft = (modelId, value) => setDraft((prev) => ({ ...prev, [modelId]: value }));
+
+const saveAll = async () => {
+const next = {};
+for (const entry of Object.entries(draft)) {
+const key = entry[0];
+const text = String(entry[1] == null ? '' : entry[1]).trim();
+if (!text) continue;
+const num = Number(text);
+if (!Number.isFinite(num) || num <= 0) continue;
+next[key] = Math.floor(num);
+}
+try {
+const result = await api().setCompressionOverrides({ overrides: next });
+if (result && result.ok && result.value) {
+setOverrides(result.value.overrides || next);
+setStatus('已保存，填写值立即参与压缩决策。');
+} else {
+setStatus('保存失败');
+}
+} catch (err) {
+setStatus('保存失败：' + String((err && err.message) || err));
+}
+};
+
+const body = !loaded
+? react.createElement("p", { style: styles.desc }, "正在加载模型列表…")
+: rows.length === 0
+? react.createElement("p", { style: styles.error }, "暂无模型数据：内置表为空且未能获取 provider 模型列表。")
+: react.createElement("table", { style: styles.table },
+react.createElement("thead", null,
+react.createElement("tr", null,
+react.createElement("th", { style: styles.th }, "模型 ID"),
+react.createElement("th", { style: styles.th }, "Provider"),
+react.createElement("th", { style: styles.th }, "上下文窗口"),
+react.createElement("th", { style: styles.th }, "压缩点（tokens，可填）"),
+react.createElement("th", { style: styles.th }, "生效值"),
+react.createElement("th", { style: styles.th }, "标签"),
+react.createElement("th", { style: styles.th }, "资料链接"),
+)
+),
+react.createElement("tbody", null,
+rows.map((row) => {
+const filled = String(draft[row.modelId] == null ? '' : draft[row.modelId]).trim();
+const filledNum = Number(filled);
+const hasFilled = filled !== '' && Number.isFinite(filledNum) && filledNum > 0;
+const effective = hasFilled ? Math.floor(filledNum) : row.defaultPoint;
+const tag = hasFilled ? '自定义' : (row.label === '证' ? '证' : '自带');
+return react.createElement("tr", { key: row.modelId },
+react.createElement("td", { style: styles.td },
+react.createElement("code", { style: styles.code }, row.modelId)),
+react.createElement("td", { style: styles.td }, row.provider || '-'),
+react.createElement("td", { style: styles.td }, formatNumber(row.contextWindow)),
+react.createElement("td", { style: styles.td },
+react.createElement("input", { style: { ...styles.input, minWidth: 110 }, placeholder: String(row.defaultPoint), value: draft[row.modelId] == null ? '' : draft[row.modelId], onChange: (e) => updateDraft(row.modelId, e.target.value) })),
+react.createElement("td", { style: styles.td }, formatNumber(effective)),
+react.createElement("td", { style: styles.td },
+react.createElement("span", {
+style: {
+display: 'inline-block',
+padding: '2px 8px',
+borderRadius: '4px',
+fontSize: '12px',
+...getBadgeStyle(tag)
+}
+}, tag)),
+react.createElement("td", { style: styles.td },
+row.sourceUrl ? react.createElement("a", {
+href: row.sourceUrl,
+target: "_blank",
+rel: "noopener noreferrer",
+style: { color: "var(--dsw-alias-label-primary)", fontSize: 12 }
+}, "查看资料") : '-'));
+})
+)
+);
+
+return react.createElement("div", { style: styles.section },
+react.createElement("h3", { style: styles.denyHead }, "模型压缩上下文"),
+react.createElement("p", { style: styles.desc }, "压缩规则：上下文窗口 <150k 的模型在约 80% 处压缩；其余模型默认在 180k 处压缩；已查证模型使用查证值。下表列出全部模型，可为任意模型填写自定义压缩点（tokens）：填了就按填写值压缩，清空则恢复自带默认，保存后立即生效。"),
+body,
+react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 8 } },
+react.createElement("button", { style: styles.button, onClick: saveAll }, "保存压缩点"),
+status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)" } }, status) : null),
+);
+}
+
+		/** 「模型代号映射」tab：代号 → 具体模型的映射表（与「当前配置」平级）。 */
+		function ModelAliasesTab(props) {
+			const { t, api, getModelCatalog } = props;
+			const modelAliases = useModelAliases(api);
+			const providerModels = useProviderModels(getModelCatalog);
+
+			const [aliasDraft, setAliasDraft] = react.useState([]);
+			const [newAlias, setNewAlias] = react.useState({ alias: "", provider: "", model: "" });
+
+			react.useEffect(() => {
+				setAliasDraft((modelAliases.entries || []).map((entry) => ({ ...entry })));
+			}, [modelAliases.entries]);
+
+			// model aliases (codename -> concrete model)
+			const updateAlias = (idx, key, value) => setAliasDraft((prev) => prev.map((entry, i) => (
+				i === idx ? { ...entry, [key]: value } : entry
+			)));
+			const addAlias = async () => {
+				if (!newAlias.alias.trim() || !newAlias.model.trim()) return;
+				const next = [...aliasDraft, { alias: newAlias.alias.trim(), provider: newAlias.provider.trim(), model: newAlias.model.trim() }];
+				setAliasDraft(next);
+				setNewAlias({ alias: "", provider: "", model: "" });
+				await modelAliases.save(next);
+			};
+			const deleteAlias = async (idx) => {
+				const next = aliasDraft.filter((_, i) => i !== idx);
+				setAliasDraft(next);
+				await modelAliases.save(next);
+			};
+			const saveAliases = async () => { await modelAliases.save(aliasDraft); };
+
+			// model aliases (codename -> concrete model) UI
+			const providerOptions = providerModels.groups || [];
+			const aliasTargetSelect = (entry, idx, isNew) => {
+				const currentProvider = entry.provider || (providerOptions[0] ? providerOptions[0].id : "");
+				const group = providerOptions.find((g) => g.id === currentProvider);
+				const models = group ? group.models : [];
+				const providerSel = react.createElement("select", {
+					style: { ...styles.input, maxWidth: 200 },
+					value: currentProvider,
+					onChange: (e) => {
+						const nextProvider = e.target.value;
+						const nextGroup = providerOptions.find((g) => g.id === nextProvider);
+						const firstModel = nextGroup && nextGroup.models[0] ? nextGroup.models[0].id : "";
+						if (isNew) {
+							setNewAlias((prev) => ({ ...prev, provider: nextProvider, model: firstModel }));
+						} else {
+							updateAlias(idx, "provider", nextProvider);
+							updateAlias(idx, "model", firstModel);
+						}
+					},
+				}, providerOptions.map((g) => react.createElement("option", { key: g.id, value: g.id }, g.id)));
+				const modelSel = react.createElement("select", {
+					style: { ...styles.input, maxWidth: 240 },
+					value: entry.model || "",
+					onChange: (e) => {
+						if (isNew) setNewAlias((prev) => ({ ...prev, model: e.target.value }));
+						else updateAlias(idx, "model", e.target.value);
+					},
+				}, models.map((m) => react.createElement("option", { key: m.id, value: m.id }, m.name || m.id)));
+				return react.createElement("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+					providerSel, react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)" } }, "/"), modelSel);
+			};
+			const aliasHead = react.createElement("h3", { style: styles.denyHead }, t("modelAliasesTitle"));
+			const aliasDesc = react.createElement("p", { style: styles.desc }, t("modelAliasesDesc"));
+			const aliasRows = aliasDraft.map((entry, idx) => react.createElement("tr", { key: entry.alias || idx },
+				react.createElement("td", { style: styles.td },
+					react.createElement("input", { style: styles.input, value: entry.alias || '', onChange: (e) => updateAlias(idx, 'alias', e.target.value) })),
+				react.createElement("td", { style: styles.td }, aliasTargetSelect(entry, idx, false)),
+				react.createElement("td", { style: styles.td },
+					react.createElement("button", { style: styles.button, onClick: () => deleteAlias(idx) }, t("delete"))),
+			));
+			const aliasTable = react.createElement("table", { style: styles.table },
+				react.createElement("thead", null,
+					react.createElement("tr", null,
+						react.createElement("th", { style: styles.th }, t("modelAliasColumn")),
+						react.createElement("th", { style: styles.th }, t("modelAliasTargetColumn")),
+						react.createElement("th", { style: styles.th }, ""),
+					)
+				),
+				react.createElement("tbody", null, aliasRows),
+			);
+			const aliasAddRow = react.createElement("div", { style: styles.addRow },
+				react.createElement("input", { style: styles.input, placeholder: t("modelAliasPlaceholder"), value: newAlias.alias, onChange: (e) => setNewAlias((prev) => ({ ...prev, alias: e.target.value })) }),
+				aliasTargetSelect(newAlias, -1, true),
+				react.createElement("button", { style: styles.button, onClick: addAlias }, t("addModelAlias")),
+			);
+			const aliasSaveButton = react.createElement("button", { style: styles.button, onClick: saveAliases }, t("saveModelAliases"));
+			const aliasErrorLine = modelAliases.error ? react.createElement("p", { style: styles.error }, typeof modelAliases.error === "string" ? modelAliases.error : t("loadModelCatalogFailed")) : null;
+			const aliasProviderErrorLine = providerModels.error ? react.createElement("p", { style: styles.error }, t("loadProviderModelsFailed")) : null;
+
+			return react.createElement("div", { style: styles.section },
+				aliasHead, aliasDesc, aliasTable, aliasAddRow, aliasSaveButton, aliasErrorLine, aliasProviderErrorLine,
+			);
+		}
+		/** 「限制」tab：全部限制套件的可展开列表，可新建/编辑/删除。 */
+		function useRestrictions(api) {
+			const [sets, setSets] = react.useState([]);
+			const [error, setError] = react.useState("");
+			const refresh = react.useCallback(async () => {
+				try {
+					const result = await api().getRestrictions();
+					if (result && result.ok && result.value && Array.isArray(result.value.sets)) {
+						setSets(result.value.sets);
+						setError("");
+					} else if (result && result.ok === false) {
+						setError(typeof result.error === "string" ? result.error : "loadFailed");
+					} else {
+						setSets([]);
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+			react.useEffect(() => { refresh(); }, [refresh]);
+			const saveSet = react.useCallback(async (set) => {
+				try {
+					const result = await api().setRestriction({ set });
+					if (result && result.ok && result.value) {
+						setError("");
+						await refresh();
+						return { ok: true };
+					}
+					const msg = result && typeof result.error === "string" ? result.error : "saveFailed";
+					setError(msg);
+					return { ok: false, error: msg };
+				} catch (err) {
+					const msg = String((err && err.message) || err);
+					setError(msg);
+					return { ok: false, error: msg };
+				}
+			}, [api, refresh]);
+			const deleteSet = react.useCallback(async (id) => {
+				try {
+					const result = await api().deleteRestriction({ id });
+					if (result && result.ok !== false) {
+						setError("");
+						await refresh();
+						return { ok: true };
+					}
+					const msg = result && typeof result.error === "string" ? result.error : "saveFailed";
+					setError(msg);
+					return { ok: false, error: msg };
+				} catch (err) {
+					const msg = String((err && err.message) || err);
+					setError(msg);
+					return { ok: false, error: msg };
+				}
+			}, [api, refresh]);
+			return { sets, error, refresh, saveSet, deleteSet };
+		}
+
+		function RestrictionsTab(props) {
 			const { t, api } = props;
+			const store = useRestrictions(api);
+			const [expanded, setExpanded] = react.useState({});
+			const [drafts, setDrafts] = react.useState({});
+			const [newId, setNewId] = react.useState("");
+			const [newLabel, setNewLabel] = react.useState("");
+			const [newMode, setNewMode] = react.useState("blacklist");
+			const updateDraft = (id, key, value) => setDrafts((prev) => ({ ...prev, [id]: { ...getDraftById(id), [key]: value } }));
+			const getDraftById = (id) => {
+				if (drafts[id]) return drafts[id];
+				const set = store.sets.find((e) => e.id === id);
+				if (!set) return { label: id, mode: "blacklist", denyCommands: "", denyReason: "", denySkills: "", allowSkills: "" };
+				return {
+					label: set.label || set.id,
+					mode: set.mode || "blacklist",
+					denyCommands: (set.denyCommands || []).map((e) => (e.commands || []).join(", ")).join(" | "),
+					denyReason: (set.denyCommands && set.denyCommands[0] && set.denyCommands[0].reason) || "",
+					denySkills: (set.denySkills || []).join(", "),
+					allowSkills: (set.allowSkills || []).join(", "),
+				};
+			};
+			const splitList = (text) => String(text || "").split(/[\s,]+/).filter(Boolean);
+			const saveDraft = async (set) => {
+				const d = getDraftById(set.id);
+				const denyGroups = splitList(d.denyCommands).length
+					? [{ id: `deny-${Date.now()}`, commands: splitList(d.denyCommands), reason: String(d.denyReason || "").trim() }]
+					: [];
+					await store.saveSet({
+					id: set.id,
+					label: String(d.label || "").trim() || set.id,
+					mode: d.mode,
+					denyCommands: denyGroups,
+					denySkills: splitList(d.denySkills),
+					allowSkills: splitList(d.allowSkills),
+				});
+			};
+			const addSet = async () => {
+				if (!newId.trim()) return;
+				const result = await store.saveSet({ id: newId.trim(), label: newLabel.trim() || newId.trim(), mode: newMode, denyCommands: [], denySkills: [], allowSkills: [] });
+				if (result && result.ok) {
+					setNewId("");
+					setNewLabel("");
+					setExpanded((prev) => ({ ...prev, [newId.trim()]: true }));
+				}
+			};
+			const modeBadge = (mode) => react.createElement("span", {
+				style: { whiteSpace: "nowrap", background: mode === "whitelist" ? "var(--dsw-alias-bg-module-platform)" : "var(--dsw-alias-border-l2)", borderRadius: 999, padding: "1px 8px", fontSize: 11, lineHeight: "17px" },
+			}, mode === "whitelist" ? t("restrictionWhitelist") : t("restrictionBlacklist"));
+			return react.createElement("div", { style: styles.section },
+				react.createElement("h3", { style: styles.denyHead }, t("tabRestrictions")),
+				react.createElement("p", { style: styles.desc }, t("restrictionDesc")),
+				store.sets.map((set) => {
+					const isOpen = Boolean(expanded[set.id]);
+					const d = getDraftById(set.id);
+					return react.createElement("div", {
+						key: set.id,
+						style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden" },
+					},
+						react.createElement("button", {
+							type: "button",
+							onClick: () => setExpanded((prev) => ({ ...prev, [set.id]: !prev[set.id] })),
+							style: { ...styles.button, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, border: "none", borderRadius: 0, padding: "10px 12px" },
+						},
+							react.createElement("span", { style: { fontSize: 12, lineHeight: "18px" } }, isOpen ? "▾" : "▸"),
+							react.createElement("code", { style: styles.code }, set.id),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 13, flex: 1 } }, set.label || set.id),
+							modeBadge(set.mode),
+						),
+						isOpen && react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, padding: "10px 12px" } },
+							react.createElement("input", { style: styles.input, value: d.label, onChange: (e) => updateDraft(set.id, "label", e.target.value) }),
+							react.createElement("select", { style: styles.input, value: d.mode, onChange: (e) => updateDraft(set.id, "mode", e.target.value) },
+								react.createElement("option", { value: "blacklist" }, t("restrictionBlacklist")),
+								react.createElement("option", { value: "whitelist" }, t("restrictionWhitelist")),
+							),
+							d.mode === "blacklist" ? react.createElement("input", { style: styles.input, placeholder: t("restrictionDenyCommands"), value: d.denyCommands, onChange: (e) => updateDraft(set.id, "denyCommands", e.target.value) }) : null,
+						d.mode === "blacklist" ? react.createElement("input", { style: styles.input, placeholder: t("denyReason"), value: d.denyReason, onChange: (e) => updateDraft(set.id, "denyReason", e.target.value) }) : null,
+							d.mode === "blacklist" ? react.createElement("input", { style: styles.input, placeholder: t("restrictionDenySkills"), value: d.denySkills, onChange: (e) => updateDraft(set.id, "denySkills", e.target.value) }) : null,
+							d.mode === "whitelist" ? react.createElement("input", { style: styles.input, placeholder: t("restrictionAllowSkills"), value: d.allowSkills, onChange: (e) => updateDraft(set.id, "allowSkills", e.target.value) }) : null,
+							react.createElement("div", { style: { display: "flex", gap: 8 } },
+								react.createElement("button", { style: styles.button, onClick: () => saveDraft(set) }, t("save")),
+								react.createElement("button", { style: styles.button, onClick: () => store.deleteSet(set.id) }, t("delete")),
+							),
+						),
+					);
+				}),
+				react.createElement("div", { style: styles.addRow },
+					react.createElement("input", { style: styles.input, placeholder: t("restrictionNewId"), value: newId, onChange: (e) => setNewId(e.target.value) }),
+					react.createElement("input", { style: styles.input, placeholder: t("restrictionNewLabel"), value: newLabel, onChange: (e) => setNewLabel(e.target.value) }),
+					react.createElement("select", { style: styles.input, value: newMode, onChange: (e) => setNewMode(e.target.value) },
+						react.createElement("option", { value: "blacklist" }, t("restrictionBlacklist")),
+						react.createElement("option", { value: "whitelist" }, t("restrictionWhitelist")),
+					),
+					react.createElement("button", { style: styles.button, onClick: addSet }, t("add")),
+				),
+				store.error ? react.createElement("p", { style: styles.error }, store.error) : null,
+			);
+		}
+
+		/** 独立的「设置 → 模式门禁」页面：顶部「当前配置 / 所有模式 / 模型代号映射 / 模型压缩上下文 / 限制」五个 tab。 */
+		function ModeGateSettingsSection(props) {
+			const { t, api, getModelCatalog } = props;
 			const [activeTab, setActiveTab] = react.useState("current");
 			const [focusStageId, setFocusStageId] = react.useState("");
 			const openStage = (stageId) => {
@@ -1044,10 +1559,19 @@ window.__ModuleLoader__.load({
 				react.createElement("div", { style: { display: "flex", gap: 4, borderBottom: "1px solid var(--dsw-alias-border-l2)" } },
 					tabButton("current", t("tabCurrent")),
 					tabButton("all", t("tabAllModes")),
+					tabButton("aliases", t("tabAliases")),
+					tabButton("compression", t("tabCompression")),
+					tabButton("restrictions", t("tabRestrictions")),
 				),
 				activeTab === "current"
 					? react.createElement(ModeGateSettingsTab, { t, api, onOpenStage: openStage })
-					: react.createElement(ModeGateAllModesTab, { t, api, focusStageId }),
+					: activeTab === "all"
+						? react.createElement(ModeGateAllModesTab, { t, api, focusStageId })
+						: activeTab === "aliases"
+							? react.createElement(ModelAliasesTab, { t, api, getModelCatalog })
+							: activeTab === "restrictions"
+							? react.createElement(RestrictionsTab, { t, api })
+							: react.createElement(ModelCompressionView, { t, api, getModelCatalog }),
 			);
 		}
 
@@ -1094,6 +1618,15 @@ window.__ModuleLoader__.load({
 				remoteArgsDescriptor("setBashDenyList", "SetBashDenyListResult"),
 				remoteDescriptor("getModelCatalog", "GetModelCatalogResult"),
 				remoteArgsDescriptor("setModelCatalog", "SetModelCatalogResult"),
+				remoteDescriptor("getModelAliases", "GetModelAliasesResult"),
+				remoteArgsDescriptor("setModelAliases", "SetModelAliasesResult"),
+				remoteDescriptor("getModelCompressionTable", "GetModelCompressionTableResult"),
+				remoteDescriptor("getCompressionOverrides", "GetCompressionOverridesResult"),
+				remoteArgsDescriptor("setCompressionOverrides", "SetCompressionOverridesResult"),
+				remoteDescriptor("getRestrictions", "GetRestrictionsResult"),
+				remoteArgsDescriptor("getRestriction", "GetRestrictionResult"),
+				remoteArgsDescriptor("setRestriction", "SetRestrictionResult"),
+				remoteArgsDescriptor("deleteRestriction", "DeleteRestrictionResult"),
 				remoteDescriptor("getWorkflowSettings", "GetWorkflowSettingsResult"),
 				remoteArgsDescriptor("setWorkflowOverride", "SetWorkflowOverrideResult"),
 				remoteArgsDescriptor("setStageOverride", "SetStageOverrideResult"),
@@ -1462,8 +1995,7 @@ window.__ModuleLoader__.load({
 			const goalPrompt = state.goal && state.goal.status === "active" && state.goal.prompt
 				? String(state.goal.prompt)
 				: "";
-			const targetText = state.target && state.target.target ? String(state.target.target) : "";
-			const full = goalPrompt || targetText || state.phase || workflowId;
+			const full = goalPrompt || state.phase || workflowId;
 			const currentText = firstGoalLine(full);
 			const staticItems = state.staticPlan && Array.isArray(state.staticPlan.items) ? state.staticPlan.items : [];
 			const dynamicItems = state.dynamicPlan && Array.isArray(state.dynamicPlan.items) ? state.dynamicPlan.items : [];
@@ -1755,7 +2287,7 @@ window.__ModuleLoader__.load({
 				order: 50,
 				label: () => t("tab"),
 				locale: NS,
-				inject: () => ({ api })
+				inject: () => ({ api, getModelCatalog: () => { const session = ctx.get("remote.session"); return session ? session.modelCatalog() : Promise.resolve(null); } })
 			}, ModeGateSettingsSection));
 
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({

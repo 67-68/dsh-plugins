@@ -15,13 +15,14 @@
  */
 
 const CONTROL_TOOLS = [
-  'declare_target',
   'dev_tool_search',
   'request_extra',
   'skill_search',
   'skill_load',
   'switch_mode',
   'submit_state',
+  'goto_accumulation',
+  'accumulation_and_init',
 ];
 
 export function defineGoal(def) {
@@ -50,10 +51,25 @@ export function createGoalEngine({ goals, log }) {
     return definitions.get(goal.id);
   }
 
+  // Tools that let the agent unlock new capabilities on its own.
+  // Goals with `lockUnlockTools: true` (e.g. requirement recognition, where
+  // the agent must focus on decomposing instead of reading files) deny them.
+  // submit_state / switch_mode stay available so the agent can still advance.
+  const UNLOCK_TOOLS = ['dev_tool_search', 'request_extra'];
+
   function allowedToolSet(def) {
     const set = new Set(CONTROL_TOOLS);
     for (const tool of def.allowedTools || []) set.add(tool);
+    if (def && def.lockUnlockTools) {
+      for (const tool of UNLOCK_TOOLS) set.delete(tool);
+    }
     return set;
+  }
+
+  /** True when the active goal forbids self-unlocking new tools. */
+  function unlockLocked(state) {
+    const def = defFor(state);
+    return Boolean(def && def.lockUnlockTools);
   }
 
   function isSubmitTool(def, toolName) {
@@ -174,6 +190,7 @@ export function createGoalEngine({ goals, log }) {
     get,
     defFor,
     allowedToolSet,
+    unlockLocked,
     isSubmitTool,
     requiredCallsSatisfied,
     activate,

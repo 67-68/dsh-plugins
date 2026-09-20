@@ -123,6 +123,207 @@ print(f"    bash-fix result: patched={patched} already={already} skipped={skippe
 PY
 fi
 
+# 0c) DSH/pi-ai 内置的 opencode-go 模型目录过时：这里在每次部署时用
+#     patches/opencode-go.models.json 覆盖生成数据，只保留 Go 文档声明的
+#     DeepSeek 全套（含规范 ID deepseek-flash）和 Muse Spark 1.3 Contributor。
+#     注意：Muse Spark 1.3 Contributor Free 只能在 OpenCode 内用，第三方
+#     harness 会收到 403 FreeTierError，因此这里挂 Go 端点上的付费 contributor。
+#     幂等：内容一致就跳过；首次写入前备份为 .orig-opencode-go-models。
+#     DSH/pi-ai 升级会覆盖该文件，需重跑本脚本。
+OPENCODE_GO_PATCH="$HERE/patches/opencode-go.models.json"
+if [ -f "$OPENCODE_GO_PATCH" ]; then
+  OPENCODE_GO_TARGETS=(
+    "$NODE_MODULES_DIR/@earendil-works/pi-ai/dist/providers/data/opencode-go.json"
+    "$NODE_MODULES_DIR/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/providers/data/opencode-go.json"
+  )
+  if command -v dsh >/dev/null 2>&1; then
+    ocgo_dsh_bin="$(command -v dsh)"
+    while [ -L "$ocgo_dsh_bin" ]; do
+      ocgo_link="$(readlink "$ocgo_dsh_bin")"
+      case "$ocgo_link" in
+        /*) ocgo_dsh_bin="$ocgo_link" ;;
+        *) ocgo_dsh_bin="$(cd "$(dirname "$ocgo_dsh_bin")" && pwd)/$ocgo_link" ;;
+      esac
+    done
+    ocgo_dsh_root="$(cd "$(dirname "$ocgo_dsh_bin")/.." && pwd)"
+    OPENCODE_GO_TARGETS+=("$ocgo_dsh_root/node_modules/@earendil-works/pi-ai/dist/providers/data/opencode-go.json")
+    OPENCODE_GO_TARGETS+=("$ocgo_dsh_root/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/providers/data/opencode-go.json")
+  fi
+  python3 - "$OPENCODE_GO_PATCH" "${OPENCODE_GO_TARGETS[@]}" <<'PY'
+import json, os, shutil, sys
+
+patch_path = sys.argv[1]
+with open(patch_path, encoding="utf-8") as fh:
+    patch = json.load(fh)
+patch_text = json.dumps(patch, indent=2, ensure_ascii=False) + "\n"
+
+patched = already = skipped = 0
+seen = set()
+for target in sys.argv[2:]:
+    if not target:
+        continue
+    real = os.path.realpath(os.path.expanduser(target))
+    if real in seen:
+        continue
+    seen.add(real)
+    if not os.path.isfile(real):
+        continue
+    try:
+        with open(real, encoding="utf-8") as fh:
+            current_text = fh.read()
+    except OSError as err:
+        print(f"    opencode-go models {real} (read failed: {err})")
+        skipped += 1
+        continue
+    try:
+        current = json.loads(current_text)
+    except Exception as err:
+        print(f"    opencode-go models {real} (invalid JSON: {err}; skipped)")
+        skipped += 1
+        continue
+    if current == patch:
+        print(f"    opencode-go models {real} (already patched)")
+        already += 1
+        continue
+    backup = real + ".orig-opencode-go-models"
+    backup_note = ""
+    try:
+        if os.path.exists(backup):
+            backup_note = "existing backup"
+        else:
+            try:
+                shutil.copy2(real, backup)
+                backup_note = f"backup {os.path.basename(backup)}"
+            except OSError:
+                shutil.copyfile(real, backup)
+                backup_note = f"backup {os.path.basename(backup)} (metadata copy skipped)"
+    except OSError as err:
+        print(f"    opencode-go models {real} (backup failed: {err}; continuing without backup)")
+    try:
+        with open(real, "w", encoding="utf-8") as fh:
+            fh.write(patch_text)
+    except OSError as err:
+        print(f"    opencode-go models {real} (write failed: {err}; re-run with write permission)")
+        skipped += 1
+        continue
+    print(f"    opencode-go models {real} (patched{'; ' + backup_note if backup_note else ''})")
+    patched += 1
+print(f"    opencode-go models result: patched={patched} already={already} skipped={skipped}")
+PY
+fi
+
+# 0d) OpenCode Go 兼容修复：pi-ai 的 OpenAI-compatible client 默认不会发
+#     x-opencode-session；Go 网关缺这个头会返回 400 MissingSessionID，
+#     客户端常把它显示成 “API key invalid”。这里给 opencode-go provider
+#     补上该头：优先用 DSH 传入的 sessionId，缺失时用固定值兜底，保证
+#     请求至少能被网关路由。幂等：已含该头则跳过。
+SESSION_PATCH_TARGETS=(
+  "$NODE_MODULES_DIR/@earendil-works/pi-ai/dist/api/openai-completions.js"
+  "$NODE_MODULES_DIR/@earendil-works/pi-ai/dist/api/openai-responses.js"
+  "$NODE_MODULES_DIR/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js"
+  "$NODE_MODULES_DIR/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js"
+)
+if command -v dsh >/dev/null 2>&1; then
+  session_dsh_bin="$(command -v dsh)"
+  while [ -L "$session_dsh_bin" ]; do
+    session_link="$(readlink "$session_dsh_bin")"
+    case "$session_link" in
+      /*) session_dsh_bin="$session_link" ;;
+      *) session_dsh_bin="$(cd "$(dirname "$session_dsh_bin")" && pwd)/$session_link" ;;
+    esac
+  done
+  session_dsh_root="$(cd "$(dirname "$session_dsh_bin")/.." && pwd)"
+  SESSION_PATCH_TARGETS+=("$session_dsh_root/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js")
+  SESSION_PATCH_TARGETS+=("$session_dsh_root/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js")
+  SESSION_PATCH_TARGETS+=("$session_dsh_root/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js")
+  SESSION_PATCH_TARGETS+=("$session_dsh_root/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js")
+fi
+python3 - "${SESSION_PATCH_TARGETS[@]}" <<'PY'
+import os, shutil, sys
+
+OLD_COMPLETIONS = '''    if (sessionId && compat.sendSessionAffinityHeaders) {
+        if (compat.sessionAffinityFormat === "openrouter") {
+            headers["x-session-id"] = sessionId;
+        }
+        else {
+            if (compat.sessionAffinityFormat === "openai") {
+                headers.session_id = sessionId;
+            }
+            headers["x-client-request-id"] = sessionId;
+            headers["x-session-affinity"] = sessionId;
+        }
+    }
+'''
+OLD_RESPONSES = '''    if (sessionId) {
+        if (compat.sessionAffinityFormat === "openrouter") {
+            headers["x-session-id"] = sessionId;
+        }
+        else {
+            if (compat.sessionAffinityFormat === "openai") {
+                headers.session_id = sessionId;
+            }
+            headers["x-client-request-id"] = sessionId;
+        }
+    }
+'''
+ADD = '''    if (model.provider === "opencode-go") {
+        headers["x-opencode-session"] = sessionId || "dsh-opencode-go";
+    }
+'''
+
+patched = already = skipped = 0
+seen = set()
+for target in sys.argv[1:]:
+    if not target:
+        continue
+    real = os.path.realpath(os.path.expanduser(target))
+    if real in seen:
+        continue
+    seen.add(real)
+    if not os.path.isfile(real):
+        continue
+    try:
+        with open(real, encoding="utf-8") as fh:
+            src = fh.read()
+    except OSError as err:
+        print(f"    opencode-session {real} (read failed: {err})")
+        skipped += 1
+        continue
+    if "x-opencode-session" in src:
+        print(f"    opencode-session {real} (already patched)")
+        already += 1
+        continue
+    if real.endswith("openai-completions.js"):
+        old = OLD_COMPLETIONS
+    elif real.endswith("openai-responses.js"):
+        old = OLD_RESPONSES
+    else:
+        continue
+    if src.count(old) != 1:
+        print(f"    opencode-session {real} (expected exactly 1 session block, found {src.count(old)}; skipped)")
+        skipped += 1
+        continue
+    backup = real + ".orig-opencode-session"
+    try:
+        if not os.path.exists(backup):
+            try:
+                shutil.copy2(real, backup)
+            except OSError:
+                shutil.copyfile(real, backup)
+    except OSError as err:
+        print(f"    opencode-session {real} (backup failed: {err}; continuing without backup)")
+    try:
+        with open(real, "w", encoding="utf-8") as fh:
+            fh.write(src.replace(old, old + ADD, 1))
+    except OSError as err:
+        print(f"    opencode-session {real} (write failed: {err}; re-run with write permission)")
+        skipped += 1
+        continue
+    print(f"    opencode-session {real} (patched, backup {os.path.basename(backup)})")
+    patched += 1
+print(f"    opencode-session result: patched={patched} already={already} skipped={skipped}")
+PY
+
 echo "==> Deploying dsh-plugins -> $DSH_HOME"
 
 # 1) Host plugins (*.mjs) into the web profile dir.

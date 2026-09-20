@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { assertTextLength } from './text-limits.js';
 import { dirname, join, resolve, sep } from 'node:path';
 
 /**
@@ -203,9 +204,7 @@ export function createPatternStore(rootDir) {
       .map((line) => String(line == null ? '' : line).trim())
       .filter((line) => line.length > 0);
     for (const body of bodies) {
-      if (body.length > MAX_BODY) {
-        throw new Error(`行为模式每行正文不能超过 ${MAX_BODY} 字（当前 ${body.length} 字）：${body}`);
-      }
+      assertTextLength(body, MAX_BODY, '行为模式每行正文');
     }
     const rows = parseIndex(project);
     let max = 0;
@@ -254,10 +253,11 @@ export function createPatternStore(rootDir) {
     // 无论哪种来源都必须满足 20 字预算，超长时要求调用方压缩摘要。
     const providedBody = String(bodyInput || '').trim();
     const body = providedBody || `${triggerText} → ${rightText}`;
-    if (body.length > MAX_BODY) {
+    try {
+      assertTextLength(body, MAX_BODY, '热文件行正文');
+    } catch (err) {
       throw new Error(
-        `热文件行正文不能超过 ${MAX_BODY} 字（当前 ${body.length} 字）：${body}。` +
-          '请在 facts 步骤额外传一个更短的 body 摘要（≤20 字），详细内容仍写在 trigger/wrong/right 里。',
+        `${err.message}请在 facts 步骤额外传一个更短的 body 摘要（≤20 字），详细内容仍写在 trigger/wrong/right 里。`,
       );
     }
     const rule = insertRule(project, {
@@ -337,10 +337,11 @@ export function createPatternStore(rootDir) {
     // 新规则的摘要沿用 addRule 的预算与回退规则。
     const providedBody = String(bodyInput || '').trim();
     const newBody = providedBody || `${triggerText} → ${rightText}`;
-    if (newBody.length > MAX_BODY) {
+    try {
+      assertTextLength(newBody, MAX_BODY, '热文件行正文');
+    } catch (err) {
       throw new Error(
-        `热文件行正文不能超过 ${MAX_BODY} 字（当前 ${newBody.length} 字）：${newBody}。` +
-          '请在 body 参数传一个更短的摘要（≤20 字）。',
+        `${err.message}请在 body 参数传一个更短的摘要（≤20 字）。`,
       );
     }
     // 目标必须存在且未过期（与 retire 的校验保持一致）。

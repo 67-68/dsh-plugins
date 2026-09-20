@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { assertTextLength } from './text-limits.js';
 import { dirname, join, resolve, sep } from 'node:path';
 
 /**
@@ -46,13 +47,9 @@ function validateFeature(feature) {
     throw new Error(`feature status "${feature.status}" 非法，只允许 ${FEATURE_STATUSES.join(' / ')}。`);
   }
   if (!userVisibleBehavior) throw new Error('feature 缺少 user_visible_behavior。');
-  if (userVisibleBehavior.length > MAX_USER_VISIBLE_BEHAVIOR) {
-    throw new Error(`user_visible_behavior 超过 ${MAX_USER_VISIBLE_BEHAVIOR} 字（当前 ${userVisibleBehavior.length} 字）。`);
-  }
+  assertTextLength(userVisibleBehavior, MAX_USER_VISIBLE_BEHAVIOR, 'user_visible_behavior');
   if (!featureIntent) throw new Error('feature 缺少 feature_intent。');
-  if (featureIntent.length > MAX_FEATURE_INTENT) {
-    throw new Error(`feature_intent 超过 ${MAX_FEATURE_INTENT} 字（当前 ${featureIntent.length} 字）。`);
-  }
+  assertTextLength(featureIntent, MAX_FEATURE_INTENT, 'feature_intent');
   return {
     id: feature.id,
     title,

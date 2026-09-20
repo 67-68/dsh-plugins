@@ -3,9 +3,9 @@
  *
  * The classifier half is extracted verbatim from the legacy index.js so the
  * existing security behavior is preserved. On top of it, READ_ONLY_BASH_VERBS
- * describes commands that are allowed in EVERY state without being declared in
- * declare_target, as long as the command still classifies as read-only and does
- * not carry a write-capable flag.
+ * describes commands that are allowed in `read-only-strict` states, as long as
+ * the command still classifies as read-only and does not carry a
+ * write-capable flag.
  */
 
 /** Default bash deny-list entries; overridable from the Web settings tab. */
@@ -65,12 +65,6 @@ export function isAlwaysAllowedBash(command) {
   return classifyCommand(command) === 'read-only';
 }
 
-/** Commands that must be declared unless the whole command is harmlessly read-only. */
-export function undeclaredBashVerbs(command, declaredBash) {
-  if (isAlwaysAllowedBash(command)) return [];
-  const set = new Set(declaredBash);
-  return extractCommandVerbs(command).filter((verb) => !set.has(verb) && !ALWAYS_ALLOWED_BASH_VERBS.has(verb));
-}
 /**
  * Lightweight shell-command classifier.
  * Splits on top-level pipes / separators, tokenizes each simple command,

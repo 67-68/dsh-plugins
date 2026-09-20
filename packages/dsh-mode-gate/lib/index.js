@@ -14,11 +14,14 @@ import { readHeadCommit } from './git-commit.js';
 import { runGitUpdate } from './git-update.js';
 import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh } from './architecture-store.js';
 import { generateDependencyMap, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
-import { budgetDecision, estimateMessagesTokens } from './context-budget.js';
+import { budgetDecision, estimateMessagesTokens, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './context-budget.js';
 import { compressContext, assertLongTermDocsFirst } from './context-compressor.js';
 import { assertNotProgress, assertReasonValid, assertSelfCheckFresh } from './pattern-gate.js';
 import { createGoalEngine } from './goal-engine.js';
+import { MODEL_COMPRESSION_TABLE, effectiveCompressionPoint, normalizeCompressionOverrides } from './model-compression.js';
 import { createBuiltinGoals } from './goals.js';
+import { assertTextLength } from './text-limits.js';
+import { createRestrictionStore, getRestrictionOrBuiltin, isSkillDeniedByRestriction, isToolDeniedByRestriction, matchRestrictionDenyCommand, BUILTIN_RESTRICTION_SETS } from './restrictions.js';
 import { createWorkflowRegistry, expandHome, BUILTIN_WORKFLOW_DIR } from './workflows.js';
 import {
   createDynamicPlan,
@@ -33,19 +36,20 @@ import {
   WORKFLOW_REASONING_EFFORTS,
   formatCapabilities,
   loadStateStore,
+  normalizeModelAliases,
   normalizeModelCatalog,
   normalizeRequirements,
   normalizeStageOverrides,
   normalizeWorkflowOverrides,
   readSessionEntry,
   readState,
+  resolveModelAlias,
   saveStateStore,
   stageIdFor,
   writeState,
 } from './state.js';
 import {
   ALWAYS_ALLOWED,
-  ALLOWED_WITHOUT_TARGET,
   KNOWN_WRITE_TOOLS,
   toolDisposition,
 } from './permissions.js';
@@ -56,21 +60,11 @@ import {
   isGitMutation,
   matchBashDeny,
   normalizeDenyList,
-  undeclaredBashVerbs,
 } from './bash.js';
 
 
-const CONTROL_TOOLS = new Set([
-  'declare_target', 'switch_mode', 'skill_search', 'skill_load', 'request_extra',
-  'dev_tool_search', 'submit_state', 'list_workflows', 'get_workflow_state', 'select_workflow',
-]);
-
-function firstLine(text) {
-  const value = String(text || '').trim();
-  if (!value) return '';
-  const line = value.split(/\r?\n/)[0].trim();
-  return line.replace(/^\[目标\]\s*/, '') || line;
-}
+// CONTROL_TOOLS 已随 declare_target 机制一并移除：不再有强制握手，
+// pre-execute 只保留 switch_mode/request_extra 特判、阶段权限与 goal 门禁。
 
 /** Best-effort extract the human text from a user/message event. */
 function extractUserText(event) {
@@ -173,6 +167,7 @@ class ModeGateGateway extends TypertRemoteService {
       chosenPresetAction: entry.chosenPresetAction,
       workspace: entry.workspace || null,
       modelCatalog: store.modelCatalog,
+      modelAliases: store.modelAliases || [],
       pendingProtocol: entry.pendingProtocol,
       workflow: wf
         ? { id: wf.id, label: wf.label || wf.id, states, phaseIndex: states.findIndex((state) => state.id === entry.phase) }
@@ -230,6 +225,61 @@ class ModeGateGateway extends TypertRemoteService {
     store.modelCatalog = normalizeModelCatalog(args && args.entries);
     saveStateStore(store);
     return { entries: store.modelCatalog };
+  }
+  async getModelAliases() {
+    return { entries: loadStateStore().modelAliases || [] };
+  }
+  async getModelCompressionTable() {
+    const overrides = loadStateStore().compressionOverrides || {};
+    const table = MODEL_COMPRESSION_TABLE.map((entry) => {
+      const builtin = effectiveCompressionPoint(entry.modelId, entry.contextWindow, {});
+      const effective = effectiveCompressionPoint(entry.modelId, entry.contextWindow, overrides);
+      return {
+        modelId: entry.modelId,
+        provider: entry.provider,
+        contextWindow: entry.contextWindow,
+        defaultPoint: builtin.point,
+        point: effective.point,
+        origin: effective.origin,
+        label: effective.label,
+        sourceUrl: entry.sourceUrl || '',
+        note: entry.note || '',
+      };
+    });
+    return { table, overrides };
+  }
+  async getCompressionOverrides() {
+    return { overrides: loadStateStore().compressionOverrides || {} };
+  }
+  async setCompressionOverrides(args) {
+    const store = loadStateStore();
+    store.compressionOverrides = normalizeCompressionOverrides(args && args.overrides);
+    saveStateStore(store);
+    return { overrides: store.compressionOverrides };
+  }
+  async setModelAliases(args) {
+    const store = loadStateStore();
+    store.modelAliases = normalizeModelAliases(args && args.entries);
+    saveStateStore(store);
+    return { entries: store.modelAliases };
+  }
+  async getRestriction(args) {
+    return getRestrictionOrBuiltin(this.options.restrictions, args && args.id);
+  }
+  async getRestrictions() {
+    const sets = await this.options.restrictions.list();
+    const seen = new Set(sets.map((entry) => entry && entry.id));
+    for (const builtin of Object.values(BUILTIN_RESTRICTION_SETS)) {
+      if (!seen.has(builtin.id)) sets.push({ ...builtin, builtin: true });
+    }
+    sets.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    return { sets };
+  }
+  async setRestriction(args) {
+    return await this.options.restrictions.save(args && args.set);
+  }
+  async deleteRestriction(args) {
+    return await this.options.restrictions.remove(args && args.id);
   }
   async getWorkflowSettings() {
     const registry = this.options.registryForWorkspace(this.options.defaultWorkspace || null);
@@ -321,6 +371,11 @@ class ModeGateGateway extends TypertRemoteService {
       if (requirements.length > 0) current.requirements = requirements;
       else delete current.requirements;
     }
+    if (typeof patch.restriction === 'string') {
+      const ref = patch.restriction.trim();
+      if (ref) current.restriction = ref;
+      else delete current.restriction;
+    }
     if (Object.keys(current).length > 0) wfOverrides[stateId] = current;
     else delete wfOverrides[stateId];
     if (Object.keys(wfOverrides).length > 0) overrides[workflowId] = wfOverrides;
@@ -359,6 +414,11 @@ class ModeGateGateway extends TypertRemoteService {
       if (requirements.length > 0) current.requirements = requirements;
       else delete current.requirements;
     }
+    if (typeof patch.restriction === 'string') {
+      const ref = patch.restriction.trim();
+      if (ref) current.restriction = ref;
+      else delete current.restriction;
+    }
     if (Object.keys(current).length > 0) stageOverrides[stageId] = current;
     else delete stageOverrides[stageId];
     store.stageOverrides = stageOverrides;
@@ -382,7 +442,9 @@ class ModeGateGateway extends TypertRemoteService {
 markRemoteMethods(ModeGateGateway, [
   'getState', 'getWorkflows', 'selectWorkflow',
   'getBashDenyList', 'setBashDenyList',
-  'getModelCatalog', 'setModelCatalog',
+  'getModelCatalog', 'setModelCatalog', 'getModelAliases', 'setModelAliases', 'getModelCompressionTable',
+  'getCompressionOverrides', 'setCompressionOverrides',
+  'getRestrictions', 'getRestriction', 'setRestriction', 'deleteRestriction',
   'getWorkflowSettings', 'setWorkflowOverride', 'setStageOverride',
   'approveRequirementProtocol', 'rejectRequirementProtocol',
 ]);
@@ -437,8 +499,14 @@ export default {
         ? cfg.workflowsDir.trim()
         : join(homedir(), '.dsh', 'workflows'),
     );
+    const restrictionsDir = expandHome(
+      typeof cfg.restrictionsDir === 'string' && cfg.restrictionsDir.trim()
+        ? cfg.restrictionsDir.trim()
+        : join(homedir(), '.dsh', 'restrictions'),
+    );
 
     const featureIntents = createFeatureIntentStore(featureIntentDir);
+    const restrictions = createRestrictionStore(restrictionsDir);
     const featureList = createFeatureListStore(featureListDir);
     const patternStore = createPatternStore(patternDir);
     const journal = createJournalStore(journalDir);
@@ -595,10 +663,45 @@ export default {
       return wf && wf[stateId] ? wf[stateId] : null;
     }
 
+    /**
+     * 解析当前 state 生效的限制引用：stage override 的 restriction 优先，
+     * 其次 state 定义自带的 restriction 字段。文件缺失时回退同名内置。
+     * 无引用或解析失败返回 null（不限制）。
+     */
+    function resolveStateRestriction(state, workflowId, stateId, stateDef) {
+      const override = stateOverride(state, workflowId, stateId);
+      const ref = (override && typeof override.restriction === 'string' && override.restriction.trim())
+        || (stateDef && typeof stateDef.restriction === 'string' && stateDef.restriction.trim())
+        || '';
+      if (!ref) return null;
+      try {
+        return getRestrictionOrBuiltin(restrictions, ref);
+      } catch (err) {
+        log(`限制引用解析失败（${workflowId}/${stateId} -> ${ref}）：${(err && err.message) || err}`);
+        return null;
+      }
+    }
+
     function modelEntryForId(modelId) {
       if (!modelId) return null;
       const catalog = loadStateStore().modelCatalog || [];
       return catalog.find((entry) => entry && entry.id === modelId) || null;
+    }
+
+    /**
+     * Resolve a stage model reference (codename or legacy catalog id) to a
+     * concrete { provider, model }. Codename aliases win; unmapped references
+     * fall back to the legacy model catalog lookup.
+     */
+    function resolveStageModel(modelRef) {
+      const ref = typeof modelRef === 'string' ? modelRef.trim() : '';
+      if (!ref) return null;
+      const store = loadStateStore();
+      const aliased = resolveModelAlias(store.modelAliases, ref);
+      if (aliased) return aliased;
+      const entry = modelEntryForId(ref);
+      if (entry) return { provider: entry.provider || 'deepseek-official', model: entry.id };
+      return null;
     }
 
     function stateModelOverride(state, workflowId, stateId) {
@@ -736,10 +839,10 @@ export default {
       const state = readState(agent);
       const override = stateModelOverride(state, workflowId, stateId);
       if (!override || !override.model) return;
-      const entry = modelEntryForId(override.model);
+      const resolved = resolveStageModel(override.model);
       const payload = {
-        provider: (entry && entry.provider) || 'deepseek-official',
-        model: override.model,
+        provider: (resolved && resolved.provider) || 'deepseek-official',
+        model: (resolved && resolved.model) || override.model,
         ...(override.reasoningEffort ? { reasoningEffort: override.reasoningEffort } : {}),
       };
       try {
@@ -850,14 +953,33 @@ export default {
       const stateDef = registry.stateOf(state.workflowId, state.phase);
       const wf = registry.get(state.workflowId);
       const signal = rawResult.signal || {};
-      // checklist-11/12：每次阶段转移都按硬编码预算表判定，并计算压缩边界。
-      // 只有「超预算 且 当前阶段是迭代边界」才把 overBudget=true 注入 transitions，
-      // 因此 RESEARCH→EXECUTE / EXECUTE→DEBUG 等迭代内部即使超预算也绝不会压缩；
-      // DEBUG→下一轮 RESEARCH（或结束）才允许压缩，由 transitions 的 context.overBudget 决定。
+      // 每次阶段转移都判定预算并计算压缩边界：优先使用当前阶段模型的
+      // 压缩黄金点（model-compression.js），未知模型回落到硬编码预算表。
+      // 只有「超预算 且 当前阶段是迭代边界 且 模型支持自动压缩」才把
+      // overBudget=true 注入 transitions，因此 RESEARCH→EXECUTE /
+      // EXECUTE→DEBUG 等迭代内部即使超预算也绝不会压缩；DEBUG→下一轮
+      // RESEARCH（或结束）才允许压缩，由 transitions 的 context.overBudget 决定。
+      const stageOverrideForBudget = stateModelOverride(state, state.workflowId, state.phase);
+      const stageModelForBudget = stageOverrideForBudget && stageOverrideForBudget.model
+        ? resolveStageModel(stageOverrideForBudget.model)
+        : null;
+      const phaseModelForBudget = stateDef && stateDef.model && stateDef.model.model ? stateDef.model.model : '';
+      const usageForBudget = state.contextUsage && typeof state.contextUsage === 'object' ? state.contextUsage : {};
+      const peakForBudget = Number.isFinite(usageForBudget.peakTokens) && usageForBudget.peakTokens > 0
+        ? usageForBudget.peakTokens
+        : usageForBudget.tokens;
       const contextBudget = budgetDecision({
         workflowId: state.workflowId,
         stateId: state.phase,
-        contextTokens: state.contextUsage && state.contextUsage.tokens,
+        contextTokens: peakForBudget,
+        modelId: resolveBudgetModelId([
+          stageModelForBudget && stageModelForBudget.model ? stageModelForBudget.model : '',
+          state.selectedModel && state.selectedModel.model ? state.selectedModel.model : '',
+          phaseModelForBudget,
+          usageForBudget.modelId,
+        ]),
+        contextWindow: usageForBudget.contextWindow,
+        overrides: loadStateStore().compressionOverrides || {},
       });
       const { nextWorkflow, nextState, loopIncrement, complete } = resolveTransition({
         state,
@@ -975,7 +1097,7 @@ export default {
       if (live && typeof live.followup === 'function') {
         try {
           live.followup(createUserMessage({
-            content: [{ type: 'text', text: '需求协议已通过，请现在开始执行当前阶段的工作：先调用 declare_target 声明 Target，然后按阶段目标推进。' }],
+            content: [{ type: 'text', text: '需求协议已通过，请现在开始执行当前阶段的工作，直接按阶段目标推进。' }],
             source: { kind: 'user' },
           }));
         } catch (err) {
@@ -1051,13 +1173,7 @@ export default {
           ? { kind: 'allow' }
           : { kind: 'deny', reason: `当前状态只允许白名单只读命令（ls/cat/grep/sed/find 等），禁止 node/python3 等解释器：${command}` };
       }
-      const missing = undeclaredBashVerbs(command, state.bash);
-      if (missing.length) {
-        return {
-          kind: 'deny',
-          reason: `当前 bash 命令使用了未声明的命令动词：${missing.join(', ')}。完整命令：${command}。请调用 dev_tool_search（或 request_extra）申请额外 bash 命令，或在 declare_target 中补充声明。`,
-        };
-      }
+      // declare_target 机制已移除：不再按声明动词拦截，非危险命令直接放行。
       return kind === 'dangerous'
         ? { kind: 'ask', reason: `检测到危险命令，需要人工授权：${command}` }
         : { kind: 'allow' };
@@ -1084,12 +1200,8 @@ export default {
         '[mode-gate]',
         `当前工作流：${state.workflowId}${wf ? `（${wf.label}）` : ''}`,
         `当前状态：${state.phase}${stateDef ? `（${stateDef.label}）` : ''}`,
-        `当前 Target：${state.target && state.target.target ? firstLine(state.target.target) : '未声明'}`,
-        `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
-        `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
         '规则：',
-        '- 工作流状态下，每次行动前必须先调用 declare_target 声明 Target。',
-        '- 未声明就调用的 skill_load / bash 命令会被拦截；需要时调用 dev_tool_search（或 request_extra）申请。',
+        '- 本工作流不再要求声明 Target，直接按阶段目标推进即可。',
         '- 始终可用：skill_search、switch_mode、dev_tool_search / request_extra、submit_state。',
         '当前禁止的 bash 命令：',
         ...(denyList.length ? denyList.map((entry) => `  - ${entry.commands.join(', ')}：${entry.reason || '已禁止'}`) : ['  （无）']),
@@ -1116,7 +1228,12 @@ export default {
         const pending = staticPlanPendingCount(plan);
         const current = staticPlanCurrent(plan);
         lines.push('', `Checklist 进度：${plan.items.length - pending}/${plan.items.length} 完成`);
-        lines.push(...plan.items.map((item) => `  - [${item.status === 'completed' ? 'x' : ' '}] ${item.id}: ${item.text}`));
+        // 切换上下文只展示前一个、进行中、后一个，避免把整条 checklist 注入上下文。
+        const currentIndex = current ? plan.items.findIndex((item) => item.id === current.id) : -1;
+        const visibleItems = currentIndex >= 0
+          ? plan.items.slice(Math.max(0, currentIndex - 1), currentIndex + 2)
+          : plan.items.slice(0, 3);
+        lines.push(...visibleItems.map((item) => `  - [${item.status === 'completed' ? 'x' : item.status === 'in_progress' ? '~' : ' '}] ${item.id}: ${item.text}`));
         if (current) lines.push(`当前 checklist goal：${current.id}`);
       }
       const dynamic = state.dynamicPlan;
@@ -1125,12 +1242,7 @@ export default {
         lines.push('', `当前动态计划${goalLabel}（本状态内有效，状态切换时清空）：`);
         lines.push(...dynamic.items.map((item) => `  - [${item.status === 'completed' ? 'x' : item.status === 'in_progress' ? '~' : ' '}] ${item.content}`));
       }
-      const memory = state.loopMemory;
-      if (wf && wf.memory && Array.isArray(wf.memory.injectAtStates) && wf.memory.injectAtStates.includes(state.phase)
-        && memory && Array.isArray(memory.blocks) && memory.blocks.length > 0) {
-        lines.push('', `Loop Memory（iteration=${memory.iteration || 0}）：`);
-        lines.push(...memory.blocks.slice(-8).map((block) => `  - [${block.iteration}] ${block.text}${block.stamp ? `（${block.stamp}）` : ''}`));
-      }
+      // Loop Memory no longer injected into switch context (iteration counting and compression kept).
       if (state.migrationNotice) lines.push('', `迁移提示：${state.migrationNotice}`);
       return lines.join('\n');
     }
@@ -1201,51 +1313,8 @@ export default {
     }
 
     // ── tools ────────────────────────────────────────────────────────────
-    ctx.tools.register(defineTool({
-      name: 'declare_target',
-      description: '声明当前任务目标（Target），并同时声明本次需要的 skills 和 bash 命令。工作流状态下必须在其他工具调用之前使用。',
-      parameters: {
-        target: { type: 'string', required: true, description: '任务目标/任务名。' },
-        mode: { type: 'string', description: '可选，预期状态 id。' },
-        skills: { type: 'array', items: { type: 'string' }, description: '本次需要的 skill 名称列表。' },
-        bash: { type: 'array', items: { type: 'string' }, description: '本次需要的 bash 命令动词列表。' },
-      },
-      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute(args, exec) {
-        const agent = exec.agent;
-        if (agent === void 0) throw new Error('declare_target 需要 agent 上下文');
-        const before = readState(agent);
-        const skills = Array.isArray(args.skills) ? args.skills.filter((s) => typeof s === 'string' && s.trim()) : [];
-        const bash = Array.isArray(args.bash) ? args.bash.filter((s) => typeof s === 'string' && s.trim()) : [];
-        writeState(agent, {
-          target: { target: args.target, mode: args.mode || before.phase },
-          skills,
-          bash,
-          workspace: workspaceOf(agent, defaultWorkspace),
-        });
-        const state = readState(agent);
-        const registry = registryFor(agent);
-        const stateDef = registry.stateOf(state.workflowId, state.phase);
-        const hasPending = Boolean(state.pendingProtocol);
-        let goalPrompt = '';
-        if (!hasPending && stateDef && stateDef.goal && (!state.goal || state.goal.status !== 'active')) {
-          const activated = await activateStateGoal(agent, state.workflowId, state.phase);
-          goalPrompt = activated && activated.prompt ? activated.prompt : '';
-        } else if (state.goal && state.goal.status === 'active' && state.goal.prompt) {
-          goalPrompt = state.goal.prompt;
-        }
-        let refreshed = readState(agent);
-        if (goalPrompt) {
-          writeState(agent, { target: { target: goalPrompt, mode: refreshed.phase } });
-          refreshed = readState(agent);
-        }
-        return [
-          formatCapabilities(refreshed),
-          goalPrompt ? `\n当前目标提示：\n${goalPrompt}` : '',
-        ].join('\n').trim();
-      },
-    }));
-
+    // declare_target 机制已移除：不再要求声明 Target，直接按阶段目标推进。
+    // 进入新状态时的 goal 激活由 activateStateGoal（切换/转移路径）承担。
     ctx.tools.register(defineTool({
       name: 'switch_mode',
       description: '请求切换工作流/状态。切换需要用户批准，批准后立即生效。',
@@ -1345,7 +1414,7 @@ export default {
         if (!wf) throw new Error(`未知工作流 ${String(args.workflow_id)}`);
         const stateId = args.state || wf.startState;
         const activated = await activateStateGoal(agent, args.workflow_id, stateId);
-        return `已静默切换到 ${args.workflow_id} / ${stateId}。请先调用 declare_target。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`;
+        return `已静默切换到 ${args.workflow_id} / ${stateId}。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`;
       },
     }));
 
@@ -1615,6 +1684,22 @@ export default {
     }));
 
     ctx.tools.register(defineTool({
+      name: 'pattern_list',
+      description: '只读当前项目行为模式热文件（一行一条规则摘要）：ACCUMULATE 检查已有规则是否过期时使用，不读明细、不读短期对话。',
+      parameters: {
+        project: { type: 'string', description: '项目名；省略时使用当前 feature intent 文件名。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args, exec) {
+        const state = readState(exec.agent);
+        const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
+        if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
+        const rows = patternStore.list(project);
+        if (!rows.length) return `（${project} 热文件暂无规则）`;
+        return rows.map((row) => `- [${row.id}] ${row.body}`).join('\n');
+      },
+    }));
+    ctx.tools.register(defineTool({
       name: 'pattern_audit',
       description: '查看行为模式的变更记录（audit 冷文件）：create / rationale / retire / replace 的完整流水。',
       parameters: {
@@ -1734,8 +1819,62 @@ export default {
         const state = readState(agent);
         assertLongTermDocsFirst((state.goal && state.goal.calls) || {});
         const result = await compressContext(agent, ctx, state);
-        writeState(agent, { loopMemory: result.loopMemory, compression: result.compression });
+        writeState(agent, {
+          loopMemory: result.loopMemory,
+          compression: result.compression,
+          contextUsage: resetContextPeak(readState(agent).contextUsage),
+        });
         return JSON.stringify({ ok: true, ...result.compression, message: '上下文压缩完成，可以 submit_state 进入 INIT。' }, null, 2);
+      },
+    }));
+
+    // ── 手动沉淀/压缩的共用实现（tool 与 / 命令共用同一份）──────────────
+    async function doGotoAccumulation(agent) {
+      const state = readState(agent);
+      if (state.workflowId !== 'create') throw new Error(`当前工作流是 ${state.workflowId || 'IDLE'}，手动沉淀仅 CREATE 工作流可用。`);
+      if (state.phase === 'ACCUMULATION') return { ok: true, message: '已在 ACCUMULATION，按正常沉淀流程继续即可。' };
+      const activated = await activateStateGoal(agent, 'create', 'ACCUMULATION');
+      return { ok: true, message: '已进入 ACCUMULATION，请按沉淀流程整理长期文档并压缩。', prompt: activated && activated.prompt ? String(activated.prompt).slice(0, 500) : '' };
+    }
+    async function doAccumulationAndInit(agent) {
+      const state = readState(agent);
+      if (state.workflowId !== 'create') throw new Error(`当前工作流是 ${state.workflowId || 'IDLE'}，手动沉淀仅 CREATE 工作流可用。`);
+      assertLongTermDocsFirst((state.goal && state.goal.calls) || {});
+      const result = await compressContext(agent, ctx, state);
+      writeState(agent, {
+        loopMemory: result.loopMemory,
+        compression: { ...result.compression, manual: true },
+        contextUsage: resetContextPeak(readState(agent).contextUsage),
+      });
+      await activateStateGoal(agent, 'create', 'INIT');
+      return { ok: true, ...result.compression, manual: true, message: '沉淀与压缩完成，已进入 INIT。' };
+    }
+
+    // ── 手动压缩触发（用户显式要求时调用，常控工具，各阶段可用）────────
+    // goto_accumulation：跳入 ACCUMULATION，走正常沉淀流程（长期文档整理 +
+    // compress_context + submit_state → INIT）。
+    ctx.tools.register(defineTool({
+      name: 'goto_accumulation',
+      description: '手动触发压缩：跳入 ACCUMULATION 阶段，走正常沉淀流程（先整理长期文档，再 compress_context，最后 submit_state 进入 INIT）。仅 CREATE 工作流可用。',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(_args, exec) {
+        return JSON.stringify(await doGotoAccumulation(exec.agent), null, 2);
+      },
+    }));
+
+    // accumulation_and_init：先沉淀后初始化（用户显式要求时使用；
+    // 压缩后峰值重置，下一轮重新累积）。
+    // 顺序与 ACCUMULATE 一致：必须先完成长期文档整理（pattern_reason +
+    // pattern_write），再压缩，最后进入 INIT。还没整理时报错提示先整理，
+    // 可先调 goto_accumulation 逐步沉淀，或补完文档整理后重试本工具。
+    ctx.tools.register(defineTool({
+      name: 'accumulation_and_init',
+      description: '手动沉淀并初始化：先整理长期文档（pattern_reason + pattern_write），再压缩上下文，然后进入 INIT。用户显式要求压缩时使用。仅 CREATE 工作流可用。',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(_args, exec) {
+        return JSON.stringify(await doAccumulationAndInit(exec.agent), null, 2);
       },
     }));
 
@@ -1814,7 +1953,7 @@ export default {
         const workspace = workspaceOf(agent, defaultWorkspace);
         const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile || '';
         let message = typeof args.message === 'string' ? args.message.trim() : '';
-        if (message && message.length > 200) throw new Error('commit message 不能超过 200 字。');
+        if (message) assertTextLength(message, 200, 'commit message');
         if (!message) {
           const item = staticPlanCurrent(state.staticPlan);
           const feature = featureId || 'update';
@@ -1894,6 +2033,13 @@ export default {
         const result = await submitGoalTool(agent, 'submit_requirement_protocol', args || {});
         const state = readState(agent);
         if (result && result.pendingApproval) {
+          // 协议已提交待用户确认：直接终结本轮，不再让模型继续思考或输出。
+          // 校验失败会走 throw 打回，不经过这里不断流。
+          try {
+            if (exec && typeof exec.concludeTurn === 'function') exec.concludeTurn();
+          } catch (_err) {
+            // 旧 harness 无 concludeTurn 时静默降级，仅靠 awaiting_user 提示约束模型。
+          }
           return JSON.stringify({
             ok: true,
             pendingApproval: true,
@@ -1933,16 +2079,62 @@ export default {
           const activated = await activateStateGoal(agent, workflowId, wf.startState);
           return {
             kind: 'success',
-            text: `已静默进入 ${wf.label}（${workflowId} / ${wf.startState}）。请先调用 declare_target。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`,
+            text: `已静默进入 ${wf.label}（${workflowId} / ${wf.startState}）。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`,
           };
         },
       });
+      // 与同名 tool 共用实现（连字符名：DSH 命令名不支持下划线）。
+      commandCtx.commands.register({
+        name: 'goto-accumulation',
+        description: '手动进入 ACCUMULATION 沉淀流程（仅 CREATE 工作流）',
+        input: { hint: '无参数，直接执行' },
+        recordInput: false,
+        handler: async ({ agent }) => {
+          try {
+            const result = await doGotoAccumulation(agent);
+            return { kind: 'success', text: result.message };
+          } catch (err) {
+            return { kind: 'error', text: (err && err.message) || String(err) };
+          }
+        },
+      });
+      commandCtx.commands.register({
+        name: 'accumulation-and-init',
+        description: '手动沉淀并初始化：先整理长期文档，再压缩，最后进入 INIT（仅 CREATE 工作流）',
+        input: { hint: '无参数，直接执行' },
+        recordInput: false,
+        handler: async ({ agent }) => {
+          try {
+            const result = await doAccumulationAndInit(agent);
+            return { kind: 'success', text: result.message };
+          } catch (err) {
+            return { kind: 'error', text: (err && err.message) || String(err) };
+          }
+        },
+      });
+      log('手动沉淀 / 命令已注册：/goto-accumulation、/accumulation-and-init');
     });
+
 
     // ── tool interception ────────────────────────────────────────────────
     ctx.on('tools/pre-execute', (exec, next) => {
       const name = exec.name;
-      if (name === 'declare_target') return next();
+
+      // 需求识别等阶段会锁定自行解锁新工具的能力：dev_tool_search /
+      // request_extra 直接拒绝（必须放在 request_extra 的 ask 分支之前）。
+      // submit_state / switch_mode 不受影响，agent 仍可推进阶段。
+      if (name === 'dev_tool_search' || name === 'request_extra') {
+        try {
+          if (exec.agent && goalEngine.unlockLocked(readState(exec.agent))) {
+            return Promise.resolve({
+              kind: 'deny',
+              reason: '当前阶段禁止自行解锁新工具，请专心分解需求；完成后调用 submit_state 推进。',
+            });
+          }
+        } catch (_err) {
+          // 读不到状态时走常规流程，不在这里拦截。
+        }
+      }
 
       if (name === 'switch_mode') {
         const registry = registryFor(exec.agent);
@@ -1982,10 +2174,18 @@ export default {
         return next();
       }
 
-      if (!state.target && !CONTROL_TOOLS.has(name) && !ALLOWED_WITHOUT_TARGET.has(name)) {
-        return Promise.resolve({ kind: 'deny', reason: '尚未声明 Target。请先调用 declare_target 声明当前任务目标。' });
+      // declare_target 机制已移除：不再要求先声明 Target，工具调用不再因此被拦截。
+      // state 引用的限制套件：工具 / skill / 命令三层强制执行。
+      const restrictionSet = resolveStateRestriction(state, state.workflowId, state.phase, stateDef);
+      if (restrictionSet && isToolDeniedByRestriction(restrictionSet, name)) {
+        return Promise.resolve({ kind: 'deny', reason: `当前阶段引用的限制「${restrictionSet.label || restrictionSet.id}」禁止使用工具 ${name}。` });
       }
-
+      if (restrictionSet && (name === 'skill_load' || name === 'skill')) {
+        const requestedSkill = exec.arguments && typeof exec.arguments.name === 'string' ? exec.arguments.name : '';
+        if (requestedSkill && isSkillDeniedByRestriction(restrictionSet, requestedSkill)) {
+          return Promise.resolve({ kind: 'deny', reason: `当前阶段引用的限制「${restrictionSet.label || restrictionSet.id}」禁止使用 skill "${requestedSkill}"。` });
+        }
+      }
       const activeGoalDef = goalEngine.defFor(state);
       if (state.goal && state.goal.status === 'active' && activeGoalDef) {
         const allowed = goalEngine.allowedToolSet(activeGoalDef);
@@ -1999,20 +2199,17 @@ export default {
 
       if (name === 'bash' || name === 'pwsh') {
         const command = String((exec.arguments && exec.arguments.command) || '');
+        if (restrictionSet) {
+          const hit = matchRestrictionDenyCommand(restrictionSet, command);
+          if (hit) {
+            return Promise.resolve({ kind: 'deny', reason: `当前阶段引用的限制「${restrictionSet.label || restrictionSet.id}」禁止命令：${command}。${hit.reason || ''}` });
+          }
+        }
         const decision = bashDecision(command, stateDef, state);
         return decision.kind === 'allow' ? next() : Promise.resolve(decision);
       }
 
-      if (name === 'skill_load' || name === 'skill') {
-        const requested = typeof exec.arguments && typeof exec.arguments.name === 'string' ? exec.arguments.name : '';
-        if (requested && !state.skills.includes(requested)) {
-          return Promise.resolve({
-            kind: 'deny',
-            reason: `skill "${requested}" 未声明。请先用 skill_search 查看，再用 dev_tool_search（或 request_extra）申请额外 skill。`,
-          });
-        }
-      }
-
+      // declare_target 机制已移除：skill 不再受声明白名单限制。
       const decision = toolDisposition(name, stateDef.permissions || {});
       if (decision.kind === 'deny') return Promise.resolve(decision);
 
@@ -2119,13 +2316,16 @@ export default {
           const requestMessages = Array.isArray(_payload && _payload.messages) ? _payload.messages : [];
           if (requestMessages.length > 0) {
             const contextTokens = estimateMessagesTokens(requestMessages);
+            const payloadModel = _payload && typeof _payload.model === 'string' ? _payload.model : '';
+            const payloadWindow = _payload && Number.isFinite(_payload.contextWindow) ? _payload.contextWindow : NaN;
             writeState(agent, {
-              contextUsage: {
+              contextUsage: trackContextUsage(state.contextUsage, {
                 tokens: contextTokens,
-                at: Date.now(),
+                modelId: payloadModel,
+                contextWindow: payloadWindow,
                 workflowId: state.workflowId,
                 stateId: state.phase,
-              },
+              }),
             });
           }
           // Safety net for the feature-intent approval gate: a new user message
@@ -2165,9 +2365,9 @@ export default {
           const phaseOverride = stateModelOverride(state, state.workflowId, state.phase);
           if (phaseOverride) {
             if (phaseOverride.model) {
-              const entry = modelEntryForId(phaseOverride.model);
-              _payload.provider = (entry && entry.provider) || 'deepseek-official';
-              _payload.model = phaseOverride.model;
+              const resolved = resolveStageModel(phaseOverride.model);
+              _payload.provider = (resolved && resolved.provider) || 'deepseek-official';
+              _payload.model = (resolved && resolved.model) || phaseOverride.model;
             }
             if (phaseOverride.reasoningEffort) _payload.reasoningEffort = phaseOverride.reasoningEffort;
           }
@@ -2187,6 +2387,7 @@ export default {
       rejectRequirementProtocol: rejectPendingProtocol,
       goalEngine,
       buildAutoGuide,
+      restrictions,
     });
   },
 };

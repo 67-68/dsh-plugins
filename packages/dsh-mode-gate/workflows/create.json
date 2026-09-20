@@ -3,7 +3,7 @@
   "label": "CREATE",
   "description": "写新功能：基准阅读 → 需求分解 → 研究/执行/调试/总结循环，直到 checklist 全部完成。",
   "kind": "workflow",
-  "startState": "BASE_READ",
+  "startState": "INIT",
   "ui": {
     "showInIdleModal": true,
     "order": 20,
@@ -53,71 +53,23 @@
   },
   "states": [
     {
-      "id": "BASE_READ",
-      "label": "了解项目基准",
-      "description": "确认项目基准；只做只读调研，不写任何文件。",
-      "permissions": {
-        "write": false,
-        "bash": "read-only",
-        "tools": [
-          "read",
-          "grep",
-          "glob",
-          "skill_load",
-          "skill_search",
-          "bash",
-          "str_replace_editor:view"
-        ]
-      },
-      "model": {
-        "reasoningEffort": "high"
-      },
-      "goal": {
-        "ref": "base-read.noop"
-      },
-      "prompt": "确认项目基准；可用只读工具查看仓库、feature intent 与长期文档，确认后 submit_state。",
-      "transitions": [
-        {
-          "when": {
-            "type": "goal.completed"
-          },
-          "to": {
-            "workflow": "$self",
-            "state": "REQUIREMENT_RECOGNITION"
-          }
-        }
-      ]
-    },
-    {
       "id": "REQUIREMENT_RECOGNITION",
       "label": "需求分解",
-      "description": "调研代码库与 feature intent；写入 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist（用户原话由系统自动收集），并把 checklist 注册为 staticPlan。本阶段只使用只读调研与 feature intent 工具。",
+      "description": "基于用户需求按模块分解需求；写入 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist（用户原话由系统自动收集），并把 checklist 注册为 staticPlan。本阶段不读任何实际文件、不解锁新工具，专心分解需求。",
       "permissions": {
         "write": false,
         "bash": "none",
         "tools": [
           "list_feature_intents",
-          "get_feature_intent",
           "update_feature_intent",
           "submit_requirement_protocol",
-          "read",
-          "grep",
-          "glob",
-          "web_search",
-          "read_url",
-          "read_url_batch",
-          "read_url_links",
-          "read_url_site",
-          "read_image",
           "list_agents",
           "get_goal",
           "job_list",
           "job_output",
           "ask_user_question",
           "todo_write",
-          "skill_load",
-          "skill_search",
-          "str_replace_editor:view"
+          "skill_search"
         ]
       },
       "model": {
@@ -126,7 +78,7 @@
       "goal": {
         "ref": "feature-intent.read-and-decompose"
       },
-      "prompt": "[System Directive: Master Scheduler]\n你是一个只看结果、极度冷酷的任务拆解员。你的唯一目标是将用户的自然语言需求，转化为 OODA 执行器可验证的 Goal Queue。在拆解需求的时候注意模块解耦，把不同模块的内容拆分到不同的阶段。\n🚫 绝对禁忌 (Anti-patterns):\n禁止技术设计： 绝对不准猜测或设计具体的 API、文件路径、类名或数据结构！这是下一阶段执行者的工作。\n禁止可行性废话： 不准输出“这个需求可能面临 XX 风险”、“我们需要调研 XX”。闭嘴！只输出目标！\n禁止过程指导： 你的 Goal 必须是名词/结果态（如“鉴权中间件拦截非法请求”），绝对不能是动词/过程态（如“去 router.ts 里写一个 if 判断”）。用 list_feature_intents / get_feature_intent 阅读相关 feature intent，并用 read/grep/glob/web_search/read_url 等只读工具调研代码库。然后用 update_feature_intent 写入：用户原话字段由系统自动收集，你只需要提供 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist。最后用 submit_requirement_protocol 提交协议。",
+      "prompt": "[System Directive: Master Scheduler]\n你是一个只看结果、极度冷酷的任务拆解员。你的唯一目标是将用户的自然语言需求，转化为 OODA 执行器可验证的 Goal Queue。在拆解需求的时候注意模块解耦，把不同模块的内容拆分到不同的阶段。\n🚫 绝对禁忌 (Anti-patterns):\n禁止技术设计： 绝对不准猜测或设计具体的 API、文件路径、类名或数据结构！这是下一阶段执行者的工作。\n禁止可行性废话： 不准输出“这个需求可能面临 XX 风险”、“我们需要调研 XX”。闭嘴！只输出目标！\n禁止过程指导： 你的 Goal 必须是名词/结果态（如“鉴权中间件拦截非法请求”），绝对不能是动词/过程态（如“去 router.ts 里写一个 if 判断”）。不读任何文档、不读实际文件、不解锁新工具：直接基于用户需求按模块拆解，一个模块一项、可验收，不同模块各占一项，不要拆到按钮或字段级。然后用 update_feature_intent 写入：用户原话字段由系统自动收集，你只需要提供 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist。最后用 submit_requirement_protocol 提交协议。",
       "transitions": [
         {
           "when": {
@@ -353,22 +305,21 @@
     {
       "id": "INIT",
       "label": "初始化上下文",
-      "description": "压缩完成后（或项目开始）读取长期文档与最近一次 feature intent，不读取完整短期对话；journal/changelog/history 等短期冷数据默认不进入 hot 上下文；决定进入下一轮 RESEARCH 或结束。",
+      "description": "工作流首阶段：只读取长期文档热文件与最近一次 feature intent 摘要，不读任何实际代码；引用 no-code-read 限制。本轮已有需求时进入下一轮 RESEARCH，无需求时进入需求识别。",
       "permissions": {
         "write": false,
-        "bash": "read-only",
+        "bash": "none",
         "tools": [
-          "read",
-          "grep",
-          "glob",
           "list_feature_intents",
           "get_feature_intent",
           "dependency_map",
           "todo_write",
-          "skill_load",
+          "ask_user_question",
           "skill_search",
-          "bash",
-          "str_replace_editor:view"
+          "list_agents",
+          "get_goal",
+          "job_list",
+          "job_output"
         ]
       },
       "model": {
@@ -378,8 +329,17 @@
         "ref": "create.init",
         "operatesOn": "staticPlan.current"
       },
-      "prompt": "只读取长期文档与最近一次 feature intent（architecture.md 已作为常驻 limited prompt 注入；可用 list_feature_intents / get_feature_intent 读取最近一次需求）。不要读取完整短期对话；需要代码导航时调用 dependency_map。然后 submit_state：还有待办进入下一轮 RESEARCH，全部完成则结束。",
+      "prompt": "只读取长期文档热文件与最近一次 feature intent，不读任何实际代码，不解锁新工具（本阶段引用 no-code-read 限制）。不要读取完整短期对话；可用 dependency_map 做代码导航。然后 submit_state：首轮无需求进入需求识别，有待办进入下一轮 RESEARCH，全部完成则结束。",
       "transitions": [
+        {
+          "when": {
+            "type": "featureIntent.missing"
+          },
+          "to": {
+            "workflow": "$self",
+            "state": "REQUIREMENT_RECOGNITION"
+          }
+        },
         {
           "when": {
             "type": "staticPlan.pending",
@@ -406,7 +366,8 @@
           },
           "complete": true
         }
-      ]
+      ],
+      "restriction": "no-code-read"
     }
   ]
 }

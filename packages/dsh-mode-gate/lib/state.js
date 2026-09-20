@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { normalizeCompressionOverrides } from './model-compression.js';
 
 /** Durable mode-gate state file. */
 export const STATE_FILE = join(homedir(), '.dsh', 'mode-gate-state.json');
@@ -41,6 +42,40 @@ export function normalizeModelCatalog(value) {
     });
   }
   return out.length > 0 ? out : DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
+}
+
+/**
+ * User-editable codename -> concrete model map, persisted top-level.
+ * Each entry: { alias, provider, model }. Workflow stages reference `alias`;
+ * the alias is resolved to { provider, model } at model-switch time.
+ */
+export function normalizeModelAliases(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const alias = typeof entry.alias === 'string' ? entry.alias.trim() : '';
+    const provider = typeof entry.provider === 'string' ? entry.provider.trim() : '';
+    const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+    if (alias.length === 0 || model.length === 0 || seen.has(alias)) continue;
+    seen.add(alias);
+    out.push({
+      alias,
+      provider: provider || 'deepseek-official',
+      model,
+    });
+  }
+  return out;
+}
+
+/** Resolve one alias string to { provider, model }; null when unmapped. */
+export function resolveModelAlias(aliases, alias) {
+  const key = typeof alias === 'string' ? alias.trim() : '';
+  if (!key) return null;
+  const list = Array.isArray(aliases) ? aliases : [];
+  const hit = list.find((entry) => entry && entry.alias === key);
+  return hit ? { provider: hit.provider, model: hit.model } : null;
 }
 
 /** User-editable per-state prompt + auto-guide toggle + model override, persisted top-level. */
@@ -87,6 +122,9 @@ function normalizeOverrideFields(override) {
     next.reasoningEffort = override.reasoningEffort.trim();
   }
   if (Array.isArray(override.requirements)) next.requirements = normalizeRequirements(override.requirements);
+  if (typeof override.restriction === 'string' && override.restriction.trim()) {
+    next.restriction = override.restriction.trim();
+  }
   return next;
 }
 
@@ -226,6 +264,8 @@ export function loadStateStore() {
     sessions: {},
     bashDenyList: undefined,
     modelCatalog: normalizeModelCatalog(),
+    modelAliases: [],
+    compressionOverrides: {},
     workflowOverrides: normalizeWorkflowOverrides(),
     stageOverrides: {},
     workflowRegistryVersion: 1,
@@ -243,6 +283,8 @@ export function loadStateStore() {
       sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
       bashDenyList: parsed.bashDenyList,
       modelCatalog: normalizeModelCatalog(parsed.modelCatalog),
+      modelAliases: normalizeModelAliases(parsed.modelAliases),
+      compressionOverrides: normalizeCompressionOverrides(parsed.compressionOverrides),
       workflowOverrides: migrated.workflowOverrides,
       stageOverrides: migrated.stageOverrides,
       workflowRegistryVersion: parsed.workflowRegistryVersion || 1,
@@ -272,7 +314,7 @@ export function readState(agent) {
   const sessionId = agent?.session?.id;
   const entry = readSessionEntry(sessionId);
   const store = loadStateStore();
-  return { ...entry, modelCatalog: store.modelCatalog, workflowOverrides: store.workflowOverrides, stageOverrides: store.stageOverrides };
+  return { ...entry, modelCatalog: store.modelCatalog, modelAliases: store.modelAliases || [], workflowOverrides: store.workflowOverrides, stageOverrides: store.stageOverrides };
 }
 
 export function writeState(agent, patch) {
@@ -299,10 +341,7 @@ export function formatCapabilities(state) {
   return [
     `当前工作流：${state.workflowId || IDLE_WORKFLOW_ID}`,
     `当前状态：${state.phase || IDLE_STATE_ID}`,
-    `当前 Target：${goalTarget || (state.target ? state.target.target : '未声明')}`,
-    `已声明 skills：${state.skills.length ? state.skills.join(', ') : '（无）'}`,
-    `已声明 bash 命令：${state.bash.length ? state.bash.join(', ') : '（无）'}`,
-    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换阶段）、dev_tool_search / request_extra（申请额外 skill/bash）。',
-    '要申请额外 skill 或 bash：dev_tool_search({ skills: [...], bash: [...] })（或 request_extra 同参），会作为问题向用户申报。',
+    ...(goalTarget ? [`当前目标：${goalTarget}`] : []),
+    '始终可用：skill_search（查看所有 skill）、switch_mode（请求切换阶段）、dev_tool_search / request_extra、submit_state。',
   ].join('\n');
 }

@@ -10,6 +10,7 @@
  */
 
 import { detectProgress, progressRejectionText } from './journal-guard.js';
+import { assertTextLength } from './text-limits.js';
 
 export const SELF_CHECK_MISSING_MESSAGE =
   '写入行为模式前必须先调用 pattern_reason 提交 reason，完成「是否是用户强调/纠正过的模式」自查（缺项会被拒绝）。';
@@ -61,7 +62,7 @@ export function assertReasonValid(reason, options = {}) {
   const text = String(reason == null ? '' : reason).trim();
   if (!text) throw new Error(`自查缺项：必须提供 reason，说明${subject}。`);
   if (text.length < 4) throw new Error(`reason 太短（${text.length} 字），请具体说明${hint}。`);
-  if (text.length > 200) throw new Error(`reason 超过 200 字（当前 ${text.length} 字）。`);
+  assertTextLength(text, 200, 'reason');
   const detection = detectProgress(text);
   if (detection.progress) {
     throw new Error(`${progressRejectionText('reason', detection, null)}reason 应该写「${hint}」，而不是本轮进展。`);
