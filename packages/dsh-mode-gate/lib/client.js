@@ -71,6 +71,7 @@ window.__ModuleLoader__.load({
 			restrictionNewLabel: "展示名",
 			modelAliasColumn: "代号",
 			modelAliasTargetColumn: "具体模型",
+			modelThinkingAliasColumn: "思考等级",
 			modelAliasPlaceholder: "kimi-code",
 			addModelAlias: "添加映射",
 			saveModelAliases: "保存代号映射",
@@ -190,6 +191,7 @@ window.__ModuleLoader__.load({
 			restrictionNewLabel: "Display name",
 			modelAliasColumn: "Codename",
 			modelAliasTargetColumn: "Concrete model",
+			modelThinkingAliasColumn: "Thinking level",
 			modelAliasPlaceholder: "kimi-code",
 			addModelAlias: "Add mapping",
 			saveModelAliases: "Save codename map",
@@ -419,7 +421,7 @@ window.__ModuleLoader__.load({
 					if (value && Array.isArray(value.groups)) {
 						setGroups(value.groups.map((group) => ({
 							id: group.id,
-							models: Array.isArray(group.models) ? group.models.map((model) => ({ id: model.id, name: model.name })) : [],
+							models: Array.isArray(group.models) ? group.models.map((model) => ({ id: model.id, name: model.name, reasoning: model.reasoning || null })) : [],
 						})));
 					} else {
 						setGroups([]);
@@ -1287,7 +1289,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const providerModels = useProviderModels(getModelCatalog);
 
 			const [aliasDraft, setAliasDraft] = react.useState([]);
-			const [newAlias, setNewAlias] = react.useState({ alias: "", provider: "", model: "" });
+			const [newAlias, setNewAlias] = react.useState({ alias: "", provider: "", model: "", thinking: "" });
 
 			react.useEffect(() => {
 				setAliasDraft((modelAliases.entries || []).map((entry) => ({ ...entry })));
@@ -1299,9 +1301,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			)));
 			const addAlias = async () => {
 				if (!newAlias.alias.trim() || !newAlias.model.trim()) return;
-				const next = [...aliasDraft, { alias: newAlias.alias.trim(), provider: newAlias.provider.trim(), model: newAlias.model.trim() }];
+				const next = [...aliasDraft, { alias: newAlias.alias.trim(), provider: newAlias.provider.trim(), model: newAlias.model.trim(), thinking: (newAlias.thinking || "").trim() }];
 				setAliasDraft(next);
-				setNewAlias({ alias: "", provider: "", model: "" });
+				setNewAlias({ alias: "", provider: "", model: "", thinking: "" });
 				await modelAliases.save(next);
 			};
 			const deleteAlias = async (idx) => {
@@ -1325,10 +1327,11 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						const nextGroup = providerOptions.find((g) => g.id === nextProvider);
 						const firstModel = nextGroup && nextGroup.models[0] ? nextGroup.models[0].id : "";
 						if (isNew) {
-							setNewAlias((prev) => ({ ...prev, provider: nextProvider, model: firstModel }));
+							setNewAlias((prev) => ({ ...prev, provider: nextProvider, model: firstModel, thinking: "" }));
 						} else {
 							updateAlias(idx, "provider", nextProvider);
 							updateAlias(idx, "model", firstModel);
+						updateAlias(idx, "thinking", "");
 						}
 					},
 				}, providerOptions.map((g) => react.createElement("option", { key: g.id, value: g.id }, g.id)));
@@ -1336,8 +1339,8 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					style: { ...styles.input, maxWidth: 240 },
 					value: entry.model || "",
 					onChange: (e) => {
-						if (isNew) setNewAlias((prev) => ({ ...prev, model: e.target.value }));
-						else updateAlias(idx, "model", e.target.value);
+						if (isNew) setNewAlias((prev) => ({ ...prev, model: e.target.value, thinking: "" }));
+						else { updateAlias(idx, "model", e.target.value); updateAlias(idx, "thinking", ""); }
 					},
 				}, models.map((m) => react.createElement("option", { key: m.id, value: m.id }, m.name || m.id)));
 				return react.createElement("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
@@ -1345,10 +1348,45 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			};
 			const aliasHead = react.createElement("h3", { style: styles.denyHead }, t("modelAliasesTitle"));
 			const aliasDesc = react.createElement("p", { style: styles.desc }, t("modelAliasesDesc"));
+			// 思考等级下拉：与选模型同款原生 select。选项优先用该模型 provider 真实数据
+			// （modelCatalog reasoning.efforts），无数据时回落五个固定档位；空值表示跟随默认。
+			const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
+			const thinkingOptionsOf = (entry) => {
+				const currentProvider = entry.provider || (providerOptions[0] ? providerOptions[0].id : "");
+				const group = providerOptions.find((g) => g.id === currentProvider);
+				const model = group && Array.isArray(group.models) ? group.models.find((m) => m.id === entry.model) : null;
+				const reasoning = model && model.reasoning ? model.reasoning : null;
+				const live = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts.map((e) => e && e.id).filter(Boolean) : [];
+				const seen = new Set();
+				const out = [];
+				for (const id of [...live, ...THINKING_LEVELS]) {
+					const key = String(id).toLowerCase();
+					if (!key || seen.has(key)) continue;
+					seen.add(key);
+					out.push(String(id));
+				}
+				return { options: out, defaultEffort: reasoning && reasoning.defaultEffort ? String(reasoning.defaultEffort) : "" };
+			};
+			const thinkingSelect = (entry, idx, isNew) => {
+				const { options, defaultEffort } = thinkingOptionsOf(entry);
+				const value = entry.thinking || "";
+				return react.createElement("select", {
+					style: { ...styles.input, maxWidth: 160 },
+					value,
+					onChange: (e) => {
+						if (isNew) setNewAlias((prev) => ({ ...prev, thinking: e.target.value }));
+						else updateAlias(idx, "thinking", e.target.value);
+					},
+				}, [
+					react.createElement("option", { key: "", value: "" }, defaultEffort ? `默认（${defaultEffort}）` : "默认"),
+					...options.map((id) => react.createElement("option", { key: id, value: id }, id)),
+				]);
+			};
 			const aliasRows = aliasDraft.map((entry, idx) => react.createElement("tr", { key: entry.alias || idx },
 				react.createElement("td", { style: styles.td },
 					react.createElement("input", { style: styles.input, value: entry.alias || '', onChange: (e) => updateAlias(idx, 'alias', e.target.value) })),
 				react.createElement("td", { style: styles.td }, aliasTargetSelect(entry, idx, false)),
+				react.createElement("td", { style: styles.td }, thinkingSelect(entry, idx, false)),
 				react.createElement("td", { style: styles.td },
 					react.createElement("button", { style: styles.button, onClick: () => deleteAlias(idx) }, t("delete"))),
 			));
@@ -1357,6 +1395,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					react.createElement("tr", null,
 						react.createElement("th", { style: styles.th }, t("modelAliasColumn")),
 						react.createElement("th", { style: styles.th }, t("modelAliasTargetColumn")),
+						react.createElement("th", { style: styles.th }, t("modelThinkingAliasColumn")),
 						react.createElement("th", { style: styles.th }, ""),
 					)
 				),
@@ -1365,6 +1404,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const aliasAddRow = react.createElement("div", { style: styles.addRow },
 				react.createElement("input", { style: styles.input, placeholder: t("modelAliasPlaceholder"), value: newAlias.alias, onChange: (e) => setNewAlias((prev) => ({ ...prev, alias: e.target.value })) }),
 				aliasTargetSelect(newAlias, -1, true),
+				thinkingSelect(newAlias, -1, true),
 				react.createElement("button", { style: styles.button, onClick: addAlias }, t("addModelAlias")),
 			);
 			const aliasSaveButton = react.createElement("button", { style: styles.button, onClick: saveAliases }, t("saveModelAliases"));
@@ -1614,6 +1654,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("getState", "GetStateResult"),
 				remoteArgsDescriptor("getWorkflows", "GetWorkflowsResult"),
 				remoteArgsDescriptor("selectWorkflow", "SelectWorkflowResult"),
+				remoteDescriptor("getFeatureTree", "GetFeatureTreeResult"),
+				remoteArgsDescriptor("getFeatureNode", "GetFeatureNodeResult"),
+				remoteArgsDescriptor("submitFeatureSelection", "SubmitFeatureSelectionResult"),
 				remoteDescriptor("getBashDenyList", "GetBashDenyListResult"),
 				remoteArgsDescriptor("setBashDenyList", "SetBashDenyListResult"),
 				remoteDescriptor("getModelCatalog", "GetModelCatalogResult"),
@@ -1817,6 +1860,173 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			}));
 		}
 
+		/** Fetch the feature overview/intent tree for the picker. */
+		function useFeatureTree(api, enabled) {
+			const [data, setData] = react.useState({ tree: [], dir: "", error: "" });
+			react.useEffect(() => {
+				if (!enabled) return undefined;
+				let current = true;
+				const refresh = async () => {
+					try {
+						const result = await api().getFeatureTree({});
+						if (!current) return;
+						if (result && result.ok) {
+							setData({ tree: result.tree || [], dir: result.dir || "", error: "" });
+						} else {
+							setData({ tree: [], dir: "", error: String((result && result.error) || "读取 feature 树失败") });
+						}
+					} catch (err) {
+						if (current) setData({ tree: [], dir: "", error: String((err && err.message) || err) });
+					}
+				};
+				refresh();
+				const timer = setInterval(refresh, 5000);
+				return () => { current = false; clearInterval(timer); };
+			}, [api, enabled]);
+			return data;
+		}
+
+		/**
+		 * Feature overview / intent 树状选择器。
+		 *
+		 * - 文件夹（overview）右侧的箭头按钮负责展开/收起，点主体即选中；
+		 * - 叶子（intent）点主体即选中；
+		 * - overview 与 intent 均可多选；
+		 * - 底部「提交」按钮把选中的节点集合交回上层。
+		 */
+		function FeatureTreePicker(props) {
+			const { api, busy, onSubmit, onError, selected, onSelectedChange, t } = props;
+			const { tree, error } = useFeatureTree(api, true);
+			const [expanded, setExpanded] = react.useState({});
+
+			/* 互斥：同一组选择里只能是 overview 或 intent 之一（同类可多选）。 */
+			const selectedType = (selected && selected.length > 0) ? selected[0].type : null;
+			const isBlockedByType = (node) => Boolean(selectedType) && node.type !== selectedType;
+
+			const toggleExpand = (path) => {
+				setExpanded((prev) => ({ ...prev, [path]: !prev[path] }));
+			};
+
+			const toggleSelect = (node) => {
+				if (isBlockedByType(node)) {
+					onError("overview 与底层 feature intent 不能同时选择：请先取消当前选择。");
+					return;
+				}
+				onError("");
+				onSelectedChange((prev) => {
+					const key = `${node.type}:${node.path}`;
+					const exists = prev.some((item) => `${item.type}:${item.path}` === key);
+					if (exists) return prev.filter((item) => `${item.type}:${item.path}` !== key);
+					return [...prev, { type: node.type, path: node.path, name: node.name }];
+				});
+			};
+
+			const isSelected = (node) => (selected || []).some((item) => item.type === node.type && item.path === node.path);
+
+			const renderNode = (node, depth) => {
+				const rows = [];
+				const isOverview = node.type === "overview";
+				const open = Boolean(expanded[node.path]);
+				const sel = isSelected(node);
+				const blocked = isBlockedByType(node);
+				rows.push(react.createElement("div", {
+					key: `${node.type}:${node.path}`,
+					style: {
+						display: "flex", alignItems: "center", gap: 6,
+						padding: "4px 6px", paddingLeft: 6 + depth * 18,
+						borderRadius: 6,
+						background: sel ? "var(--dsw-alias-bg-selection, rgba(64,128,255,0.16))" : "transparent",
+						opacity: blocked ? 0.4 : 1,
+					},
+				},
+					isOverview
+						? react.createElement("button", {
+							type: "button",
+							title: open ? "收起" : "展开",
+							onClick: (event) => { event.stopPropagation(); toggleExpand(node.path); },
+							style: {
+								border: "none", background: "transparent", cursor: "pointer",
+								color: "var(--dsw-alias-label-secondary)", fontSize: 12, width: 18,
+								padding: 0, lineHeight: "18px",
+							},
+						}, open ? "▾" : "▸")
+						: react.createElement("span", { style: { width: 18, display: "inline-block" } }),
+					react.createElement("button", {
+						type: "button",
+						onClick: () => toggleSelect(node),
+						title: blocked
+							? "overview 与 feature intent 不能同时选择"
+							: (node.title || node.name),
+						style: {
+							flex: 1, textAlign: "left", border: "none", background: "transparent",
+							cursor: blocked ? "not-allowed" : "pointer", padding: "2px 0",
+							color: "var(--dsw-alias-label-primary)", fontSize: 13,
+							fontWeight: isOverview ? 600 : 400,
+						},
+					},
+						`${isOverview ? "📁" : "📄"} ${node.name}`,
+						node.title && node.title !== node.name
+							? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, marginLeft: 8 } }, node.title)
+							: null
+					),
+					sel
+						? react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 11 } }, "已选")
+						: null
+				));
+				if (isOverview && open) {
+					const children = node.children || [];
+					if (children.length === 0) {
+						rows.push(react.createElement("div", {
+							key: `${node.type}:${node.path}:empty`,
+							style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, paddingLeft: 24 + depth * 18 },
+						}, "（空）"));
+					} else {
+						for (const child of children) rows.push(renderNode(child, depth + 1));
+					}
+				}
+				return rows;
+			};
+
+			const nodes = [];
+			if (tree.length === 0) {
+				nodes.push(react.createElement("div", {
+					key: "empty",
+					style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: "8px 0" },
+				}, "（尚未有任何 feature overview / feature intent）"));
+			} else {
+				for (const node of tree) nodes.push(renderNode(node, 0));
+			}
+
+			const count = (selected || []).length;
+
+			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, width: "100%" } },
+				error
+					? react.createElement("div", { style: { color: "var(--dsw-alias-label-error, #d33)", fontSize: 12 } }, error)
+					: null,
+				react.createElement("div", {
+					style: {
+						maxHeight: 360, overflowY: "auto", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,0.3))",
+						borderRadius: 8, padding: "8px 6px", background: "var(--dsw-alias-bg-primary, transparent)",
+					},
+				}, ...nodes),
+				react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+					react.createElement("button", {
+						type: "button",
+						disabled: Boolean(busy) || count === 0,
+						onClick: () => onSubmit(selected),
+						style: {
+							padding: "7px 16px", borderRadius: 8, border: "none",
+							cursor: (busy || count === 0) ? "not-allowed" : "pointer",
+							background: (busy || count === 0) ? "var(--dsw-alias-bg-tertiary, #8884)" : "var(--dsw-alias-accent, #4080ff)",
+							color: "#fff", fontSize: 13, fontWeight: 600,
+						},
+					}, "提交"),
+					react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 } },
+						count === 0 ? "请选择至少一个 feature overview 或 feature intent" : `已选 ${count} 项`)
+				)
+			);
+		}
+
 		/** Simple renderer for a pending feature-intent protocol. */
 		function FeatureIntentApprovalView(props) {
 			const { t, api, sessionId } = props;
@@ -1899,11 +2109,58 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 
 			const pending = state.pendingProtocol && state.pendingProtocol.status === "awaiting_user" ? state.pendingProtocol : null;
 			const isIdle = !state.workflowId || state.workflowId === "IDLE";
+			const inInit = state.workflowId === "create" && state.phase === "INIT";
+			const [picked, setPicked] = react.useState([]);
+			const [pickError, setPickError] = react.useState("");
 			react.useEffect(() => {
-				if (!isIdle && !pending) activateChatView();
-			}, [isIdle, pending]);
+				if (!isIdle && !pending && !inInit) activateChatView();
+			}, [isIdle, pending, inInit]);
 			if (pending) {
 				return react.createElement(FeatureIntentApprovalView, { sessions, api, sessionId, t });
+			}
+			/* INIT 阶段：先由用户从 feature 树里挑选 overview / feature intent。 */
+			if (inInit) {
+				const submit = async (selection) => {
+					if (busy) return;
+					if (!Array.isArray(selection) || selection.length === 0) {
+						setPickError("请选择至少一个 feature overview 或 feature intent");
+						return;
+					}
+					setBusy(true);
+					setPickError("");
+					try {
+						const result = await api().submitFeatureSelection({ sessionId, selection });
+						if (result && result.ok === false) {
+							setPickError(String(result.error || "提交失败"));
+						} else {
+							activateChatView();
+						}
+					} catch (err) {
+						setPickError(String((err && err.message) || err));
+					} finally {
+						setBusy(false);
+					}
+				};
+				return react.createElement("div", {
+					style: {
+						height: "100%", width: "100%", overflowY: "auto",
+						padding: "28px 32px", display: "flex", flexDirection: "column",
+						alignItems: "center", gap: 12,
+					},
+				},
+					react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 20, fontWeight: 600 } }, "选择本次要处理的 feature"),
+					react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, textAlign: "center" } },
+						"点文件夹右侧箭头展开/收起，点节点主体选中；overview 与 feature intent 均可多选，提交后进入需求分解。"),
+					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
+						react.createElement(FeatureTreePicker, {
+							api, t, busy, selected: picked, onSelectedChange: setPicked,
+							onError: setPickError, onSubmit: submit,
+						})
+					),
+					pickError
+						? react.createElement("div", { style: { color: "var(--dsw-alias-label-error, #d33)", fontSize: 12 } }, pickError)
+						: null
+				);
 			}
 			if (!isIdle) return react.createElement("div", { style: { display: "none" } });
 
@@ -2144,9 +2401,11 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const hidden = useIdleModalHidden();
 			const prevShown = react.useRef(null);
 			const hasPending = Boolean(state.pendingProtocol && state.pendingProtocol.status === "awaiting_user");
+			/* INIT 阶段：由用户先选 feature overview / intent，工作流界面必须可见。 */
+			const inInit = state.workflowId === "create" && state.phase === "INIT";
 
 			react.useEffect(() => {
-				const show = hasPending || (isIdle && status.loaded && !hidden);
+				const show = hasPending || inInit || (isIdle && status.loaded && !hidden);
 				const activate = (label) => {
 					if (typeof setView === "function") {
 						setView(label === "工作流" ? "mode-gate-idle" : "chat");
@@ -2170,10 +2429,10 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				if (prevShown.current === true) activate("对话");
 				prevShown.current = false;
 				return undefined;
-			}, [isIdle, status.loaded, hidden, hasPending, setView]);
+			}, [isIdle, status.loaded, hidden, hasPending, inInit, setView]);
 
-			if (!isIdle && !hasPending) return null;
-			if (hasPending) {
+			if (!isIdle && !hasPending && !inInit) return null;
+			if (hasPending || inInit) {
 				return react.createElement("button", {
 					onClick: () => {
 						if (typeof setView === "function") setView("mode-gate-idle");
@@ -2184,13 +2443,13 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 							}
 						}
 					},
-					title: "查看待确认的需求协议",
+					title: hasPending ? "查看待确认的需求协议" : "选择本次要处理的 feature",
 					style: {
 						cursor: "pointer", border: "1px solid var(--dsw-alias-border-l2)",
 						background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)",
 						borderRadius: 8, padding: "3px 8px", fontSize: 12,
 					},
-				}, "查看需求确认");
+				}, hasPending ? "查看需求确认" : "选择 feature");
 			}
 			return react.createElement("button", {
 				onClick: () => modalStore.toggle(),

@@ -350,19 +350,24 @@ fi
 
 # 3b) Deploy ankifyd + ankify-ai-core into a user-level app share, so Anki and
 #     Raycast share one daemon and one core copy (no per-plugin vendoring).
+#     The ankify sources now live in the sibling `ankify_tools` repo (which has
+#     its own git repo), not inside dsh-plugins. Set ANKIFY_TOOLS_DIR to override.
+ANKIFY_TOOLS_DIR="${ANKIFY_TOOLS_DIR:-$(cd "$HERE/.." && pwd)/ankify_tools}"
 ANKIFY_AI_HOME="${ANKIFY_AI_HOME:-$HOME/.local/share/ankify-ai}"
 mkdir -p "$ANKIFY_AI_HOME/logs"
-if cp "$HERE/ankifyd/ankifyd.py" "$ANKIFY_AI_HOME/ankifyd.py" 2>/dev/null; then
+if [ -f "$ANKIFY_TOOLS_DIR/ankifyd/ankifyd.py" ] && cp "$ANKIFY_TOOLS_DIR/ankifyd/ankifyd.py" "$ANKIFY_AI_HOME/ankifyd.py" 2>/dev/null; then
   rm -rf "$ANKIFY_AI_HOME/core" 2>/dev/null || true
-  cp -R "$HERE/ankify-ai-core" "$ANKIFY_AI_HOME/core" 2>/dev/null || echo "    ankifyd  core copy skipped (permission)"
+  cp -R "$ANKIFY_TOOLS_DIR/ankify-ai-core" "$ANKIFY_AI_HOME/core" 2>/dev/null || echo "    ankifyd  core copy skipped (permission)"
   echo "    ankifyd  $ANKIFY_AI_HOME/ankifyd.py (copied)"
 else
-  echo "    ankifyd  copy skipped (permission); not fatal for mode-gate"
+  echo "    ankifyd  skipped (source missing at $ANKIFY_TOOLS_DIR or permission); not fatal for mode-gate"
 fi
 
 # 3d) Deploy the Anki add-on into the user's Anki addons21 directory.
 #     Same user-level copy approach as ankifyd/core: Anki must load a real
 #     directory from addons21, not a symlink to the repo.
+#     Source lives in the sibling ankify_tools repo (dir name `anki-ankify`,
+#     deployed as add-on package name `ankify_ai_auditor`).
 #     Set ANKI_ADDONS_DIR to override auto-detection; if Anki is not installed,
 #     the step is skipped with a hint instead of failing the whole install.
 ANKI_ADDONS_DIR="${ANKI_ADDONS_DIR:-}"
@@ -372,9 +377,9 @@ if [ -z "$ANKI_ADDONS_DIR" ]; then
     Linux) ANKI_ADDONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Anki2/addons21" ;;
   esac
 fi
-if [ -n "$ANKI_ADDONS_DIR" ] && [ -d "$ANKI_ADDONS_DIR" ]; then
+if [ -d "$ANKIFY_TOOLS_DIR/anki-ankify" ] && [ -n "$ANKI_ADDONS_DIR" ] && [ -d "$ANKI_ADDONS_DIR" ]; then
   rm -rf "$ANKI_ADDONS_DIR/ankify_ai_auditor" 2>/dev/null || true
-  if cp -R "$HERE/addons21/ankify_ai_auditor" "$ANKI_ADDONS_DIR/ankify_ai_auditor" 2>/dev/null; then
+  if cp -R "$ANKIFY_TOOLS_DIR/anki-ankify" "$ANKI_ADDONS_DIR/ankify_ai_auditor" 2>/dev/null; then
     echo "    anki     $ANKI_ADDONS_DIR/ankify_ai_auditor (copied)"
   else
     echo "    anki     copy skipped (permission); not fatal for mode-gate"

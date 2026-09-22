@@ -58,24 +58,26 @@ export function normalizeModelAliases(value) {
     const alias = typeof entry.alias === 'string' ? entry.alias.trim() : '';
     const provider = typeof entry.provider === 'string' ? entry.provider.trim() : '';
     const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+    const thinking = typeof entry.thinking === 'string' ? entry.thinking.trim() : '';
     if (alias.length === 0 || model.length === 0 || seen.has(alias)) continue;
     seen.add(alias);
     out.push({
       alias,
       provider: provider || 'deepseek-official',
       model,
+      thinking,
     });
   }
   return out;
 }
 
-/** Resolve one alias string to { provider, model }; null when unmapped. */
+/** Resolve one alias string to { provider, model, thinking }; null when unmapped. */
 export function resolveModelAlias(aliases, alias) {
   const key = typeof alias === 'string' ? alias.trim() : '';
   if (!key) return null;
   const list = Array.isArray(aliases) ? aliases : [];
   const hit = list.find((entry) => entry && entry.alias === key);
-  return hit ? { provider: hit.provider, model: hit.model } : null;
+  return hit ? { provider: hit.provider, model: hit.model, thinking: hit.thinking || '' } : null;
 }
 
 /** User-editable per-state prompt + auto-guide toggle + model override, persisted top-level. */

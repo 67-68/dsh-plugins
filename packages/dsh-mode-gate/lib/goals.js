@@ -150,13 +150,11 @@ export function createBuiltinGoals() {
       id: 'feature-intent.read-and-decompose',
       prompt: (env) => [
         '[目标] 读取 feature intent 并完成需求分解',
-        '1. 不读任何文档，直接基于用户需求分解；',
-        '2. checklist 按模块粒度拆分：一个模块一项，不同模块各占一项，同一模块的多个改动合并为一项；不要拆到按钮或字段级，每一项必须是可验收的节点；',
-        '3. 用 update_feature_intent 写入 feature intent：用户原话字段由系统自动收集（无需你写），你需要提供 understanding（你的理解）、user_visible_behavior（用户在新工作流下如何工作/感知本次改动）和 feature_intent（本次功能修改意图），以及 checklist（可验收节点数组）；这些 field 会在同一次写入中落到对应小标题下；',
-        '4. checklist 示例（模块级）：「模型压缩上下文设置页」「压缩决策引擎」「阶段权限门禁」；反例（太细）：「按钮在 xx 处出现」；',
-        '5. 如需记录需求分解期间的调研任务，可调用 todo_write；',
-        '6. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
-        '本状态禁用 bash 与文件查看工具，只允许 feature intent 相关工具，禁止写文件；专心分解需求。',
+        '本阶段只做两件事，按顺序线性调用两个工具即可，其他工具一律禁止、不要尝试：',
+        '1. 用 update_feature_intent 写入 feature intent：用户原话字段由系统自动收集（无需你写），你需要提供 understanding（你的理解）、user_visible_behavior（用户在新工作流下如何工作/感知本次改动）和 feature_intent（本次功能修改意图），以及 checklist（可验收节点数组）；这些 field 会在同一次写入中落到对应小标题下。两个工具都已由插件按阶段自动供给到你的工具列表，无需搜索解锁。',
+        '2. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
+        'checklist 按模块粒度拆分：一个模块一项，不同模块各占一项，同一模块的多个改动合并为一项；不要拆到按钮或字段级，每一项必须是可验收的节点。示例（模块级）：「模型压缩上下文设置页」「压缩决策引擎」「阶段权限门禁」；反例（太细）：「按钮在 xx 处出现」。',
+        '如需记录需求分解期间的调研任务，可调用 todo_write。本状态禁用 bash 与文件查看工具，禁止写文件；专心分解需求。',
       ].join('\n'),
       allowedTools: [
         'list_feature_intents', 'update_feature_intent',

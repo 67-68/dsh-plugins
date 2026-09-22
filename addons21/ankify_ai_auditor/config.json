@@ -1,8 +1,0 @@
-{
-  "batch_size": 10,
-  "dry_run": false,
-  "reset_on_key_change": true,
-  "source_tag": "ankify-ai::split-source",
-  "locked_tag": "ankify-ai::locked",
-  "exclude_decks": []
-}

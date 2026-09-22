@@ -76,6 +76,20 @@
         maxChars: 200000
         includeReasoning: false
 
+    # Trajectory notes (host plugin `dsh-trajectory-notes`): registers the
+    # model-visible tools list_trajectories / read_trajectory /
+    # summarize_trajectory. A trajectory = one turn of a session, read
+    # read-only through ctx.sessionQuery (the append-only session log is never
+    # written); each entry is summarized through ctx.llm.stream, so the summary
+    # model routes independently of the conversation model.
+    # NOTE: global tool registration alone is invisible to the model — the host
+    # presses the global layer down to built-ins via an allow restriction, and
+    # restrictions only narrow — so the tools are re-registered into each agent
+    # scope on agent/created.
+    - id: trajectory-notes
+      name: 'dsh-trajectory-notes'
+      config: {}
+
 # DeepSeek official catalog: keep the shipped defaults and add the V4.1 Flash
 # limited-beta route (API model id expires 2026-09-10). The settings layer
 # (`llm-deepseek:` in $DSH_HOME/settings.yaml) can still override this list.
@@ -98,3 +112,11 @@
 
 # ── Managed MCP servers (dsh-skill-mcp-manager, disabled shadow entries) ──
 # ── End managed MCP servers (dsh-skill-mcp-manager) ──
+
+# caob23/dsh-browser-control: bundle 自带 enabled:false；用户层显式覆盖为 true，
+# 让 bridge 监听 127.0.0.1:9777。重启 dsh web 后生效（若 HMR 已应用则无需重启）。
+- id: browser-bridge
+  config:
+    enabled: true
+    port: 9777
+    token: dsh-local

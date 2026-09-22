@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 import { createFeatureIntentStore } from './feature-intent-store.js';
+import { createFeatureTreeStore, assertLogicalPath } from './feature-tree-store.js';
 import { createFeatureListStore, defaultFeatureListDir } from './feature-list-store.js';
 import { createPatternStore, defaultPatternDir } from './pattern-store.js';
 import { createJournalStore, defaultJournalDir } from './journal-store.js';
@@ -13,7 +14,7 @@ import { createHistoryStore, defaultHistoryDir } from './history-store.js';
 import { readHeadCommit } from './git-commit.js';
 import { runGitUpdate } from './git-update.js';
 import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh } from './architecture-store.js';
-import { generateDependencyMap, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
+import { generateDependencyMap, buildDependencyGraph, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
 import { budgetDecision, estimateMessagesTokens, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './context-budget.js';
 import { compressContext, assertLongTermDocsFirst } from './context-compressor.js';
 import { assertNotProgress, assertReasonValid, assertSelfCheckFresh } from './pattern-gate.js';
@@ -188,6 +189,34 @@ class ModeGateGateway extends TypertRemoteService {
         startState: wf.startState,
       })),
     };
+  }
+  async getFeatureTree() {
+    const store = this.options.featureTree;
+    if (!store) return { ok: false, error: 'feature tree store 未初始化' };
+    try {
+      return { ok: true, dir: store.dir, tree: store.tree() };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+  async getFeatureNode(args) {
+    const store = this.options.featureTree;
+    if (!store) return { ok: false, error: 'feature tree store 未初始化' };
+    try {
+      const type = args && args.type === 'overview' ? 'overview' : 'intent';
+      const path = args && args.path;
+      return { ok: true, ...store.contentOf(type, path) };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+  async submitFeatureSelection(args) {
+    const sessionId = args && args.sessionId;
+    const selection = Array.isArray(args && args.selection) ? args.selection : [];
+    if (typeof this.options.submitFeatureSelection !== 'function') {
+      return { ok: false, error: 'mode-gate 尚未初始化 submitFeatureSelection' };
+    }
+    return this.options.submitFeatureSelection(sessionId, selection);
   }
   async selectWorkflow(args) {
     const sessionId = args && args.sessionId;
@@ -441,6 +470,7 @@ class ModeGateGateway extends TypertRemoteService {
 }
 markRemoteMethods(ModeGateGateway, [
   'getState', 'getWorkflows', 'selectWorkflow',
+  'getFeatureTree', 'getFeatureNode', 'submitFeatureSelection',
   'getBashDenyList', 'setBashDenyList',
   'getModelCatalog', 'setModelCatalog', 'getModelAliases', 'setModelAliases', 'getModelCompressionTable',
   'getCompressionOverrides', 'setCompressionOverrides',
@@ -506,6 +536,7 @@ export default {
     );
 
     const featureIntents = createFeatureIntentStore(featureIntentDir);
+    const featureTree = createFeatureTreeStore(featureIntentDir);
     const restrictions = createRestrictionStore(restrictionsDir);
     const featureList = createFeatureListStore(featureListDir);
     const patternStore = createPatternStore(patternDir);
@@ -840,10 +871,11 @@ export default {
       const override = stateModelOverride(state, workflowId, stateId);
       if (!override || !override.model) return;
       const resolved = resolveStageModel(override.model);
+      const resolvedThinking = resolved && resolved.thinking ? resolved.thinking : '';
       const payload = {
         provider: (resolved && resolved.provider) || 'deepseek-official',
         model: (resolved && resolved.model) || override.model,
-        ...(override.reasoningEffort ? { reasoningEffort: override.reasoningEffort } : {}),
+        ...((override.reasoningEffort || resolvedThinking) ? { reasoningEffort: override.reasoningEffort || resolvedThinking } : {}),
       };
       try {
         agent.session.append('model/selection', payload);
@@ -930,6 +962,8 @@ export default {
         });
         applyStateModelSelection(agent, workflowId, stateId);
         void injectModeGateContext(agent, 'state');
+        // 无 goal 的状态（含 IDLE）：只清理 scope，不供给。
+        provisionStageTools(agent, []);
         return { prompt, messages: [] };
       }
       const result = await goalEngine.activate(goalRef, envFor(agent, state), state);
@@ -937,6 +971,8 @@ export default {
       writeState(agent, { ...basePatch, ...result.statePatch, target: { target: targetText, mode: stateId } });
       applyStateModelSelection(agent, workflowId, stateId);
       void injectModeGateContext(agent, 'state');
+      // 按本状态 goal 可见集供给 scope 工具（与门禁同一份名单）。
+      provisionStageTools(agent, visibleToolsForGoal(goalRef));
       return result;
     }
 
@@ -1116,6 +1152,51 @@ export default {
       writeState(agent, { pendingProtocol: null, goal: null, target: null });
       const activated = await activateStateGoal(agent, entry.workflowId, entry.phase);
       return { ok: true, workflowId: entry.workflowId, phase: entry.phase, ...(activated && activated.prompt ? { prompt: activated.prompt } : {}) };
+    }
+
+    /**
+     * INIT 阶段用户从 feature 树里提交选择。
+     *
+     * 记入 state.featureSelection（供后续两条路线使用：选中 overview → AI 自动
+     * 寻找；选中底层 intent → 冒泡注入），然后推进 INIT → REQUIREMENT_RECOGNITION。
+     */
+    async function submitFeatureSelection(sessionId, selection) {
+      const agent = agentFor(sessionId);
+      const clean = [];
+      const seen = new Set();
+      for (const item of selection || []) {
+        if (!item || typeof item !== 'object') continue;
+        const type = item.type === 'overview' ? 'overview' : (item.type === 'intent' ? 'intent' : null);
+        if (!type) continue;
+        let path;
+        try {
+          path = assertLogicalPath(item.path);
+        } catch (_err) {
+          continue;
+        }
+        const key = `${type}:${path}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        clean.push({ type, path });
+      }
+      if (clean.length === 0) {
+        return { ok: false, error: '请选择至少一个 feature overview 或 feature intent' };
+      }
+      const types = new Set(clean.map((item) => item.type));
+      if (types.size > 1) {
+        return { ok: false, error: 'feature overview 与底层 feature intent 不能同时选择' };
+      }
+      writeState(agent, {
+        featureSelection: { types: [...types][0], items: clean, submittedAt: new Date().toISOString() },
+      });
+      const activated = await activateStateGoal(agent, 'create', 'REQUIREMENT_RECOGNITION');
+      const after = readState(agent);
+      return {
+        ok: true,
+        workflowId: after.workflowId,
+        phase: after.phase,
+        ...(activated && activated.prompt ? { prompt: activated.prompt } : {}),
+      };
     }
 
     function syncStaticPlanToDshTodos(agent, state) {
@@ -1315,7 +1396,78 @@ export default {
     // ── tools ────────────────────────────────────────────────────────────
     // declare_target 机制已移除：不再要求声明 Target，直接按阶段目标推进。
     // 进入新状态时的 goal 激活由 activateStateGoal（切换/转移路径）承担。
-    ctx.tools.register(defineTool({
+    //
+    // 可见层供给（M3）：宿主默认把 agent scope 压到 built-ins，插件工具只注册
+    // 在全局层时模型根本看不见（dev_tool_search 手动解锁是唯一的口子）。
+    // 因此每个工具的 spec 存一份，状态机按 goal 可见集逐 agent 写入 scope
+    // （scope 注册不受全局限制影响，始终可见；见 provisionStageTools）。
+    const TOOL_SPECS = new Map();
+    function registerTool(spec) {
+      const def = defineTool(spec);
+      ctx.tools.register(def);
+      if (spec && typeof spec.name === 'string' && spec.name) TOOL_SPECS.set(spec.name, spec);
+      return def;
+    }
+    // 按可见集供给 agent scope 工具：先清上个状态的，再写入本状态的。
+    // names 缺省时只清理（用于 IDLE）。内置工具（bash/read 等）宿主自管，
+    // 这里只处理 TOOL_SPECS 有的插件工具；同名 scope 注册会 shadow 全局层，
+    // 执行体是同一份闭包，行为一致。
+    const scopedToolDisposers = new Map();
+    function clearScopedTools(agent) {
+      try {
+        const key = agent && agent.session ? agent.session.id : undefined;
+        const prev = key !== undefined ? scopedToolDisposers.get(key) : undefined;
+        if (prev) {
+          for (const dispose of prev) {
+            try { if (typeof dispose === 'function') dispose(); } catch (_e) { /* 忽略单个清理失败 */ }
+          }
+          scopedToolDisposers.delete(key);
+        }
+      } catch (_e) { /* 清理绝不抛错 */ }
+    }
+    function provisionStageTools(agent, toolNames) {
+      clearScopedTools(agent);
+      const list = Array.isArray(toolNames) ? toolNames : [];
+      if (!list.length) return true;
+      try {
+        const agentCtx = agent && agent.ctx;
+        const scopeTools = agentCtx && agentCtx.tools;
+        if (!scopeTools || typeof scopeTools.register !== 'function') {
+          log('阶段工具供给跳过：agent.ctx.tools 不可用（沿用 dev_tool_search 手动解锁路径）。');
+          return false;
+        }
+        const disposers = [];
+        for (const name of list) {
+          const spec = TOOL_SPECS.get(name);
+          if (!spec) continue; // 内置工具宿主自管
+          try {
+            const dispose = scopeTools.register(defineTool(spec));
+            if (typeof dispose === 'function') disposers.push(dispose);
+          } catch (err) {
+            log(`scope 注册工具 ${name} 失败：${(err && err.message) || err}`);
+          }
+        }
+        const key = agent && agent.session ? agent.session.id : undefined;
+        if (key !== undefined) scopedToolDisposers.set(key, disposers);
+        log(`阶段工具已供给 ${disposers.length} 个：${list.filter((n) => TOOL_SPECS.has(n)).join('、')}`);
+        return true;
+      } catch (err) {
+        log(`阶段工具供给失败：${(err && err.message) || err}`);
+        return false;
+      }
+    }
+    /** 取某状态 goal 的可见集（与门禁同一份名单：看得见 = 调得动）。 */
+    function visibleToolsForGoal(goalRef) {
+      try {
+        if (!goalRef) return [];
+        const def = goalEngine.get(goalRef);
+        if (!def) return [];
+        return [...goalEngine.allowedToolSet(def)];
+      } catch (_e) {
+        return [];
+      }
+    }
+    registerTool({
       name: 'switch_mode',
       description: '请求切换工作流/状态。切换需要用户批准，批准后立即生效。',
       parameters: {
@@ -1334,9 +1486,9 @@ export default {
         await activateStateGoal(agent, args.workflow, stateId);
         return `已切换到 ${args.workflow} / ${stateId}`;
       },
-    }));
+    });
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'request_extra',
       description: '查看或申请额外的 skill 和 bash 命令访问。带 skills/bash 参数时作为问题向用户申报。',
       parameters: {
@@ -1358,9 +1510,9 @@ export default {
         }
         return formatCapabilities(state);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'list_workflows',
       description: '列出当前工作区所有可用工作流及其按钮信息。',
       parameters: {},
@@ -1375,9 +1527,9 @@ export default {
           })),
         }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'get_workflow_state',
       description: '读取当前会话的 mode-gate 工作流状态（workflow/state/target/checklist/dynamicPlan/loopMemory）。',
       parameters: {},
@@ -1396,9 +1548,9 @@ export default {
           pendingProtocol: state.pendingProtocol,
         }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'select_workflow',
       description: '从 IDLE 选择并进入一个工作流（等价于 /mode <workflowId>）。',
       parameters: {
@@ -1416,9 +1568,9 @@ export default {
         const activated = await activateStateGoal(agent, args.workflow_id, stateId);
         return `已静默切换到 ${args.workflow_id} / ${stateId}。${activated && activated.prompt ? `\n当前阶段：${activated.prompt}` : ''}`;
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'submit_state',
       description: '结束当前状态/目标并交给引擎推进（用于研究、执行、调试、总结、preset action 执行）。',
       parameters: {
@@ -1432,9 +1584,9 @@ export default {
         const state = readState(agent);
         return JSON.stringify({ ok: true, phase: state.phase, workflowId: state.workflowId, ...(result.prompt ? { prompt: result.prompt } : {}) }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'list_preset_actions',
       description: '列出所有 preset-action 候选 skill 的 id、说明与匹配条件。',
       parameters: {},
@@ -1448,9 +1600,9 @@ export default {
           })),
         }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'submit_preset_action',
       description: '提交 preset-action 探测协议。命中时填写 skill_id；未命中时填写 no_match: true。',
       parameters: {
@@ -1465,9 +1617,9 @@ export default {
         const state = readState(agent);
         return JSON.stringify({ ok: true, phase: state.phase, workflowId: state.workflowId, ...(result.prompt ? { prompt: result.prompt } : {}) }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'list_feature_intents',
       description: '列出 feature intent 目录下的所有需求意图文件。',
       parameters: {},
@@ -1476,9 +1628,9 @@ export default {
         const intents = await featureIntents.list();
         return JSON.stringify({ ok: true, dir: featureIntents.dir, intents }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'get_feature_intent',
       description: '读取指定的 feature intent 文件内容。',
       parameters: { name: { type: 'string', required: true, description: 'feature intent 文件名（不带目录，可选 .md 后缀）。' } },
@@ -1487,9 +1639,9 @@ export default {
         const resolved = featureIntents.get(args.name);
         return JSON.stringify({ ok: true, name: resolved.name, file: resolved.file, path: resolved.path, content: resolved.content }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'update_feature_intent',
       description: '向 feature intent 追加一条记录。用户原话由系统自动收集，Agent 需提供 Agent 理解、用户可见行为、功能意图与可验收 checklist。',
       parameters: {
@@ -1522,13 +1674,13 @@ export default {
         );
         return JSON.stringify({ ok: true, ...result, message: `已追加到 ${result.file}${result.created ? '（新建文件）' : ''}` }, null, 2);
       },
-    }));
+    });;
 
     // ── behavior-pattern self-check（专用自查 skill）──────────────────────
     // 写入行为模式前必须先提交 reason 完成「这是否是用户强调/纠正过的模式」自查。
     // reason 只存在 state 里用于审计，绝不写入 patterns 目标文件。
     const MAX_PATTERNS_PER_ROUND = 3;
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'pattern_reason',
       description: '行为模式写入前的专用自查。必填 reason，说明本轮要写的模式为何是用户强调或纠正过的模式。reason 只用于审计，不写入任何行为模式文件。',
       parameters: {
@@ -1561,10 +1713,10 @@ export default {
           2,
         );
       },
-    }));
+    });;
 
     // ── journal（冷层）：进展流水的落点 ───────────────────────────────────
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'journal_append',
       description: '把进展流水写入 journal 冷层（不进入 hot 上下文）。行为模式拒绝进展流水时会指向这里。',
       parameters: {
@@ -1581,9 +1733,9 @@ export default {
         const result = journal.append(project, text);
         return JSON.stringify({ ok: true, ...result }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'pattern_write',
       description: '两步写入行为模式。第一步 step=facts 必填 trigger/wrong/right，返回 pattern_id；第二步 step=rationale 必填 pattern_id/why/evidence，自动附加到同一条规则明细。skip=true 表示本轮没有值得写入的模式。',
       parameters: {
@@ -1639,9 +1791,9 @@ export default {
         writeState(agent, { patternRound: { goalStartedAt: startedAt, ids: [...round.ids, result.id] } });
         return JSON.stringify({ ok: true, project, ...result, roundWritten: round.ids.length + 1 }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'pattern_overwrite',
       description: '覆盖行为模式：清除过期规则行。mode=retire（默认）只把过期行移出热文件，明细保留并标记 retired；mode=replace 同时写入一条完整的新规则并互相留引用。必填 reason 作为可审计的变更说明；所有变更写入 audit 冷文件。',
       parameters: {
@@ -1681,9 +1833,9 @@ export default {
         const result = patternStore.retire(project, patternId, { reason });
         return JSON.stringify({ ok: true, project, mode: 'retire', ...result }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'pattern_list',
       description: '只读当前项目行为模式热文件（一行一条规则摘要）：ACCUMULATE 检查已有规则是否过期时使用，不读明细、不读短期对话。',
       parameters: {
@@ -1698,8 +1850,8 @@ export default {
         if (!rows.length) return `（${project} 热文件暂无规则）`;
         return rows.map((row) => `- [${row.id}] ${row.body}`).join('\n');
       },
-    }));
-    ctx.tools.register(defineTool({
+    });;
+    registerTool({
       name: 'pattern_audit',
       description: '查看行为模式的变更记录（audit 冷文件）：create / rationale / retire / replace 的完整流水。',
       parameters: {
@@ -1713,12 +1865,12 @@ export default {
         const text = patternStore.readAudit(project);
         return text || `（${project} 暂无变更记录）`;
       },
-    }));
+    });;
 
     // ── architecture（结构层）写入：专用 reason 自查 + 有界写入 ────────────
     // 与行为模式同构：先 architecture_reason 完成必要性自查，再 architecture_write。
     // reason 只存 state 与 architecture.audit.md，绝不写入 architecture.md。
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'architecture_reason',
       description: '写入 architecture.md 前的专用必要性自查。必填 reason，说明本轮为何要沉淀/修改某条稳定结构事实。reason 只用于门禁与审计，不写入 architecture.md。',
       parameters: {
@@ -1747,9 +1899,9 @@ export default {
           2,
         );
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'architecture_write',
       description: '写入 architecture.md。必须先在本 goal 激活期调用 architecture_reason 提交 reason，否则拒绝。mode=section 只更新一个结构 section（推荐），mode=replace 整篇替换。写入前校验 ≤120 行/约 1000 tokens 且不混入进展流水；reason 只写 audit，不写文档。',
       parameters: {
@@ -1771,9 +1923,9 @@ export default {
         const result = architecture.writeSection(args.section, args.content, { reason });
         return JSON.stringify({ ok: true, mode: 'section', section: args.section, ...result, note: 'reason 已写入 audit，未写入 architecture.md。' }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'architecture_audit',
       description: '查看 architecture.md 的变更记录（audit 冷文件）：每次写入的时间、行数/tokens 与 reason。',
       parameters: {},
@@ -1782,11 +1934,11 @@ export default {
         const text = architecture.readAudit();
         return text || '（architecture.md 暂无变更记录）';
       },
-    }));
+    });;
 
     // ── 按需轻量依赖图（代码导航）────────────────────────────────────────
     // 不常驻注入；只在调用时生成，单次输出硬上限 1024 tokens。
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'dependency_map',
       description: `按需生成轻量代码依赖图（源码相对 import/require 关系），用于代码导航；单次输出硬上限 ${MAX_DEPENDENCY_TOKENS} tokens，超预算自动截断并提示用 focus 收窄。`,
       parameters: {
@@ -1804,12 +1956,12 @@ export default {
         });
         return result.text;
       },
-    }));
+    });;
 
     // ── 上下文压缩（ACCUMULATE 收尾动作）────────────────────────────────
     // 顺序门禁：必须先完成长期文档整理（pattern_reason + pattern_write）才允许压缩。
     // 压缩 hot loopMemory，并尽力压缩 harness 旧会话；结果写入 state.compression。
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'compress_context',
       description: 'ACCUMULATE 的上下文压缩（专用）。必须先完成长期文档整理（pattern_reason + pattern_write）才能调用。压缩后引擎会进入 INIT。',
       parameters: {},
@@ -1826,7 +1978,7 @@ export default {
         });
         return JSON.stringify({ ok: true, ...result.compression, message: '上下文压缩完成，可以 submit_state 进入 INIT。' }, null, 2);
       },
-    }));
+    });;
 
     // ── 手动沉淀/压缩的共用实现（tool 与 / 命令共用同一份）──────────────
     async function doGotoAccumulation(agent) {
@@ -1850,10 +2002,150 @@ export default {
       return { ok: true, ...result.compression, manual: true, message: '沉淀与压缩完成，已进入 INIT。' };
     }
 
+    // /init 的实现：inspect 全库并幂等填充长期记忆。只补空缺、不覆盖。
+    async function initRepositoryMemory(agent) {
+      const root = workspaceOf(agent, defaultWorkspace);
+      const lines = [`仓库：${root}`];
+      const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', '.next', '.turbo', 'coverage', 'vendor', '.cache', 'out']);
+      const readPkg = (dir) => {
+        try {
+          const file = join(dir, 'package.json');
+          if (!existsSync(file)) return null;
+          return JSON.parse(readFileSync(file, 'utf8'));
+        } catch (_e) {
+          return null;
+        }
+      };
+      // 依赖图（内部相对 import 边）。
+      let graph = null;
+      try {
+        graph = buildDependencyGraph(root, {});
+      } catch (err) {
+        lines.push(`依赖图生成失败（跳过依赖分析）：${(err && err.message) || err}`);
+      }
+      // package.json 扫：root + 一层子目录。
+      const pkgDirs = [];
+      const rootPkg = readPkg(root);
+      if (rootPkg) pkgDirs.push({ dir: '.', pkg: rootPkg });
+      try {
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          if (!entry.isDirectory() || SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+          const pkg = readPkg(join(root, entry.name));
+          if (pkg) pkgDirs.push({ dir: entry.name, pkg });
+        }
+      } catch (_e) { /* 读不到目录时只用 root */ }
+      const modOf = (rel) => {
+        let best = null;
+        for (const { dir } of pkgDirs) {
+          if (dir === '.') continue;
+          if (rel === dir || rel.startsWith(`${dir}/`)) {
+            if (!best || dir.length > best.length) best = dir;
+          }
+        }
+        if (best) return best;
+        const seg = String(rel || '').split('/')[0];
+        return seg || '.';
+      };
+      const modules = pkgDirs.map(({ dir, pkg }) => {
+        const name = (pkg && (pkg.name || pkg.displayName)) || (dir === '.' ? 'root' : dir);
+        const desc = (pkg && pkg.description) || '（职责待补充）';
+        const entries = [];
+        if (pkg) {
+          if (typeof pkg.main === 'string' && pkg.main) entries.push(pkg.main);
+          if (typeof pkg.bin === 'string' && pkg.bin) entries.push(pkg.bin);
+          else if (pkg.bin && typeof pkg.bin === 'object') {
+            for (const value of Object.values(pkg.bin)) {
+              if (typeof value === 'string' && value) entries.push(value);
+            }
+          }
+        }
+        return { name: String(name), dir, desc: String(desc), entries };
+      });
+      const depEdges = new Map();
+      if (graph && graph.edges) {
+        for (const [from, targets] of graph.edges) {
+          const m1 = modOf(from);
+          for (const target of targets || []) {
+            const m2 = modOf(target);
+            if (!m2 || m2 === m1) continue;
+            if (!depEdges.has(m1)) depEdges.set(m1, new Set());
+            depEdges.get(m1).add(m2);
+          }
+        }
+      }
+      // architecture 三节：只补空缺。
+      const current = architecture.read();
+      const sectionBody = (text, label) => {
+        const all = String(text || '').split(/\r?\n/);
+        const idx = all.findIndex((l) => /^#{2,4}\s*/.test(l) && l.replace(/^#{2,4}\s*/, '').trim() === label);
+        if (idx === -1) return '';
+        const out = [];
+        for (const l of all.slice(idx + 1)) {
+          if (/^#{1,6}\s+/.test(l)) break;
+          out.push(l);
+        }
+        return out.join('\n').trim();
+      };
+      const INIT_REASON = '/init 全库 inspect 自动填充长期记忆';
+      const filled = [];
+      const skipped = [];
+      const ensureSection = (id, label, bodyLines) => {
+        if (!bodyLines.length) {
+          skipped.push(`${label}（无可填充内容）`);
+          return;
+        }
+        if (sectionBody(current, label)) {
+          skipped.push(`${label}（已有内容，不覆盖）`);
+          return;
+        }
+        architecture.writeSection(id, bodyLines.join('\n'), { reason: INIT_REASON });
+        filled.push(`${label}（${bodyLines.length} 行）`);
+      };
+      ensureSection('modules', '模块职责', modules.map((m) => `- ${m.name}（${m.dir}）：${m.desc}`));
+      const depLines = [...depEdges.entries()].map(([from, set]) => `- ${from} → ${[...set].sort().join('、')}`);
+      if (graph && graph.truncated) depLines.push('（依赖图被截断：文件数超上限，仅供参考）');
+      ensureSection('dependencies', '依赖方向与禁止边', depLines);
+      ensureSection('entrypoints', 'entrypoint', modules.flatMap((m) => m.entries.map((e) => `- ${m.name}：${e}`)));
+      if (filled.length) lines.push(`architecture.md 已填充：${filled.join('；')}`);
+      if (skipped.length) lines.push(`architecture.md 跳过：${skipped.join('；')}`);
+      // features：每个 intent 一条，仅补缺失。
+      let featCreated = 0;
+      const featSkipped = [];
+      try {
+        const intents = await featureIntents.list();
+        for (const intent of intents) {
+          const id = intent.name;
+          try {
+            if (featureList.get(id)) {
+              featSkipped.push(id);
+              continue;
+            }
+            const file = featureIntents.get(id);
+            const fields = extractEntryFields(latestEntry(file.content));
+            featureList.upsert({
+              id,
+              title: intent.title || id,
+              module: id,
+              status: 'in_progress',
+              userVisibleBehavior: fields.userVisibleBehavior || '（/init 自动填充：intent 缺少用户可见行为）',
+              featureIntent: fields.featureIntent || '（/init 自动填充）',
+            });
+            featCreated += 1;
+          } catch (err) {
+            featSkipped.push(`${id}（${(err && err.message) || err}）`);
+          }
+        }
+        lines.push(`features：新建 ${featCreated} 条${featSkipped.length ? `，跳过 ${featSkipped.length} 条（${featSkipped.join('、')}）` : ''}`);
+      } catch (err) {
+        lines.push(`feature 填充失败：${(err && err.message) || err}`);
+      }
+      return lines.join('\n');
+    }
+
     // ── 手动压缩触发（用户显式要求时调用，常控工具，各阶段可用）────────
     // goto_accumulation：跳入 ACCUMULATION，走正常沉淀流程（长期文档整理 +
     // compress_context + submit_state → INIT）。
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'goto_accumulation',
       description: '手动触发压缩：跳入 ACCUMULATION 阶段，走正常沉淀流程（先整理长期文档，再 compress_context，最后 submit_state 进入 INIT）。仅 CREATE 工作流可用。',
       parameters: {},
@@ -1861,14 +2153,14 @@ export default {
       async execute(_args, exec) {
         return JSON.stringify(await doGotoAccumulation(exec.agent), null, 2);
       },
-    }));
+    });;
 
     // accumulation_and_init：先沉淀后初始化（用户显式要求时使用；
     // 压缩后峰值重置，下一轮重新累积）。
     // 顺序与 ACCUMULATE 一致：必须先完成长期文档整理（pattern_reason +
     // pattern_write），再压缩，最后进入 INIT。还没整理时报错提示先整理，
     // 可先调 goto_accumulation 逐步沉淀，或补完文档整理后重试本工具。
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'accumulation_and_init',
       description: '手动沉淀并初始化：先整理长期文档（pattern_reason + pattern_write），再压缩上下文，然后进入 INIT。用户显式要求压缩时使用。仅 CREATE 工作流可用。',
       parameters: {},
@@ -1876,9 +2168,9 @@ export default {
       async execute(_args, exec) {
         return JSON.stringify(await doAccumulationAndInit(exec.agent), null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'update_feature_list',
       description: '更新功能列表总体条目：写入 user_visible_behavior 与 feature_intent，并把 status 置为 in_progress（再次更新意味着该功能进入新一轮工作，已 done 的功能会被重新打开）。commit 由系统自动生成，done 只能由 finish_feature 设置。',
       parameters: {
@@ -1906,9 +2198,9 @@ export default {
         });
         return JSON.stringify({ ok: true, ...result }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'finish_feature',
       description: '完成一个功能：必须提供真实证据（例如验证命令与结果）。系统会置 status=done、记录完成时间，并自动读取当前 HEAD 的 commit hash 写入功能列表。',
       parameters: {
@@ -1937,9 +2229,9 @@ export default {
           2,
         );
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'git_commit',
       description: 'Git 更新（checklist-15）：每轮更新用本工具完成 git add -A + commit + push，输出可审计 update，并把 commit hash 自动写入功能列表。Agent 不要直接执行 git 修改命令。',
       parameters: {
@@ -1989,9 +2281,9 @@ export default {
         ].join('\n');
         return JSON.stringify({ ok: true, ...update, featureId, featureNote, update: updateText }, null, 2);
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'get_feature',
       description: '独立查看入口：按 feature id 返回索引行与完整详情（user_visible_behavior / feature_intent / 完成证据等）。',
       parameters: {
@@ -2015,9 +2307,9 @@ export default {
           readFileSync(detail.path, 'utf8'),
         ].join('\n');
       },
-    }));
+    });;
 
-    ctx.tools.register(defineTool({
+    registerTool({
       name: 'submit_requirement_protocol',
       description: '提交需求识别协议。提交后会在“工作流”界面等待用户确认：接受则进入功能列表更新，随后经 INIT 初始化本轮上下文再进入 RESEARCH；发送任意消息则视为拒绝并继续修改需求。',
       parameters: {
@@ -2057,7 +2349,7 @@ export default {
           ...(result.prompt ? { prompt: result.prompt } : {}),
         }, null, 2);
       },
-    }));
+    });;
 
     // ── mode command ─────────────────────────────────────────────────────
     ctx.inject(['commands'], (commandCtx) => {
@@ -2112,7 +2404,48 @@ export default {
           }
         },
       });
-      log('手动沉淀 / 命令已注册：/goto-accumulation、/accumulation-and-init');
+      // /skip-mode：强制跳过当前阶段。不推进 staticPlan、不追加 loopMemory，
+      // 直接以 goalCompleted 走正常转移表（绕过 submitTool 的 requiredCalls 校验）。
+      commandCtx.commands.register({
+        name: 'skip-mode',
+        description: '强制跳过当前阶段：不做本阶段工作，直接进入转移表决定的下一状态（仅工作流内可用）',
+        input: { hint: '无参数，直接执行' },
+        recordInput: false,
+        handler: async ({ agent }) => {
+          try {
+            const state = readState(agent);
+            if (!state || state.workflowId === 'IDLE' || state.phase === 'IDLE') {
+              return { kind: 'error', text: '当前不在工作流内，无阶段可跳过。' };
+            }
+            const from = `${state.workflowId}/${state.phase}`;
+            await completeGoal(agent, { signal: { goalCompleted: true }, statePatch: {}, prompt: '（用户强制跳过当前阶段）' });
+            const next = readState(agent);
+            return { kind: 'success', text: `已从 ${from} 强制跳过，当前：${next.workflowId}/${next.phase}。` };
+          } catch (err) {
+            return { kind: 'error', text: (err && err.message) || String(err) };
+          }
+        },
+      });
+      // /init：初始化仓库长期记忆。不需要用户指令，完全依靠库本身：
+      // inspect 全库（依赖图 + package.json），幂等填充 architecture.md 的
+      // 模块职责/依赖方向/entrypoints 三节，以及 feature 概览（features.md）
+      // 与各明细（features/<id>.md，来源为各 feature intent 最新条目）。
+      // 只补空缺：已存在非空内容一律不覆盖，只报告。
+      commandCtx.commands.register({
+        name: 'init',
+        description: '初始化仓库长期记忆：inspect 全库并填充 architecture.md 与 feature 概览+明细，只补空缺不覆盖',
+        input: { hint: '无参数，直接执行' },
+        recordInput: false,
+        handler: async ({ agent }) => {
+          try {
+            const report = await initRepositoryMemory(agent);
+            return { kind: 'success', text: report };
+          } catch (err) {
+            return { kind: 'error', text: (err && err.message) || String(err) };
+          }
+        },
+      });
+      log('手动沉淀 / 命令已注册：/goto-accumulation、/accumulation-and-init、/skip-mode、/init');
     });
 
 
@@ -2305,9 +2638,26 @@ export default {
     });
 
     // ── per-agent model override ─────────────────────────────────────────
+    // agent 销毁时清理 scope 供给记录（scope 注册随 scope 释放，map 只防泄漏）。
+    ctx.on('agent/disposed', ({ agent }) => {
+      try {
+        clearScopedTools(agent);
+        const key = agent && agent.session ? agent.session.id : undefined;
+        if (key !== undefined && agents.has(key)) agents.delete(key);
+      } catch (_e) { /* 清理绝不抛错 */ }
+    });
+
     ctx.on('agent/created', ({ agent }) => {
       try {
         if (agent && agent.session && agent.session.id !== void 0) agents.set(agent.session.id, agent);
+        // 新 agent 按当前状态补一次 scope 供给（中途接入/恢复会话时生效）。
+        try {
+          const state = readState(agent);
+          const registry = registryFor(agent);
+          const stateDef = registry.stateOf(state.workflowId, state.phase);
+          const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
+          provisionStageTools(agent, goalRef ? visibleToolsForGoal(goalRef) : []);
+        } catch (_e) { /* 供给失败不阻塞创建，沿用手动解锁路径 */ }
         const agentCtx = agent && agent.ctx;
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
@@ -2364,12 +2714,15 @@ export default {
           }
           const phaseOverride = stateModelOverride(state, state.workflowId, state.phase);
           if (phaseOverride) {
+            let resolvedThinking = '';
             if (phaseOverride.model) {
               const resolved = resolveStageModel(phaseOverride.model);
               _payload.provider = (resolved && resolved.provider) || 'deepseek-official';
               _payload.model = (resolved && resolved.model) || phaseOverride.model;
+              if (resolved && resolved.thinking) resolvedThinking = resolved.thinking;
             }
             if (phaseOverride.reasoningEffort) _payload.reasoningEffort = phaseOverride.reasoningEffort;
+            else if (resolvedThinking) _payload.reasoningEffort = resolvedThinking;
           }
           return next();
         });
@@ -2388,6 +2741,8 @@ export default {
       goalEngine,
       buildAutoGuide,
       restrictions,
+      featureTree,
+      submitFeatureSelection,
     });
   },
 };

@@ -1,0 +1,62 @@
+{
+  "name": "dsh-trajectory-notes",
+  "version": "0.1.0",
+  "description": "Local DSH plugin: read a session trajectory (one entry per turn), summarize each entry with a model, and keep the notes in a dedicated storage domain. The native trajectory page and the append-only session log are never written.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./reader": {
+      "default": "./lib/trajectory-reader.js"
+    },
+    "./summarizer": {
+      "default": "./lib/summarizer.js"
+    },
+    "./note-store": {
+      "default": "./lib/note-store.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "scripts": {
+    "test": "node scripts/selftest.mjs"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-session-query": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-timeout": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-api-remotes": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.0-rc.8 <0.2.0",
+    "react": "^18.2.0"
+  }
+}
