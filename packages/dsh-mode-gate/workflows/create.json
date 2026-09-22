@@ -55,7 +55,7 @@
     {
       "id": "REQUIREMENT_RECOGNITION",
       "label": "需求分解",
-      "description": "基于用户需求按模块分解需求；写入 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist（用户原话由系统自动收集），并把 checklist 注册为 staticPlan。本阶段不读任何实际文件、不解锁新工具，专心分解需求。",
+      "description": "基于用户需求按模块分解需求，并同时更新总体功能列表：写入 Agent 理解、user_visible_behavior、feature_intent 与可验收 checklist（用户原话由系统自动收集），把 checklist 注册为 staticPlan，并用 update_feature_list 更新总体条目。本阶段不读实际代码、不解锁新工具，专心分解需求。",
       "permissions": {
         "write": false,
         "bash": "none",
@@ -69,7 +69,10 @@
           "job_output",
           "ask_user_question",
           "todo_write",
-          "skill_search"
+          "skill_search",
+          "feature_tree",
+          "submit_state",
+          "update_feature_list"
         ]
       },
       "model": {
@@ -86,46 +89,11 @@
           },
           "to": {
             "workflow": "$self",
-            "state": "FEATURE_UPDATE"
-          }
-        }
-      ]
-    },
-    {
-      "id": "FEATURE_UPDATE",
-      "label": "更新功能列表",
-      "description": "根据已审核的 feature intent 更新总体 user_visible_behavior 与 feature_intent，并把 status 置为 in_progress。",
-      "permissions": {
-        "write": false,
-        "bash": "none",
-        "tools": [
-          "update_feature_list",
-          "read",
-          "grep",
-          "glob",
-          "skill_load",
-          "skill_search",
-          "str_replace_editor:view"
-        ]
-      },
-      "model": {
-        "reasoningEffort": "low"
-      },
-      "goal": {
-        "ref": "create.feature-update"
-      },
-      "prompt": "用 update_feature_list 更新总体 user_visible_behavior 与 feature_intent，并将 status 置为 in_progress；完成后 submit_state。",
-      "transitions": [
-        {
-          "when": {
-            "type": "goal.completed"
-          },
-          "to": {
-            "workflow": "$self",
             "state": "INIT"
           }
         }
-      ]
+      ],
+      "restriction": "no-code-read"
     },
     {
       "id": "RESEARCH",

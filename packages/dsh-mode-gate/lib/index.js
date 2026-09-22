@@ -13,7 +13,7 @@ import { createJournalStore, defaultJournalDir } from './journal-store.js';
 import { createHistoryStore, defaultHistoryDir } from './history-store.js';
 import { readHeadCommit } from './git-commit.js';
 import { runGitUpdate } from './git-update.js';
-import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh } from './architecture-store.js';
+import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh, limitedDigest } from './architecture-store.js';
 import { generateDependencyMap, buildDependencyGraph, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
 import { budgetDecision, estimateMessagesTokens, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './context-budget.js';
 import { compressContext, assertLongTermDocsFirst } from './context-compressor.js';
@@ -210,6 +210,22 @@ class ModeGateGateway extends TypertRemoteService {
       return { ok: false, error: String((err && err.message) || err) };
     }
   }
+  async createFeatureNode(args) {
+    const store = this.options.featureTree;
+    if (!store) return { ok: false, error: 'feature tree store 未初始化' };
+    try {
+      const kind = args && args.kind === 'overview' ? 'overview' : 'intent';
+      const parent = args && typeof args.parent === 'string' ? args.parent.trim() : '';
+      const name = args && args.name;
+      const body = args && args.body;
+      const result = kind === 'overview'
+        ? store.createOverview(parent, name, body)
+        : store.createIntent(parent, name, body);
+      return { ok: true, ...result };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
   async submitFeatureSelection(args) {
     const sessionId = args && args.sessionId;
     const selection = Array.isArray(args && args.selection) ? args.selection : [];
@@ -349,6 +365,7 @@ class ModeGateGateway extends TypertRemoteService {
             description: typeof state.description === 'string' ? state.description : '',
             prompt: typeof override.prompt === 'string' ? override.prompt : (typeof state.prompt === 'string' ? state.prompt : ''),
             autoGuide: typeof override.autoGuide === 'boolean' ? override.autoGuide : defaultAuto,
+            ignorePrompt: override.ignorePrompt === true,
             autoGuideText,
             goalRef: state.goal && state.goal.ref ? state.goal.ref : null,
             hasTransitions: Array.isArray(state.transitions) && state.transitions.length > 0,
@@ -470,7 +487,7 @@ class ModeGateGateway extends TypertRemoteService {
 }
 markRemoteMethods(ModeGateGateway, [
   'getState', 'getWorkflows', 'selectWorkflow',
-  'getFeatureTree', 'getFeatureNode', 'submitFeatureSelection',
+  'getFeatureTree', 'getFeatureNode', 'createFeatureNode', 'submitFeatureSelection',
   'getBashDenyList', 'setBashDenyList',
   'getModelCatalog', 'setModelCatalog', 'getModelAliases', 'setModelAliases', 'getModelCompressionTable',
   'getCompressionOverrides', 'setCompressionOverrides',
@@ -902,6 +919,12 @@ export default {
       return defaultAutoGuideEnabled(stateDef);
     }
 
+    /** 「忽略 prompt」：该阶段关闭用户/自动 prompt 注入（阶段 prompt、自动指引、feature 架构上下文）。 */
+    function ignorePromptEnabled(state, workflowId, stateId) {
+      const override = stateOverride(state, workflowId, stateId);
+      return Boolean(override && override.ignorePrompt === true);
+    }
+
     /** Dynamically generated command guide for a state, derived from its goal. */
     function buildAutoGuide(stateDef, goalDef) {
       if (!stateDef) return '';
@@ -1186,9 +1209,24 @@ export default {
       if (types.size > 1) {
         return { ok: false, error: 'feature overview 与底层 feature intent 不能同时选择' };
       }
+      const route = [...types][0] === 'overview' ? 'auto-discover' : 'inject';
       writeState(agent, {
-        featureSelection: { types: [...types][0], items: clean, submittedAt: new Date().toISOString() },
+        featureSelection: { types: [...types][0], items: clean, route, submittedAt: new Date().toISOString() },
+        featureIntentWrites: [],
       });
+      // 沿树上溯冒泡收集各层 architecture.md 及其父文件夹 code map，去重后注入。
+      const context = collectFeatureArchitectureContext(clean);
+      writeState(agent, { featureArchitectureContext: context.state });
+      if (!ignorePromptEnabled(readState(agent), 'create', 'REQUIREMENT_RECOGNITION')) {
+        injectFeatureArchitectureContext(agent, context.text);
+        // auto-discover 路线：把所选 overview 的内容 + 路径也喂给 AI，供其自行寻找 intent。
+        if (route === 'auto-discover') {
+          injectFeatureSelectionContext(agent, clean);
+        } else if (route === 'inject') {
+          // inject 路线：从所选 intent 向上冒泡收集 overview 链 + 底层被选 intent。
+          injectFeatureBubbleContext(agent, clean);
+        }
+      }
       const activated = await activateStateGoal(agent, 'create', 'REQUIREMENT_RECOGNITION');
       const after = readState(agent);
       return {
@@ -1197,6 +1235,172 @@ export default {
         phase: after.phase,
         ...(activated && activated.prompt ? { prompt: activated.prompt } : {}),
       };
+    }
+
+    /**
+     * 沿树上溯冒泡收集各层 architecture.md（去重），并为**最高层**（最外层）的那个
+     * architecture.md 生成一次 code map（父文件夹依赖图）——依赖图只给一次。
+     *
+     * @returns {{ state: object, text: string }}
+     */
+    function collectFeatureArchitectureContext(selection) {
+      let architectures = [];
+      try {
+        architectures = featureTree.architecturesFor(selection);
+      } catch (err) {
+        log(`收集 feature architecture 失败：${(err && err.message) || err}`);
+        architectures = [];
+      }
+      // 只对最外层（路径层级最浅）的 architecture.md 生成一次 code map。
+      let codeMap = null;
+      if (architectures.length > 0) {
+        const outermost = architectures[0];
+        try {
+          const rootDir = dirname(outermost.path);
+          const map = generateDependencyMap(rootDir, { maxTokens: MAX_DEPENDENCY_TOKENS });
+          codeMap = {
+            root: rootDir,
+            rendered: map && map.text ? map.text : '',
+            fileCount: map ? map.fileCount : 0,
+            truncated: Boolean(map && map.truncated),
+          };
+        } catch (err) {
+          log(`生成 code map 失败（${outermost.path}）：${(err && err.message) || err}`);
+        }
+      }
+      const state = {
+        architectures: architectures.map((entry) => ({ level: entry.level, path: entry.path })),
+        codeMap: codeMap ? { root: codeMap.root, fileCount: codeMap.fileCount, truncated: codeMap.truncated } : null,
+        collectedAt: new Date().toISOString(),
+      };
+      const lines = [];
+      if (architectures.length > 0) {
+        lines.push('## 相关 architecture.md（沿 feature 树上溯冒泡，已去重）');
+        for (const entry of architectures) {
+          lines.push('', `### ${entry.level}：${entry.path}`, '', limitedDigest(entry.content));
+        }
+      }
+      if (codeMap && codeMap.rendered) {
+        lines.push('', `## code map（最高层 architecture.md 所在目录：${codeMap.root}）`, '', codeMap.rendered);
+      }
+      return { state, text: lines.join('\n') };
+    }
+
+    /** 把 feature architecture / code map 作为插件上下文注入本轮。 */
+    function injectFeatureArchitectureContext(agent, text) {
+      if (!text || !agent || typeof agent.inject !== 'function') return false;
+      try {
+        agent.inject(createUserMessage({
+          content: [{ type: 'text', text }],
+          source: {
+            kind: 'plugin',
+            plugin: 'mode-gate',
+            form: 'notice',
+            summary: 'mode-gate feature architecture / code map',
+          },
+        }));
+        return true;
+      } catch (err) {
+        log(`feature architecture 注入失败：${(err && err.message) || err}`);
+        return false;
+      }
+    }
+
+    /**
+     * auto-discover 路线：把所选 feature overview 的内容 + 路径注入给 AI，
+     * 供其在需求识别/feature update 阶段自行寻找（或新建）具体 feature intent。
+     */
+    function injectFeatureSelectionContext(agent, selection) {
+      if (!agent || typeof agent.inject !== 'function') return false;
+      const lines = ['## 已选择的 feature overview（请据此自行寻找 / 新建具体 feature intent）'];
+      for (const item of selection || []) {
+        if (!item || item.type !== 'overview') continue;
+        lines.push('', `### ${item.path}`, '');
+        try {
+          const node = featureTree.contentOf('overview', item.path);
+          lines.push(`路径：${item.path}（文档：${node.path}）`, '', limitedDigest(node.content));
+        } catch (err) {
+          lines.push(`路径：${item.path}（无法读取 overview.md：${(err && err.message) || err}）`);
+        }
+      }
+      lines.push('', '提示：可用 feature 树工具查看该 overview 的上级与直属下属；如需新增 intent/overview，可直接创建并挂到任意 overview 下；完成后用 submit_state 推进阶段。');
+      try {
+        agent.inject(createUserMessage({
+          content: [{ type: 'text', text: lines.join('\n') }],
+          source: {
+            kind: 'plugin',
+            plugin: 'mode-gate',
+            form: 'notice',
+            summary: 'mode-gate feature overview 选择（auto-discover）',
+          },
+        }));
+        return true;
+      } catch (err) {
+        log(`feature overview 选择注入失败：${(err && err.message) || err}`);
+        return false;
+      }
+    }
+
+    /**
+     * inject 路线：从所选底层 feature intent 一路向上冒泡，收集 overview 链
+     * （去重，父在前）与底层被选 intent，一并注入给 AI。
+     */
+    function injectFeatureBubbleContext(agent, selection) {
+      if (!agent || typeof agent.inject !== 'function') return false;
+      const intents = (selection || []).filter((item) => item && item.type === 'intent');
+      // 冒泡：所有被选 intent 的祖先 overview（去重、父在前）。
+      const overviewPaths = [];
+      const seen = new Set();
+      for (const item of intents) {
+        let described;
+        try {
+          described = featureTree.describeNode(item.path);
+        } catch (err) {
+          log(`冒泡收集 "${item.path}" 上级失败：${(err && err.message) || err}`);
+          continue;
+        }
+        for (const ancestor of described.ancestors) {
+          if (ancestor.type !== 'overview') continue;
+          if (seen.has(ancestor.path)) continue;
+          seen.add(ancestor.path);
+          overviewPaths.push(ancestor.path);
+        }
+      }
+      const lines = ['## 注入 prompt 路线：所选 feature intent 与其 overview 链（一个都不能少）'];
+      if (intents.length > 0) {
+        lines.push('', '### 必须全部修改的被选 feature intent');
+        for (const item of intents) {
+          lines.push(`- ${item.path}`);
+        }
+      }
+      if (overviewPaths.length > 0) {
+        lines.push('', '### 冒泡收集的 feature overview（沿树上溯，去重）');
+        for (const path of overviewPaths) {
+          lines.push('', `#### ${path}`, '');
+          try {
+            const node = featureTree.contentOf('overview', path);
+            lines.push(`路径：${path}（文档：${node.path}）`, '', limitedDigest(node.content));
+          } catch (err) {
+            lines.push(`路径：${path}（无法读取 overview.md：${(err && err.message) || err}）`);
+          }
+        }
+      }
+      lines.push('', '要求：submit_requirement_protocol 提交前，必须对上述每一个被选 feature intent 都调用 update_feature_intent 写入记录，缺一不可；协议会校验，未全部修改将被拒绝。');
+      try {
+        agent.inject(createUserMessage({
+          content: [{ type: 'text', text: lines.join('\n') }],
+          source: {
+            kind: 'plugin',
+            plugin: 'mode-gate',
+            form: 'notice',
+            summary: 'mode-gate feature intent 冒泡注入（inject）',
+          },
+        }));
+        return true;
+      } catch (err) {
+        log(`feature intent 冒泡注入失败：${(err && err.message) || err}`);
+        return false;
+      }
     }
 
     function syncStaticPlanToDshTodos(agent, state) {
@@ -1271,9 +1475,13 @@ export default {
       const goalPrompt = state.goal && state.goal.prompt
         ? state.goal.prompt
         : (goalDef ? (typeof goalDef.prompt === 'function' ? goalDef.prompt(envFor(agent, state), state) : goalDef.prompt) : '');
-      const stagePrompt = effectiveStatePrompt(state, state.workflowId, state.phase, stateDef);
+      const stagePrompt = ignorePromptEnabled(state, state.workflowId, state.phase)
+        ? ''
+        : effectiveStatePrompt(state, state.workflowId, state.phase, stateDef);
       const awaitingUser = Boolean(state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user');
-      const autoGuide = !awaitingUser && autoGuideEnabled(state, state.workflowId, state.phase, stateDef)
+      const autoGuide = !awaitingUser
+        && !ignorePromptEnabled(state, state.workflowId, state.phase)
+        && autoGuideEnabled(state, state.workflowId, state.phase, stateDef)
         ? buildAutoGuide(stateDef, guideGoalDef)
         : '';
       const denyList = readBashDenyList();
@@ -1628,6 +1836,29 @@ export default {
         const intents = await featureIntents.list();
         return JSON.stringify({ ok: true, dir: featureIntents.dir, intents }, null, 2);
       },
+    });
+    registerTool({
+      name: 'feature_tree',
+      description: '查看 feature overview / feature intent 的树状层级。不带 path 时列出根层级；带 path 时列出该节点的全部上级（直至根）与全部直属下属。',
+      parameters: {
+        path: { type: 'string', description: '节点逻辑路径（如 ui 或 ui/nested/deep）；省略则列出根层级。' },
+      },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(args) {
+        const path = typeof args.path === 'string' ? args.path.trim() : '';
+        if (!path) {
+          const roots = featureTree.tree().map((node) => ({
+            type: node.type,
+            path: node.path,
+            name: node.name,
+            title: node.title || '',
+            hasChildren: Boolean(node.children && node.children.length > 0),
+          }));
+          return JSON.stringify({ ok: true, scope: 'root', nodes: roots }, null, 2);
+        }
+        const described = featureTree.describeNode(path);
+        return JSON.stringify({ ok: true, scope: 'node', ...described }, null, 2);
+      },
     });;
 
     registerTool({
@@ -1672,6 +1903,15 @@ export default {
           { userWords, understanding: args.understanding, userVisibleBehavior, featureIntent, checklist },
           args.project_overview,
         );
+        // 记录本轮已写入的 feature intent（供 inject 路线协议校验「一个都不能少」）。
+        if (agent) {
+          const prev = readState(agent);
+          const written = Array.isArray(prev.featureIntentWrites) ? prev.featureIntentWrites : [];
+          const path = typeof args.name === 'string' ? args.name.trim().replace(/\.md$/i, '') : '';
+          if (path && !written.includes(path)) {
+            writeState(agent, { featureIntentWrites: [...written, path] });
+          }
+        }
         return JSON.stringify({ ok: true, ...result, message: `已追加到 ${result.file}${result.created ? '（新建文件）' : ''}` }, null, 2);
       },
     });;
@@ -2322,6 +2562,19 @@ export default {
       async execute(args, exec) {
         const agent = exec.agent;
         if (agent === void 0) throw new Error('submit_requirement_protocol 需要 agent 上下文');
+        // inject 路线：必须已修改全部被选 feature intent，缺一拒绝。
+        const before = readState(agent);
+        const selection = before.featureSelection;
+        if (selection && selection.route === 'inject' && Array.isArray(selection.items)) {
+          const written = new Set(Array.isArray(before.featureIntentWrites) ? before.featureIntentWrites : []);
+          const missing = selection.items
+            .filter((item) => item && item.type === 'intent')
+            .map((item) => item.path)
+            .filter((path) => !written.has(path));
+          if (missing.length > 0) {
+            throw new Error(`以下被选 feature intent 尚未用 update_feature_intent 写入记录，一个都不能少：${missing.join('、')}。请逐个补写后再提交协议。`);
+          }
+        }
         const result = await submitGoalTool(agent, 'submit_requirement_protocol', args || {});
         const state = readState(agent);
         if (result && result.pendingApproval) {

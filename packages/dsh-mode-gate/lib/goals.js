@@ -148,23 +148,58 @@ export function createBuiltinGoals() {
 
     {
       id: 'feature-intent.read-and-decompose',
-      prompt: (env) => [
-        '[目标] 读取 feature intent 并完成需求分解',
-        '本阶段只做两件事，按顺序线性调用两个工具即可，其他工具一律禁止、不要尝试：',
-        '1. 用 update_feature_intent 写入 feature intent：用户原话字段由系统自动收集（无需你写），你需要提供 understanding（你的理解）、user_visible_behavior（用户在新工作流下如何工作/感知本次改动）和 feature_intent（本次功能修改意图），以及 checklist（可验收节点数组）；这些 field 会在同一次写入中落到对应小标题下。两个工具都已由插件按阶段自动供给到你的工具列表，无需搜索解锁。',
-        '2. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
-        'checklist 按模块粒度拆分：一个模块一项，不同模块各占一项，同一模块的多个改动合并为一项；不要拆到按钮或字段级，每一项必须是可验收的节点。示例（模块级）：「模型压缩上下文设置页」「压缩决策引擎」「阶段权限门禁」；反例（太细）：「按钮在 xx 处出现」。',
-        '如需记录需求分解期间的调研任务，可调用 todo_write。本状态禁用 bash 与文件查看工具，禁止写文件；专心分解需求。',
-      ].join('\n'),
+      prompt: (env, state) => {
+        const selection = state && state.featureSelection ? state.featureSelection : null;
+        const route = selection && selection.route ? selection.route : null;
+        const base = ['[目标] 读取 feature intent 并完成需求分解'];
+        if (route === 'auto-discover') {
+          const overviews = (selection.items || []).map((item) => item.path).join('、') || '（未记录）';
+          base.push(
+            '本轮为「AI 自动寻找 + 创建」路线：用户选择了 feature overview，而不是具体 feature intent。',
+            `所选 overview：${overviews}（内容与路径已注入，请据此自行判断应落到哪个 feature intent）。`,
+            '1. 先用 feature 树工具查看这些 overview 的上级（直至根）与直属下属，必要时创建新的 feature intent 或 overview（可挂在任意 overview 下）；',
+            '2. 用 update_feature_intent 把需求写入对应的 feature intent（用户原话由系统自动收集，你提供 understanding、user_visible_behavior、feature_intent、checklist）；',
+            '3. 调用 submit_requirement_protocol 提交协议；完成后可用 submit_state 自行推进阶段。',
+          );
+        } else if (route === 'inject') {
+          const intents = (selection.items || []).map((item) => item.path).join('、') || '（未记录）';
+          base.push(
+            '本轮为「注入 prompt」路线：用户直接选择了底层 feature intent。',
+            `被选中的 feature intent（一个都不能少）：${intents}。`,
+            '1. 必须对上述每一个被选中的 feature intent 调用 update_feature_intent 写入记录，不允许遗漏任何一个；',
+            '2. 每个 feature intent 都需要提供 understanding、user_visible_behavior、feature_intent 与 checklist；',
+            '3. 调用 submit_requirement_protocol 提交协议（只能提交一次，但这一次可覆盖多个 feature intent）。',
+          );
+        } else {
+          base.push(
+            '本阶段只做两件事，按顺序线性调用两个工具即可，其他工具一律禁止、不要尝试：',
+            '1. 用 update_feature_intent 写入 feature intent：用户原话字段由系统自动收集（无需你写），你需要提供 understanding（你的理解）、user_visible_behavior（用户在新工作流下如何工作/感知本次改动）和 feature_intent（本次功能修改意图），以及 checklist（可验收节点数组）；这些 field 会在同一次写入中落到对应小标题下。',
+            '2. 调用 submit_requirement_protocol 提交协议，通过后 checklist 会成为本工作流的 staticPlan 并自动同步到 DSH task 系统。',
+          );
+        }
+        base.push(
+          '本阶段已与「更新功能列表」合并：除了写 feature intent，还必须用 update_feature_list 更新总体 user_visible_behavior（≤500 字）与 feature_intent（≤50 字）并把 status 置为 in_progress，两个工具都调用过才能提交协议。',
+          'checklist 按模块粒度拆分：一个模块一项，不同模块各占一项，同一模块的多个改动合并为一项；不要拆到按钮或字段级，每一项必须是可验收的节点。示例（模块级）：「模型压缩上下文设置页」「压缩决策引擎」「阶段权限门禁」；反例（太细）：「按钮在 xx 处出现」。',
+          '如需记录需求分解期间的调研任务，可调用 todo_write。本状态禁用 bash 与文件查看工具，禁止写文件；专心分解需求。',
+        );
+        return base.join('\n');
+      },
       allowedTools: [
         'list_feature_intents', 'update_feature_intent',
         'submit_requirement_protocol',
+        'update_feature_list',
         'list_agents', 'get_goal', 'job_list', 'job_output',
         'ask_user_question', 'todo_write',
+        // auto-discover 路线：树状层级查看 + 自行推进阶段。
+        'feature_tree', 'submit_state',
       ],
       // 本阶段不读文件、不解锁新工具，专心分解需求。
       lockUnlockTools: true,
-      requiredCalls: [{ tool: 'update_feature_intent', min: 1 }],
+      requiredCalls: [
+        { tool: 'update_feature_intent', min: 1 },
+        // 合并阶段：同时更新总体功能列表。
+        { tool: 'update_feature_list', min: 1 },
+      ],
       submitTool: {
         name: 'submit_requirement_protocol',
         async parse(args, env) {
@@ -199,26 +234,6 @@ export function createBuiltinGoals() {
             plan.items.length ? plan.items.map((item) => `- ${item.id}: ${item.text}`).join('\n') : '（未解析到 checklist，请检查 update_feature_intent 的 checklist 字段）',
           ].join('\n'),
         };
-      },
-    },
-    {
-      id: 'create.feature-update',
-      prompt: (env, state) => [
-        '[目标] 更新功能列表总体条目',
-        '1. 先用 read 查看当前功能列表索引 features.md 与详情 features/<feature-intent-file>.md（feature id 默认使用当前 feature intent 文件名）；',
-        '2. 用 update_feature_list 写入总体 user_visible_behavior（不超过 500 字）与总体 feature_intent（不超过 50 字），并将 status 置为 in_progress；',
-        '3. 调用 submit_state 结束本状态。',
-      ].join('\n'),
-      allowedTools: ['update_feature_list', 'read', 'grep', 'glob', 'str_replace_editor:view'],
-      requiredCalls: [{ tool: 'update_feature_list', min: 1 }],
-      submitTool: {
-        name: 'submit_state',
-        async parse(args) {
-          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
-        },
-      },
-      async onSubmit() {
-        return { signal: { goalCompleted: true }, prompt: '功能列表已更新，进入 INIT 初始化本轮上下文。' };
       },
     },
 

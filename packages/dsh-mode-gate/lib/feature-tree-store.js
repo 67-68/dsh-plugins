@@ -6,7 +6,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Feature intent 树状存储（overview + feature intent，递归同构）。
@@ -232,6 +232,112 @@ export function createFeatureTreeStore(featureIntentDir) {
     return out;
   }
 
+  /**
+   * 收集本次选择需要注入的 architecture.md：沿树上溯，每一层「文件夹」
+   * （各级 overview 目录 + 根目录）下若有 architecture.md 就纳入；去重、父在前。
+   *
+   * @param {Array<{type:string,path:string}>} selection 选中的节点
+   * @returns {Array<{level:string,path:string,content:string}>} 存在且非空的架构文件
+   */
+  function architecturesFor(selection) {
+    const items = Array.isArray(selection) ? selection : [];
+    // 1. 展开每项为「它自己所属的目录链」：intent 的目录链是其父目录；overview 的是它自身。
+    const dirs = [];
+    const seenDirs = new Set();
+    const pushDir = (logical) => {
+      if (seenDirs.has(logical)) return;
+      seenDirs.add(logical);
+      dirs.push(logical);
+    };
+    for (const item of items) {
+      if (!item || typeof item.path !== 'string') continue;
+      let segments;
+      try {
+        segments = assertLogicalPath(item.path).split('/');
+      } catch (_err) {
+        continue;
+      }
+      const isOverview = item.type === 'overview';
+      // intent：路径末段是文件名，目录链到倒数第二段；overview：整个路径都是目录。
+      const dirSegments = isOverview ? segments : segments.slice(0, -1);
+      for (let i = dirSegments.length; i >= 0; i -= 1) {
+        pushDir(dirSegments.slice(0, i).join('/'));
+      }
+    }
+    // 2. 父在前排序：按目录深度升序（根 '' 最先）。
+    dirs.sort((a, b) => {
+      const da = a ? a.split('/').length : 0;
+      const db = b ? b.split('/').length : 0;
+      return da - db || a.localeCompare(b);
+    });
+    // 3. 每层若存在非空 architecture.md 就纳入（去重）。
+    const out = [];
+    const seenPaths = new Set();
+    for (const dir of dirs) {
+      const file = dir ? join(root, dir, 'architecture.md') : join(root, 'architecture.md');
+      if (!existsSync(file)) continue;
+      if (seenPaths.has(file)) continue;
+      let text = '';
+      try {
+        text = readFileSync(file, 'utf8');
+      } catch (_err) {
+        continue;
+      }
+      if (!text.trim()) continue;
+      seenPaths.add(file);
+      out.push({ level: dir || '(根)', path: file, content: text });
+    }
+    return out;
+  }
+
+  /** 每层 architecture.md 的父目录（供生成 code map）。 */
+  function architectureDirsFor(selection) {
+    return architecturesFor(selection).map((entry) => dirname(entry.path));
+  }
+
+  /**
+   * 定位一个节点，返回它的完整层级信息：
+   *   - node：节点自身（type/path/name/title）
+   *   - ancestors：从根到该节点父级的每一层（父在前，直到没有为止）
+   *   - children：全部**直属**下属（overview 的下一层 overview / intent）
+   *
+   * 找不到时抛错（未知路径）。
+   */
+  function describeNode(logical) {
+    const clean = assertLogicalPath(logical);
+    const segments = clean.split('/');
+    // 逐层下钻定位节点；同时记录父链。
+    let levelNodes = tree();
+    const ancestors = [];
+    let found = null;
+    for (let i = 0; i < segments.length; i += 1) {
+      const target = segments[i];
+      const hit = (levelNodes || []).find((node) => node.name === target || node.path === segments.slice(0, i + 1).join('/'));
+      if (!hit) {
+        throw new Error(`节点 "${clean}" 不存在（在第 ${i + 1} 层 "${target}" 处断开）。请先用 feature_tree 不带参数查看根层级。`);
+      }
+      if (i === segments.length - 1) {
+        found = hit;
+      } else {
+        ancestors.push({ type: hit.type, path: hit.path, name: hit.name, title: hit.title || '' });
+        levelNodes = hit.children || [];
+      }
+    }
+    if (!found) throw new Error(`节点 "${clean}" 不存在。`);
+    const children = (found.children || []).map((node) => ({
+      type: node.type,
+      path: node.path,
+      name: node.name,
+      title: node.title || '',
+      hasChildren: Boolean(node.children && node.children.length > 0),
+    }));
+    return {
+      node: { type: found.type, path: found.path, name: found.name, title: found.title || '' },
+      ancestors,
+      children,
+    };
+  }
+
   return {
     dir: root,
     tree,
@@ -240,5 +346,8 @@ export function createFeatureTreeStore(featureIntentDir) {
     createIntent,
     contentOf,
     ancestorsOf,
+    architecturesFor,
+    architectureDirsFor,
+    describeNode,
   };
 }

@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
 			phaseColumn: "阶段",
 			promptColumn: "阶段 Prompt（可编辑）",
 			autoGuideColumn: "自动生成命令指引",
+			ignorePromptColumn: "忽略 prompt（不注入用户/自动 prompt）",
 			autoGuidePreview: "自动生成内容预览",
 			modelThinkingColumn: "模型 / thinking",
 			workflowModelPlaceholder: "模型代号（留空用默认）",
@@ -203,6 +204,7 @@ window.__ModuleLoader__.load({
 			phaseColumn: "Phase",
 			promptColumn: "Phase prompt (editable)",
 			autoGuideColumn: "Auto command guide",
+			ignorePromptColumn: "Ignore prompt (no user/auto prompt injected)",
 			autoGuidePreview: "Generated guide preview",
 			modelThinkingColumn: "Model / thinking",
 			workflowModelPlaceholder: "model codename (empty = default)",
@@ -248,7 +250,7 @@ window.__ModuleLoader__.load({
 			pendingPlaceholder: "Type here and send to revise the requirement or comment on the understanding.",
 		};
 
-		const PHASES = ["IDLE", "BASE_READ", "REQUIREMENT_RECOGNITION", "FEATURE_UPDATE", "RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION", "PRESET_ACTION", "ACTION_EXECUTE"];
+		const PHASES = ["IDLE", "BASE_READ", "REQUIREMENT_RECOGNITION", "RESEARCH", "EXECUTE", "DEBUG", "ACCUMULATION", "PRESET_ACTION", "ACTION_EXECUTE"];
 
 		/** Fresh IDLE state used before the first Remote read resolves (`__loaded` guards auto-switching). */
 		function idleState() {
@@ -540,6 +542,7 @@ window.__ModuleLoader__.load({
 							stateId: state.id,
 							prompt: override && typeof override.prompt === "string" ? override.prompt : (state.prompt || ""),
 							autoGuide: override && typeof override.autoGuide === "boolean" ? override.autoGuide : defaultAuto,
+							ignorePrompt: Boolean(override && override.ignorePrompt === true),
 							model: override && typeof override.model === "string" ? override.model : (typeof state.model === "string" ? state.model : ""),
 							reasoningEffort: override && typeof override.reasoningEffort === "string"
 								? override.reasoningEffort
@@ -564,6 +567,7 @@ window.__ModuleLoader__.load({
 					await settings.saveOverride(workflowId, row.stateId, {
 						prompt: row.prompt,
 						autoGuide: row.autoGuide,
+						ignorePrompt: Boolean(row.ignorePrompt),
 						model: row.model,
 						reasoningEffort: row.reasoningEffort,
 					});
@@ -610,6 +614,7 @@ window.__ModuleLoader__.load({
 									react.createElement("th", { style: styles.th }, t("phaseColumn")),
 									react.createElement("th", { style: styles.th }, t("promptColumn")),
 									react.createElement("th", { style: styles.th }, t("autoGuideColumn")),
+									react.createElement("th", { style: styles.th }, t("ignorePromptColumn")),
 									react.createElement("th", { style: styles.th }, t("modelThinkingColumn")),
 								),
 							),
@@ -630,6 +635,13 @@ window.__ModuleLoader__.load({
 											type: "checkbox",
 											checked: Boolean(row.autoGuide),
 											onChange: (e) => updateDraft(wf.id, idx, { autoGuide: e.target.checked }),
+										}),
+									),
+									react.createElement("td", { style: { ...styles.td, textAlign: "center" } },
+										react.createElement("input", {
+											type: "checkbox",
+											checked: Boolean(row.ignorePrompt),
+											onChange: (e) => updateDraft(wf.id, idx, { ignorePrompt: e.target.checked }),
 										}),
 									),
 									react.createElement("td", { style: styles.td },
@@ -834,6 +846,7 @@ window.__ModuleLoader__.load({
 							stateDescription: state.description || "",
 							prompt: state.prompt || "",
 							autoGuide: typeof state.autoGuide === "boolean" ? state.autoGuide : Boolean(state.goalRef || state.hasTransitions),
+							ignorePrompt: state.ignorePrompt === true,
 							autoGuideText: typeof state.autoGuideText === "string" ? state.autoGuideText : "",
 							model: typeof state.model === "string" ? state.model : "",
 							reasoningEffort: typeof state.reasoningEffort === "string" ? state.reasoningEffort : "",
@@ -886,6 +899,7 @@ window.__ModuleLoader__.load({
 				await settings.saveStage(stageId, {
 					prompt: row.prompt,
 					autoGuide: row.autoGuide,
+					ignorePrompt: Boolean(row.ignorePrompt),
 					model: row.model,
 					reasoningEffort: row.reasoningEffort,
 					requirements: row.requirements || [],
@@ -985,6 +999,14 @@ window.__ModuleLoader__.load({
 									onChange: (e) => updateDraft(mode.stageId, { autoGuide: e.target.checked }),
 								}),
 								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("autoGuideColumn")),
+							),
+							react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+								react.createElement("input", {
+									type: "checkbox",
+									checked: Boolean(row.ignorePrompt),
+									onChange: (e) => updateDraft(mode.stageId, { ignorePrompt: e.target.checked }),
+								}),
+								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("ignorePromptColumn")),
 							),
 							react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
 								react.createElement("span", { style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12 } }, t("autoGuidePreview")),
@@ -1654,8 +1676,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("getState", "GetStateResult"),
 				remoteArgsDescriptor("getWorkflows", "GetWorkflowsResult"),
 				remoteArgsDescriptor("selectWorkflow", "SelectWorkflowResult"),
-				remoteDescriptor("getFeatureTree", "GetFeatureTreeResult"),
+				remoteArgsDescriptor("getFeatureTree", "GetFeatureTreeResult"),
 				remoteArgsDescriptor("getFeatureNode", "GetFeatureNodeResult"),
+				remoteArgsDescriptor("createFeatureNode", "CreateFeatureNodeResult"),
 				remoteArgsDescriptor("submitFeatureSelection", "SubmitFeatureSelectionResult"),
 				remoteDescriptor("getBashDenyList", "GetBashDenyListResult"),
 				remoteArgsDescriptor("setBashDenyList", "SetBashDenyListResult"),
@@ -1863,6 +1886,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 		/** Fetch the feature overview/intent tree for the picker. */
 		function useFeatureTree(api, enabled) {
 			const [data, setData] = react.useState({ tree: [], dir: "", error: "" });
+			const [nonce, setNonce] = react.useState(0);
 			react.useEffect(() => {
 				if (!enabled) return undefined;
 				let current = true;
@@ -1882,8 +1906,8 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				refresh();
 				const timer = setInterval(refresh, 5000);
 				return () => { current = false; clearInterval(timer); };
-			}, [api, enabled]);
-			return data;
+			}, [api, enabled, nonce]);
+			return { ...data, refresh: () => setNonce((n) => n + 1) };
 		}
 
 		/**
@@ -1896,8 +1920,30 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 		 */
 		function FeatureTreePicker(props) {
 			const { api, busy, onSubmit, onError, selected, onSelectedChange, t } = props;
-			const { tree, error } = useFeatureTree(api, true);
+			const { tree, error, refresh } = useFeatureTree(api, true);
 			const [expanded, setExpanded] = react.useState({});
+
+			/* 就地新建：类型 + 父 overview + 名称。 */
+			const [createOpen, setCreateOpen] = react.useState(false);
+			const [newKind, setNewKind] = react.useState("intent");
+			const [newParent, setNewParent] = react.useState("");
+			const [newName, setNewName] = react.useState("");
+			const [createBusy, setCreateBusy] = react.useState(false);
+			const [createMsg, setCreateMsg] = react.useState("");
+
+			/* 可选父 overview 列表（含根层级 ""）。 */
+			const parentOptions = react.useMemo(() => {
+				const out = [{ path: "", label: "（根层级）" }];
+				const walk = (list, depth) => {
+					for (const node of list || []) {
+						if (node.type !== "overview") continue;
+						out.push({ path: node.path, label: `${"　".repeat(depth)}${node.name}` });
+						if (node.children) walk(node.children, depth + 1);
+					}
+				};
+				walk(tree, 0);
+				return out;
+			}, [tree]);
 
 			/* 互斥：同一组选择里只能是 overview 或 intent 之一（同类可多选）。 */
 			const selectedType = (selected && selected.length > 0) ? selected[0].type : null;
@@ -1922,6 +1968,34 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			};
 
 			const isSelected = (node) => (selected || []).some((item) => item.type === node.type && item.path === node.path);
+
+			const submitCreate = async () => {
+				if (createBusy) return;
+				const name = newName.trim();
+				if (!name) {
+					setCreateMsg("请填写名称");
+					return;
+				}
+				setCreateBusy(true);
+				setCreateMsg("");
+				try {
+					const result = await api().createFeatureNode({
+						kind: newKind, parent: newParent, name,
+					});
+					if (result && result.ok === false) {
+						setCreateMsg(String(result.error || "创建失败"));
+					} else {
+						setCreateMsg(`已创建 ${newKind === "overview" ? "feature overview" : "feature intent"}：${name}`);
+						setNewName("");
+						if (newKind === "overview") setNewParent("");
+						refresh();
+					}
+				} catch (err) {
+					setCreateMsg(String((err && err.message) || err));
+				} finally {
+					setCreateBusy(false);
+				}
+			};
 
 			const renderNode = (node, depth) => {
 				const rows = [];
@@ -2009,6 +2083,83 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						borderRadius: 8, padding: "8px 6px", background: "var(--dsw-alias-bg-primary, transparent)",
 					},
 				}, ...nodes),
+				react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+					react.createElement("button", {
+						type: "button",
+						onClick: () => { setCreateOpen((v) => !v); setCreateMsg(""); },
+						style: {
+							padding: "5px 10px", borderRadius: 8, fontSize: 12, cursor: "pointer",
+							border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,0.3))",
+							background: "transparent", color: "var(--dsw-alias-label-secondary)",
+						},
+					}, createOpen ? "▾ 收起新建" : "＋ 新建 overview / feature intent")
+				),
+				createOpen
+					? react.createElement("div", {
+						style: {
+							display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px",
+							border: "1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,0.35))",
+							borderRadius: 8,
+						},
+					},
+						react.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } },
+							react.createElement("label", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", display: "flex", gap: 4, alignItems: "center" } },
+								react.createElement("input", {
+									type: "radio", name: "mg-new-kind", checked: newKind === "intent",
+									onChange: () => setNewKind("intent"),
+								}), "feature intent（文件）"
+							),
+							react.createElement("label", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", display: "flex", gap: 4, alignItems: "center" } },
+								react.createElement("input", {
+									type: "radio", name: "mg-new-kind", checked: newKind === "overview",
+									onChange: () => setNewKind("overview"),
+								}), "feature overview（文件夹）"
+							)
+						),
+						react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } },
+							react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" } }, "父 overview"),
+							react.createElement("select", {
+								value: newParent,
+								onChange: (event) => setNewParent(event.target.value),
+								disabled: createBusy,
+								style: {
+									fontSize: 12, padding: "4px 6px", borderRadius: 6,
+									border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,0.3))",
+									background: "var(--dsw-alias-bg-primary, transparent)", color: "var(--dsw-alias-label-primary)",
+								},
+							}, ...parentOptions.map((opt) => react.createElement("option", { key: opt.path || "__root__", value: opt.path }, opt.label)))
+						),
+						react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+							react.createElement("input", {
+								type: "text",
+								value: newName,
+								placeholder: "名称（字母/数字/_ . -）",
+								onChange: (event) => setNewName(event.target.value),
+								onKeyDown: (event) => { if (event.key === "Enter") submitCreate(); },
+								disabled: createBusy,
+								style: {
+									flex: 1, fontSize: 12, padding: "5px 8px", borderRadius: 6,
+									border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,0.3))",
+									background: "var(--dsw-alias-bg-primary, transparent)", color: "var(--dsw-alias-label-primary)",
+								},
+							}),
+							react.createElement("button", {
+								type: "button",
+								disabled: createBusy,
+								onClick: submitCreate,
+								style: {
+									padding: "5px 12px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 600,
+									cursor: createBusy ? "not-allowed" : "pointer",
+									background: createBusy ? "var(--dsw-alias-bg-tertiary, #8884)" : "var(--dsw-alias-accent, #4080ff)",
+									color: "#fff",
+								},
+							}, "创建")
+						),
+						createMsg
+							? react.createElement("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)" } }, createMsg)
+							: null
+					)
+					: null,
 				react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
 					react.createElement("button", {
 						type: "button",

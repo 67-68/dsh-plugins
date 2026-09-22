@@ -119,6 +119,7 @@ function normalizeOverrideFields(override) {
   if (!override || typeof override !== 'object') return next;
   if (typeof override.prompt === 'string') next.prompt = override.prompt.trim();
   if (typeof override.autoGuide === 'boolean') next.autoGuide = override.autoGuide;
+  if (typeof override.ignorePrompt === 'boolean') next.ignorePrompt = override.ignorePrompt;
   if (typeof override.model === 'string' && override.model.trim()) next.model = override.model.trim();
   if (typeof override.reasoningEffort === 'string' && WORKFLOW_REASONING_EFFORTS.has(override.reasoningEffort.trim())) {
     next.reasoningEffort = override.reasoningEffort.trim();
