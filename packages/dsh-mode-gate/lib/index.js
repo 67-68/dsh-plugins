@@ -203,8 +203,10 @@ class ModeGateGateway extends TypertRemoteService {
     return this.options.treeForSession(sessionId);
   }
   async getFeatureTree(args) {
-    const store = this.featureTreeFor(args && args.sessionId);
-    if (!store) return { ok: false, error: 'feature tree store 未初始化' };
+    const sessionId = args && args.sessionId;
+    if (!sessionId) return { ok: false, error: '缺少 sessionId：feature 树按会话所属项目解析。' };
+    const store = this.featureTreeFor(sessionId);
+    if (!store) return { ok: false, error: '无法确定该会话的项目目录（session 里没有 workspace），请先进入 CREATE 工作流。' };
     try {
       return { ok: true, dir: store.dir, tree: store.tree() };
     } catch (err) {
@@ -1256,7 +1258,13 @@ export default {
      * 否则用状态里记录的 workspace 兜底。
      */
     function treeForSession(sessionId) {
-      return storesFor(agentFor(sessionId)).featureTree;
+      const entry = readSessionEntry(sessionId);
+      const live = agents.get(sessionId);
+      const workspace = (live && workspaceOf(live, '')) || entry.workspace || '';
+      // 拿不到项目目录时返回 null：宁可让 UI 明确报错，也不要静默给一棵空树
+      // （更不能在 server 的 cwd 下乱建 feature_intents 目录）。
+      if (!workspace) return null;
+      return storesForWorkspace(workspace).featureTree;
     }
 
     /**
