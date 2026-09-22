@@ -84,6 +84,12 @@ function extractUserText(event) {
   return '';
 }
 
+/**
+ * INIT 闸门阶段的 target 文案：AI 在本阶段被完全禁言，这里只用于状态展示
+ * （存量状态 / 非 AI 路径读取 state.target 时也有个可读说明）。
+ */
+const INIT_GATE_TARGET = '等待用户从 feature 树里提交选择（本阶段 AI 不运行）';
+
 /** Collected user inputs for the current workflow run (auto user_words). */
 function collectUserWords(agent) {
   const state = readState(agent);
@@ -959,7 +965,7 @@ export default {
       return { session: { id: sessionId, header: { cwd: entry.workspace } } };
     }
 
-    async function activateStateGoal(agent, workflowId, stateId) {
+    async function activateStateGoal(agent, workflowId, stateId, origin) {
       const state = readState(agent);
       const registry = registryFor(agent);
       const stateDef = registry.stateOf(workflowId, stateId);
@@ -975,6 +981,33 @@ export default {
         requirementProgress: {},
         userInputs: previousWorkflow === workflowId ? (state.userInputs || []) : [],
       };
+      // ── INIT（create）是引擎阶段，必须在这里判去路 ──────────────────────
+      // AI 在 INIT 被完全禁言（agent/pre-step 拦截），所以没人能替它 submit_state。
+      // 注意：completeGoal 会先把 phase 写成目标状态再调本函数，因此来源状态必须
+      // 由调用方用 origin 传进来（不能读 state.phase）。
+      //   - 来源是需求分解 / 沉淀 → 本轮已有 feature intent：引擎直接推进；
+      //   - 其余（切工作流、手动进 INIT 等）→「闸门」：停在 INIT，等用户提交选择。
+      if (workflowId === 'create' && stateId === 'INIT') {
+        const fromStateId = origin && typeof origin.stateId === 'string' ? origin.stateId : '';
+        const continued = fromStateId === 'REQUIREMENT_RECOGNITION' || fromStateId === 'ACCUMULATION';
+        if (continued) {
+          // 上下文初始化：architecture.md / code-map 已由引擎按本轮选择注入，
+          // 这里只负责推进，不在 INIT 停留。
+          const pending = staticPlanPendingCount(state.staticPlan);
+          const nextStateId = pending > 0 ? 'RESEARCH' : 'IDLE';
+          return activateStateGoal(agent, nextStateId === 'IDLE' ? 'IDLE' : 'create', nextStateId);
+        }
+        // 闸门：清掉未完成的 goal，不供给任何工具，等用户提交选择。
+        writeState(agent, {
+          ...basePatch,
+          goal: null,
+          target: { target: INIT_GATE_TARGET, mode: stateId },
+        });
+        applyStateModelSelection(agent, workflowId, stateId);
+        void injectModeGateContext(agent, 'state');
+        provisionStageTools(agent, []);
+        return { prompt: INIT_GATE_TARGET, messages: [] };
+      }
       if (!goalRef) {
         const isIdle = workflowId === 'IDLE' || stateId === 'IDLE';
         const prompt = effectiveStatePrompt(state, workflowId, stateId, stateDef) || `当前状态：${stateId}`;
@@ -1068,7 +1101,10 @@ export default {
           decidedAt: Date.now(),
         },
       });
-      return activateStateGoal(agent, nextWorkflow, nextState);
+      return activateStateGoal(agent, nextWorkflow, nextState, {
+        workflowId: state.workflowId,
+        stateId: state.phase,
+      });
     }
 
     async function buildPendingProtocolDisplay(agent, parsed) {
@@ -1228,6 +1264,24 @@ export default {
         }
       }
       const activated = await activateStateGoal(agent, 'create', 'REQUIREMENT_RECOGNITION');
+      // INIT 闸门期间 AI 被禁言、用户消息也不会触发 AI：这里必须主动唤醒，
+      // 否则需求分解阶段永远不跑（用户原话仍在会话历史里，AI 能看到）。
+      const live = agents.get(sessionId);
+      if (live && typeof live.followup === 'function') {
+        try {
+          live.followup(createUserMessage({
+            content: [{ type: 'text', text: 'feature 选择已提交，请立即开始需求分解：按阶段目标写入对应 feature intent，并提交需求协议。' }],
+            source: {
+              kind: 'plugin',
+              plugin: 'mode-gate',
+              form: 'notice',
+              summary: 'mode-gate feature 选择已提交',
+            },
+          }));
+        } catch (err) {
+          log(`feature 选择提交后唤醒 Agent 失败：${(err && err.message) || err}`);
+        }
+      }
       const after = readState(agent);
       return {
         ok: true,
@@ -2865,6 +2919,23 @@ export default {
 
     // ── feature-intent approval: sending a user message rejects the pending protocol ──
     // ── user-input collection: non-IDLE user messages become the auto user_words ──
+    // ── INIT 闸门：AI 完全禁言（create 工作流）────────────────────────────
+    // INIT 是纯「引擎 + UI」驱动的闸门阶段：用户在“工作流”界面从 feature 树里挑选
+    // overview / feature intent，引擎负责注入 architecture.md / code-map 并推进阶段。
+    // 因此本阶段 AI 一律不运行：任何用户消息都在 pre-step 处被拦下、零输出；用户原话
+    // 仍照常记入 state.userInputs，供走出闸门后的需求分解阶段使用。
+    ctx.on('agent/pre-step', ({ agent }, next) => {
+      try {
+        const state = readState(agent);
+        if (state.workflowId === 'create' && state.phase === 'INIT') {
+          return { kind: 'reject' };
+        }
+      } catch (err) {
+        log(`INIT 禁言判定失败：${(err && err.message) || err}`);
+      }
+      return next();
+    });
+
     ctx.on('session/event', (session, event) => {
       try {
         if (!event || event.type !== 'user/message') return;

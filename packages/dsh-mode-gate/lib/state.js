@@ -258,6 +258,16 @@ export function normalizeSessionEntry(entry) {
     compression: source.compression && typeof source.compression === 'object' ? source.compression : null,
     requirementProgress: source.requirementProgress && typeof source.requirementProgress === 'object' ? source.requirementProgress : {},
     userInputs: Array.isArray(source.userInputs) ? source.userInputs.filter((s) => typeof s === 'string' && s.trim()) : [],
+    // INIT 闸门里用户提交的 feature 树选择（overview / intent + 路线），
+    // 以及本轮已写入的 feature intent 路径（inject 路线「一个都不能少」校验用）。
+    // 白名单必须显式保留：否则下一次 writeState 归一化时会被静默丢掉。
+    featureSelection: source.featureSelection && typeof source.featureSelection === 'object' ? source.featureSelection : null,
+    featureIntentWrites: Array.isArray(source.featureIntentWrites)
+      ? source.featureIntentWrites.filter((s) => typeof s === 'string' && s.trim())
+      : [],
+    featureArchitectureContext: source.featureArchitectureContext && typeof source.featureArchitectureContext === 'object'
+      ? source.featureArchitectureContext
+      : null,
   };
 }
 

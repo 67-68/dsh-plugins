@@ -386,35 +386,6 @@ export function createBuiltinGoals() {
     },
 
     {
-      id: 'create.init',
-      prompt: (env, state) => [
-        '[目标] 初始化本轮上下文（工作流首阶段）',
-        currentItemText(state),
-        '1. 只读取长期文档热文件与最近一次 feature intent，不读任何实际代码，不解锁新工具（本阶段引用 no-code-read 限制）。',
-        '2. 用 list_feature_intents / get_feature_intent 读取最近一次 feature intent。',
-        '3. journal / changelog / history 属于短期冷数据，默认不进入 hot 上下文。',
-        '4. 不要读取完整短期对话；可用 dependency_map 做代码导航（按需生成、单次 ≤1024 tokens）。',
-        '5. 调用 submit_state：首轮无需求进入需求识别，有待办进入下一轮 RESEARCH，全部完成则结束。',
-      ].join('\n'),
-      allowedTools: [
-        'list_feature_intents', 'get_feature_intent',
-        'dependency_map', 'todo_write',
-      ],
-      // 首阶段不读代码、不解锁新工具。
-      lockUnlockTools: true,
-      requiredCalls: [],
-      submitTool: {
-        name: 'submit_state',
-        async parse(args) {
-          return { summary: typeof args?.summary === 'string' ? args.summary : '' };
-        },
-      },
-      async onSubmit() {
-        return { signal: { goalCompleted: true }, prompt: '上下文初始化完成。' };
-      },
-    },
-
-    {
       id: 'rough.requirement-recognition',
       prompt: (env) => [
         '[目标] 读取 feature intent 并拆解为 1 个 goal',

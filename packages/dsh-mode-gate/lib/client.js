@@ -1676,7 +1676,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("getState", "GetStateResult"),
 				remoteArgsDescriptor("getWorkflows", "GetWorkflowsResult"),
 				remoteArgsDescriptor("selectWorkflow", "SelectWorkflowResult"),
-				remoteArgsDescriptor("getFeatureTree", "GetFeatureTreeResult"),
+				remoteDescriptor("getFeatureTree", "GetFeatureTreeResult"),
 				remoteArgsDescriptor("getFeatureNode", "GetFeatureNodeResult"),
 				remoteArgsDescriptor("createFeatureNode", "CreateFeatureNodeResult"),
 				remoteArgsDescriptor("submitFeatureSelection", "SubmitFeatureSelectionResult"),
@@ -1892,7 +1892,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				let current = true;
 				const refresh = async () => {
 					try {
-						const result = await api().getFeatureTree({});
+						const result = await api().getFeatureTree();
 						if (!current) return;
 						if (result && result.ok) {
 							setData({ tree: result.tree || [], dir: result.dir || "", error: "" });
@@ -2301,7 +2301,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				},
 					react.createElement("div", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 20, fontWeight: 600 } }, "选择本次要处理的 feature"),
 					react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, textAlign: "center" } },
-						"点文件夹右侧箭头展开/收起，点节点主体选中；overview 与 feature intent 均可多选，提交后进入需求分解。"),
+						"点文件夹右侧箭头展开/收起，点节点主体选中；overview 与 feature intent 均可多选（两者不能混选），提交后进入需求分解。",
+						react.createElement("br"),
+						react.createElement("span", null, "本阶段 AI 不会回复（禁言），请先提交选择再继续对话。")),
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,

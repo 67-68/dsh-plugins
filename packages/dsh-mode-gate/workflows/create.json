@@ -272,8 +272,8 @@
     },
     {
       "id": "INIT",
-      "label": "初始化上下文",
-      "description": "工作流首阶段：只读取长期文档热文件与最近一次 feature intent 摘要，不读任何实际代码；引用 no-code-read 限制。本轮已有需求时进入下一轮 RESEARCH，无需求时进入需求识别。",
+      "label": "选择 feature（闸门）",
+      "description": "引擎驱动的闸门阶段：AI 完全禁言（不运行、零输出），本阶段没有 prompt、没有 goal，也没有 transitions。用户在“工作流”界面从 feature 树里挑选 feature overview / feature intent 并提交，引擎据此注入 architecture.md / code-map 并推进到需求分解。需求分解或沉淀结束后再次进入本阶段时不再需要用户挑选，由引擎按 checklist 直接推进：有未完成项进 RESEARCH，全部完成则结束。",
       "permissions": {
         "write": false,
         "bash": "none",
@@ -293,48 +293,6 @@
       "model": {
         "reasoningEffort": "low"
       },
-      "goal": {
-        "ref": "create.init",
-        "operatesOn": "staticPlan.current"
-      },
-      "prompt": "只读取长期文档热文件与最近一次 feature intent，不读任何实际代码，不解锁新工具（本阶段引用 no-code-read 限制）。不要读取完整短期对话；可用 dependency_map 做代码导航。然后 submit_state：首轮无需求进入需求识别，有待办进入下一轮 RESEARCH，全部完成则结束。",
-      "transitions": [
-        {
-          "when": {
-            "type": "featureIntent.missing"
-          },
-          "to": {
-            "workflow": "$self",
-            "state": "REQUIREMENT_RECOGNITION"
-          }
-        },
-        {
-          "when": {
-            "type": "staticPlan.pending",
-            "op": ">",
-            "value": 0
-          },
-          "to": {
-            "workflow": "$self",
-            "state": "RESEARCH"
-          },
-          "loop": {
-            "increment": "iteration"
-          }
-        },
-        {
-          "when": {
-            "type": "staticPlan.pending",
-            "op": "==",
-            "value": 0
-          },
-          "to": {
-            "workflow": "IDLE",
-            "state": "IDLE"
-          },
-          "complete": true
-        }
-      ],
       "restriction": "no-code-read"
     }
   ]
