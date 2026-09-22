@@ -151,9 +151,12 @@ export function createBuiltinGoals() {
       prompt: (env, state) => {
         const selection = state && state.featureSelection ? state.featureSelection : null;
         const route = selection && selection.route ? selection.route : null;
+        // 多项目 workspace 下，路径已归一化成「相对本轮 feature 根目录」的短路径；
+        // 选中的若是项目根目录本身，path 为空，用 name（项目目录）兜底显示。
+        const labelOf = (item) => (item && (item.path || item.name)) || '(根)';
         const base = ['[目标] 读取 feature intent 并完成需求分解'];
         if (route === 'auto-discover') {
-          const overviews = (selection.items || []).map((item) => item.path).join('、') || '（未记录）';
+          const overviews = (selection.items || []).map(labelOf).join('、') || '（未记录）';
           base.push(
             '本轮为「AI 自动寻找 + 创建」路线：用户选择了 feature overview，而不是具体 feature intent。',
             `所选 overview：${overviews}（内容与路径已注入，请据此自行判断应落到哪个 feature intent）。`,
@@ -162,7 +165,7 @@ export function createBuiltinGoals() {
             '3. 调用 submit_requirement_protocol 提交协议；完成后可用 submit_state 自行推进阶段。',
           );
         } else if (route === 'inject') {
-          const intents = (selection.items || []).map((item) => item.path).join('、') || '（未记录）';
+          const intents = (selection.items || []).map(labelOf).join('、') || '（未记录）';
           base.push(
             '本轮为「注入 prompt」路线：用户直接选择了底层 feature intent。',
             `被选中的 feature intent（一个都不能少）：${intents}。`,

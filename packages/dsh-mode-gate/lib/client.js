@@ -1885,7 +1885,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 
 		/** Fetch the feature overview/intent tree for the picker. */
 		function useFeatureTree(api, enabled, sessionId) {
-			const [data, setData] = react.useState({ tree: [], dir: "", error: "" });
+			const [data, setData] = react.useState({ tree: [], dir: "", error: "", mode: "flat", workspace: "", roots: [] });
 			const [nonce, setNonce] = react.useState(0);
 			react.useEffect(() => {
 				if (!enabled) return undefined;
@@ -1895,12 +1895,19 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						const result = await api().getFeatureTree({ sessionId });
 						if (!current) return;
 						if (result && result.ok) {
-							setData({ tree: result.tree || [], dir: result.dir || "", error: "" });
+							setData({
+								tree: result.tree || [],
+								dir: result.dir || "",
+								error: "",
+								mode: result.mode === "mounts" ? "mounts" : "flat",
+								workspace: result.workspace || "",
+								roots: Array.isArray(result.roots) ? result.roots : [],
+							});
 						} else {
-							setData({ tree: [], dir: "", error: String((result && result.error) || "读取 feature 树失败") });
+							setData({ tree: [], dir: "", error: String((result && result.error) || "读取 feature 树失败"), mode: "flat", workspace: "", roots: [] });
 						}
 					} catch (err) {
-						if (current) setData({ tree: [], dir: "", error: String((err && err.message) || err) });
+						if (current) setData({ tree: [], dir: "", error: String((err && err.message) || err), mode: "flat", workspace: "", roots: [] });
 					}
 				};
 				refresh();
@@ -1920,7 +1927,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 		 */
 		function FeatureTreePicker(props) {
 			const { api, busy, onSubmit, onError, selected, onSelectedChange, t, sessionId } = props;
-			const { tree, error, refresh } = useFeatureTree(api, true, sessionId);
+			const { tree, error, refresh, mode, roots } = useFeatureTree(api, true, sessionId);
 			const [expanded, setExpanded] = react.useState({});
 
 			/* 就地新建：类型 + 父 overview + 名称。 */
@@ -1931,19 +1938,23 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const [createBusy, setCreateBusy] = react.useState(false);
 			const [createMsg, setCreateMsg] = react.useState("");
 
-			/* 可选父 overview 列表（含根层级 ""）。 */
+			const multiRoot = mode === "mounts";
+
+			/* 可选父 overview 列表（含根层级 ""）。多项目 workspace 下顶层是各项目目录。 */
 			const parentOptions = react.useMemo(() => {
-				const out = [{ path: "", label: "（根层级）" }];
+				const out = multiRoot
+					? []
+					: [{ path: "", label: "（根层级）" }];
 				const walk = (list, depth) => {
 					for (const node of list || []) {
 						if (node.type !== "overview") continue;
-						out.push({ path: node.path, label: `${"　".repeat(depth)}${node.name}` });
+						out.push({ path: node.path, label: `${"　".repeat(depth)}${node.mounted ? "［项目］" : ""}${node.name}` });
 						if (node.children) walk(node.children, depth + 1);
 					}
 				};
 				walk(tree, 0);
 				return out;
-			}, [tree]);
+			}, [tree, multiRoot]);
 
 			/* 互斥：同一组选择里只能是 overview 或 intent 之一（同类可多选）。 */
 			const selectedType = (selected && selected.length > 0) ? selected[0].type : null;
@@ -2039,6 +2050,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						},
 					},
 						`${isOverview ? "📁" : "📄"} ${node.name}`,
+						node.mounted
+							? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 11, marginLeft: 8 } }, "项目目录")
+							: null,
 						node.title && node.title !== node.name
 							? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, marginLeft: 8 } }, node.title)
 							: null
@@ -2066,7 +2080,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				nodes.push(react.createElement("div", {
 					key: "empty",
 					style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, padding: "8px 0" },
-				}, "（尚未有任何 feature overview / feature intent）"));
+				}, error
+					? "（读取 feature 树失败，所以这里没有任何内容——请看上面的错误提示）"
+					: "（尚未有任何 feature overview / feature intent）"));
 			} else {
 				for (const node of tree) nodes.push(renderNode(node, 0));
 			}
@@ -2074,6 +2090,14 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const count = (selected || []).length;
 
 			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, width: "100%" } },
+				multiRoot
+					? react.createElement("div", {
+						style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, lineHeight: "18px" },
+					},
+						`当前 workspace 下发现 ${roots.length} 个 feature intent 目录（顶层即各项目目录，overview 就是文件夹）。`,
+						react.createElement("br"),
+						"展开要改的项目 → 选中其中的 feature overview 或 feature intent；提交后本轮就锁定该项目目录。")
+					: null,
 				error
 					? react.createElement("div", { style: { color: "var(--dsw-alias-label-error, #d33)", fontSize: 12 } }, error)
 					: null,
@@ -2303,7 +2327,14 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 13, textAlign: "center" } },
 						"点文件夹右侧箭头展开/收起，点节点主体选中；overview 与 feature intent 均可多选（两者不能混选），提交后进入需求分解。",
 						react.createElement("br"),
-						react.createElement("span", null, "本阶段 AI 不会回复（禁言），请先提交选择再继续对话。")),
+						react.createElement("span", null, "overview 就是文件夹：可以收录 feature intent，也可以再收录别的 overview。"),
+						react.createElement("br"),
+						react.createElement("span", null, "本阶段 AI 不会回复（禁言），请先提交选择再继续对话。"),
+						react.createElement("br"),
+						// 界面版本标记：插件的浏览器端 bundle 会被宿主以 immutable 缓存，
+						// 浏览器缓存旧 bundle 时现象是「树永远是空的 / Remote 报参数错误」。
+						// 这行小字用来一眼确认页面跑的是不是最新前端。
+						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-1")),
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,

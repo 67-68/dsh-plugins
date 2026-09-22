@@ -2,11 +2,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 import { createFeatureIntentStore } from './feature-intent-store.js';
-import { createFeatureTreeStore, assertLogicalPath } from './feature-tree-store.js';
+import { createFeatureTreeStore, assertLogicalPath, discoverFeatureIntentDirs } from './feature-tree-store.js';
 import { createFeatureListStore, defaultFeatureListDir } from './feature-list-store.js';
 import { createPatternStore, defaultPatternDir } from './pattern-store.js';
 import { createJournalStore, defaultJournalDir } from './journal-store.js';
@@ -204,11 +204,25 @@ class ModeGateGateway extends TypertRemoteService {
   }
   async getFeatureTree(args) {
     const sessionId = args && args.sessionId;
-    if (!sessionId) return { ok: false, error: '缺少 sessionId：feature 树按会话所属项目解析。' };
+    if (!sessionId) {
+      return {
+        ok: false,
+        error: '缺少 sessionId：feature 树按会话所属项目解析。若界面是旧版前端（浏览器缓存了插件的 client bundle），请硬刷新页面（Cmd+Shift+R）后重试。',
+      };
+    }
     const store = this.featureTreeFor(sessionId);
     if (!store) return { ok: false, error: '无法确定该会话的项目目录（session 里没有 workspace），请先进入 CREATE 工作流。' };
+    const layout = typeof this.options.layoutForSession === 'function' ? this.options.layoutForSession(sessionId) : null;
     try {
-      return { ok: true, dir: store.dir, tree: store.tree() };
+      return {
+        ok: true,
+        dir: store.dir,
+        mode: layout && !layout.flat ? 'mounts' : 'flat',
+        workspace: layout ? layout.workspace : '',
+        pinned: Boolean(layout && layout.pinned),
+        roots: layout ? layout.rels || [] : [],
+        tree: store.tree(),
+      };
     } catch (err) {
       return { ok: false, error: String((err && err.message) || err) };
     }
@@ -526,8 +540,11 @@ export default {
     // 因此它们也一起变成项目根下的兄弟路径。
     const INTENT_DIR_CANDIDATES = [
       'feature_intents',
+      'feature_intent',
       join('document', 'feature_intent'),
+      join('document', 'feature_intents'),
       join('DOCUMENTATIONS', 'feature_intents'),
+      join('DOCUMENTATION', 'feature_intents'),
       join('DOCUMENT', 'feature_intents'),
     ];
     const presetActionDir = expandHome(
@@ -549,50 +566,116 @@ export default {
       }
     }
 
-    /**
-     * 解析某个工作区的 feature intent 目录。
-     * 候选名按顺序探测：优先第一个**有内容**的候选；都为空目录时取第一个已存在的；
-     * 都不存在则用第一个候选并自动创建（用户可选“就地新建”生成第一份 intent）。
-     */
-    function resolveFeatureIntentDir(workspace) {
-      const root = resolve(String(workspace || '').trim() || defaultWorkspace);
+    /** 某个 workspace 根层是否存在候选 intent 目录。 */
+    function directIntentDir(workspaceRoot) {
       let firstExisting = '';
       for (const candidate of INTENT_DIR_CANDIDATES) {
-        const dir = join(root, candidate);
+        const dir = join(workspaceRoot, candidate);
         let isDir = false;
         try {
           isDir = existsSync(dir) && statSync(dir).isDirectory();
         } catch (_err) { /* 探测失败就继续下一个候选 */ }
         if (!isDir) continue;
-        if (dirHasContent(dir)) return dir;
+        if (dirHasContent(dir)) return { dir, firstExisting };
         if (!firstExisting) firstExisting = dir;
       }
-      return firstExisting || join(root, INTENT_DIR_CANDIDATES[0]);
+      return { dir: '', firstExisting };
+    }
+
+    /**
+     * 解析某个工作区的 feature intent 布局。
+     *
+     * - `flat`：这个 workspace 自己就是一个项目（或已锁定项目目录）→ 树直接长在
+     *   intent 目录上，路径都是短路径（`mode-gate`）。
+     * - `mounts`：workspace 只是「多个项目的容器」（根层没有 intent 目录，或根层
+     *   目录之外还发现了别的项目目录）→ 把每个发现到的 intent 目录挂成顶层
+     *   overview 文件夹，路径是 workspace 相对路径（`documentation/feature_intents/mode-gate`）。
+     *   overview 本身就是文件夹，因此挂载不引入新的节点类型。
+     *
+     * @param {string} workspace session 的 workspace
+     * @param {string|null} pinned 用户提交选择时锁定的 intent 目录（绝对路径）
+     */
+    function resolveFeatureIntentLayout(workspace, pinned) {
+      const root = resolve(String(workspace || '').trim() || defaultWorkspace);
+      if (pinned) {
+        const abs = isAbsolute(String(pinned)) ? String(pinned) : join(root, String(pinned));
+        try {
+          if (existsSync(abs) && statSync(abs).isDirectory()) {
+            return { workspace: root, root: abs, dirs: [abs], rels: [], flat: true, pinned: true };
+          }
+        } catch (_err) { /* 锁定目录失效就退回自动探测 */ }
+      }
+      const direct = directIntentDir(root);
+      const nested = discoverFeatureIntentDirs(root, INTENT_DIR_CANDIDATES).filter((item) => item.abs !== direct.dir);
+      if (nested.length === 0) {
+        const dir = direct.dir || direct.firstExisting || join(root, INTENT_DIR_CANDIDATES[0]);
+        return { workspace: root, root: dir, dirs: [dir], rels: [], flat: true, autoCreate: !direct.dir };
+      }
+      const dirs = (direct.dir ? [direct.dir] : []).concat(nested.map((item) => item.abs));
+      return {
+        workspace: root,
+        root,
+        dirs,
+        rels: dirs.map((dir) => relative(root, dir).split(sep).join('/')),
+        flat: false,
+      };
+    }
+
+    // 目录扫描有成本（要在 workspace 里往下找），因此布局按 workspace+pinned 缓存；
+    // 带短 TTL，这样用户在项目里新建 intent 目录后选择器能自愈。
+    const LAYOUT_TTL_MS = 2000;
+    const layoutCache = new Map();
+    function layoutFor(workspace, pinned) {
+      const wsRoot = resolve(String(workspace || '').trim() || defaultWorkspace);
+      const key = `${wsRoot}|${pinned || ''}`;
+      const hit = layoutCache.get(key);
+      const now = Date.now();
+      if (hit && now - hit.at < LAYOUT_TTL_MS) return hit.layout;
+      const layout = resolveFeatureIntentLayout(wsRoot, pinned);
+      layoutCache.set(key, { layout, at: now });
+      return layout;
     }
 
     /** intent 目录 -> 该项目全部长期记忆 store（按项目缓存，避免重复建 store）。 */
     const storeBundles = new Map();
-    function storesForWorkspace(workspace) {
-      const dir = resolveFeatureIntentDir(workspace);
-      const cached = storeBundles.get(dir);
+    function storesForWorkspace(workspace, pinned) {
+      const layout = layoutFor(workspace, pinned);
+      const dir = layout.dirs[0];
+      const key = `${layout.flat ? 'flat' : 'mounts'}:${layout.root}`;
+      const cached = storeBundles.get(key);
       if (cached) return cached;
+      const featureTree = createFeatureTreeStore(dir);
       const bundle = {
+        layout,
         dir,
-        workspace: dirname(dir),
+        dirs: layout.dirs,
+        rels: layout.rels,
+        flat: layout.flat,
+        workspace: layout.workspace,
         featureIntents: createFeatureIntentStore(dir),
-        featureTree: createFeatureTreeStore(dir),
+        featureTree,
+        // 选择器用的树：多项目 workspace 时按 workspace 相对路径挂载各项目目录。
+        pickerTree: layout.flat
+          ? featureTree
+          : createFeatureTreeStore(layout.workspace, {
+            mounts: layout.dirs.map((abs, index) => ({ rel: layout.rels[index], abs })),
+          }),
         featureList: createFeatureListStore(defaultFeatureListDir(dir)),
         patternStore: createPatternStore(defaultPatternDir(dir)),
         journal: createJournalStore(defaultJournalDir(dir)),
         history: createHistoryStore(defaultHistoryDir(dir)),
         architecture: createArchitectureStore(defaultArchitecturePath(dir)),
       };
-      storeBundles.set(dir, bundle);
+      storeBundles.set(key, bundle);
       return bundle;
     }
-    /** 某个 agent 所属项目的 store 集合。 */
+    /** 某个 agent 所属项目的 store 集合（已锁定项目目录时优先用它）。 */
     function storesFor(agent) {
-      return storesForWorkspace(workspaceOf(agent, defaultWorkspace));
+      let pinned = null;
+      try {
+        pinned = readSessionEntry(agent?.session?.id).featureIntentDir;
+      } catch (_err) { /* 读不到状态就按自动探测走 */ }
+      return storesForWorkspace(workspaceOf(agent, defaultWorkspace), pinned);
     }
     const globalWorkflowDir = expandHome(
       typeof cfg.workflowsDir === 'string' && cfg.workflowsDir.trim()
@@ -1264,33 +1347,96 @@ export default {
       // 拿不到项目目录时返回 null：宁可让 UI 明确报错，也不要静默给一棵空树
       // （更不能在 server 的 cwd 下乱建 feature_intents 目录）。
       if (!workspace) return null;
-      return storesForWorkspace(workspace).featureTree;
+      const bundle = storesForWorkspace(workspace, entry.featureIntentDir);
+      // 多项目 workspace 用挂载树（顶层是各项目目录）；单项目用平铺树。
+      return bundle.flat ? bundle.featureTree : bundle.pickerTree;
+    }
+
+    /** 选择器所需的布局信息（workspace / 是否多项目 / 发现的目录）。 */
+    function layoutForSession(sessionId) {
+      const entry = readSessionEntry(sessionId);
+      const live = agents.get(sessionId);
+      const workspace = (live && workspaceOf(live, '')) || entry.workspace || '';
+      if (!workspace) return null;
+      const bundle = storesForWorkspace(workspace, entry.featureIntentDir);
+      return {
+        workspace: bundle.workspace,
+        flat: bundle.flat,
+        pinned: Boolean(entry.featureIntentDir),
+        dirs: bundle.dirs,
+        rels: bundle.rels,
+      };
     }
 
     /**
      * INIT 阶段用户从 feature 树里提交选择。
+     *
+     * 多项目 workspace 下，选择里带的路径是 workspace 相对路径
+     * （`documentation/feature_intents/mode-gate`）。提交时按选中的项目目录
+     * **锁定**本轮的 feature 根目录，并把路径归一化成相对该目录的短路径
+     * （`mode-gate`），这样后续 feature intent / 功能列表 / pattern / journal /
+     * architecture 全都落在该项目自己的文件里。
      *
      * 记入 state.featureSelection（供后续两条路线使用：选中 overview → AI 自动
      * 寻找；选中底层 intent → 冒泡注入），然后推进 INIT → REQUIREMENT_RECOGNITION。
      */
     async function submitFeatureSelection(sessionId, selection) {
       const agent = agentFor(sessionId);
-      const clean = [];
-      const seen = new Set();
+      const bundle = storesFor(agent);
+      const raw = [];
+      const seenRaw = new Set();
       for (const item of selection || []) {
         if (!item || typeof item !== 'object') continue;
         const type = item.type === 'overview' ? 'overview' : (item.type === 'intent' ? 'intent' : null);
         if (!type) continue;
-        let path;
-        try {
-          path = assertLogicalPath(item.path);
-        } catch (_err) {
-          continue;
+        const key = `${type}:${String(item.path || '')}`;
+        if (seenRaw.has(key)) continue;
+        seenRaw.add(key);
+        raw.push({ type, path: typeof item.path === 'string' ? item.path : '', name: typeof item.name === 'string' ? item.name : '' });
+      }
+      if (raw.length === 0) {
+        return { ok: false, error: '请选择至少一个 feature overview 或 feature intent' };
+      }
+      // 多项目 workspace：所有选择必须落在同一个项目目录下，并据此锁定根目录。
+      let pinnedDir = '';
+      let rel = '';
+      if (!bundle.flat && bundle.rels.length > 0) {
+        const owners = new Set();
+        for (const item of raw) {
+          const owner = bundle.rels.find((candidate) => item.path === candidate || item.path.startsWith(`${candidate}/`));
+          if (!owner) {
+            return { ok: false, error: `「${item.path || '(空路径)'}」不在任何已发现的 feature intent 目录下：请展开顶层项目文件夹，选择其中的 feature overview 或 feature intent。` };
+          }
+          owners.add(owner);
         }
-        const key = `${type}:${path}`;
+        if (owners.size > 1) {
+          return { ok: false, error: '不同项目目录下的 feature 不能混选：请只选择一个项目目录里的 feature。' };
+        }
+        rel = [...owners][0];
+        pinnedDir = join(bundle.workspace, rel);
+      }
+      const clean = [];
+      const seen = new Set();
+      for (const item of raw) {
+        let path = item.path.trim().replace(/^\/+|\/+$/g, '');
+        if (rel) {
+          if (path === rel) path = ''; // 选中的是项目目录本身 → 该项目根 overview
+          else if (path.startsWith(`${rel}/`)) path = path.slice(rel.length + 1);
+        }
+        if (path === '') {
+          // 根 overview 只对 overview 选择有意义（等价于「这个项目的根」）。
+          if (item.type !== 'overview') continue;
+        } else {
+          try {
+            path = assertLogicalPath(path);
+          } catch (_err) {
+            continue;
+          }
+        }
+        const key = `${item.type}:${path}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        clean.push({ type, path });
+        clean.push({ type: item.type, path, ...(item.name ? { name: item.name } : {}) });
       }
       if (clean.length === 0) {
         return { ok: false, error: '请选择至少一个 feature overview 或 feature intent' };
@@ -1301,8 +1447,9 @@ export default {
       }
       const route = [...types][0] === 'overview' ? 'auto-discover' : 'inject';
       writeState(agent, {
-        featureSelection: { types: [...types][0], items: clean, route, submittedAt: new Date().toISOString() },
+        featureSelection: { types: [...types][0], items: clean, route, dir: pinnedDir || bundle.dir, submittedAt: new Date().toISOString() },
         featureIntentWrites: [],
+        featureIntentDir: pinnedDir || null,
       });
       // 沿树上溯冒泡收集各层 architecture.md 及其父文件夹 code map，去重后注入。
       const context = collectFeatureArchitectureContext(agent, clean);
@@ -3158,6 +3305,7 @@ export default {
       buildAutoGuide,
       restrictions,
       treeForSession,
+      layoutForSession,
       submitFeatureSelection,
     });
   },

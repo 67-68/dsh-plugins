@@ -58,19 +58,105 @@ function titleOf(body) {
   return compact.length > 80 ? `${compact.slice(0, 80)}…` : compact;
 }
 
+/** 目录里是否有真实内容（空目录不算命中）。 */
+function dirHasContent(dir) {
+  try {
+    return readdirSync(dir).some((entry) => !entry.startsWith('.'));
+  } catch (_err) {
+    return false;
+  }
+}
+
+/** 发现扫描时跳过的目录（依赖/产物/系统目录，避免在 workspace 里乱翻）。 */
+const DISCOVERY_SKIP_DIRS = new Set([
+  'node_modules', 'dist', 'build', 'out', 'coverage', 'vendor', 'target',
+  '.next', '.turbo', '.cache', 'venv', '__pycache__', 'Pods', 'Library', 'Applications',
+]);
+
+/** 相对路径的尾部是否命中某个候选目录名（大小写不敏感，兼容 DOCUMENT/DOCUMENTATION）。 */
+function matchesCandidate(relPath, candidates) {
+  const segs = String(relPath || '').toLowerCase().split('/');
+  for (const candidate of candidates) {
+    const wanted = String(candidate || '').toLowerCase().split('/');
+    if (segs.length < wanted.length) continue;
+    if (segs.slice(segs.length - wanted.length).join('/') === wanted.join('/')) return true;
+  }
+  return false;
+}
+
+/**
+ * 在一个 workspace 里发现所有 feature intent 目录（相对 workspace 的路径）。
+ *
+ * 场景：workspace 可能是「多个项目的容器」（例如 /Users/x/projects 下每个子项目
+ * 各有一份 feature_intents）。这时不能只看 workspace 根层，而要往下找。
+ *
+ * @param {string} workspaceRoot 工作区根目录
+ * @param {string[]} candidates 候选相对目录名（如 feature_intents、document/feature_intent）
+ * @param {{maxDepth?: number}} [options] maxDepth 为向下递归的层数（默认 3）
+ * @returns {Array<{rel: string, abs: string}>} 命中的目录（有内容才算），按 rel 排序
+ */
+export function discoverFeatureIntentDirs(workspaceRoot, candidates, options) {
+  const root = resolve(String(workspaceRoot || ''));
+  const list = (Array.isArray(candidates) ? candidates : []).filter((c) => typeof c === 'string' && c.trim());
+  const maxDepth = options && Number.isFinite(options.maxDepth) ? options.maxDepth : 3;
+  const out = [];
+  const seen = new Set();
+  const walk = (dir, rel, depth) => {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (_err) {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const name = entry.name;
+      if (name.startsWith('.') || DISCOVERY_SKIP_DIRS.has(name)) continue;
+      const childRel = rel ? `${rel}/${name}` : name;
+      const childAbs = join(dir, name);
+      if (matchesCandidate(childRel, list)) {
+        // intent 目录本身是叶子：有内容才算命中，且不再往里递归。
+        if (dirHasContent(childAbs) && !seen.has(childRel)) {
+          seen.add(childRel);
+          out.push({ rel: childRel, abs: childAbs });
+        }
+        continue;
+      }
+      walk(childAbs, childRel, depth + 1);
+    }
+  };
+  walk(root, '', 0);
+  out.sort((a, b) => a.rel.localeCompare(b.rel));
+  return out;
+}
+
 /**
  * @param {string} featureIntentDir 根目录
+ * @param {{mounts?: Array<{rel: string, abs: string}>}} [options]
+ *        mounts：把若干**已有**的 feature intent 目录挂成顶层 overview 文件夹。
+ *        overview 本身即文件夹（可嵌套），所以挂载不引入新的节点类型：
+ *        顶层文件夹下依然是 overview / feature intent 的同一套树。
  */
-export function createFeatureTreeStore(featureIntentDir) {
+export function createFeatureTreeStore(featureIntentDir, options) {
   const root = resolve(String(featureIntentDir || ''));
+  const mounts = (options && Array.isArray(options.mounts) ? options.mounts : [])
+    .filter((mount) => mount && typeof mount.abs === 'string' && mount.abs.trim() && typeof mount.rel === 'string' && mount.rel.trim())
+    .map((mount) => ({
+      rel: String(mount.rel).replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''),
+      abs: resolve(mount.abs),
+    }))
+    .filter((mount) => mount.rel.length > 0);
 
   function ensureRoot() {
     mkdirSync(root, { recursive: true });
   }
 
-  /** 逻辑路径 → 绝对路径（并做越界检查）。 */
+  /** 逻辑路径 → 绝对路径（并做越界检查）；空路径表示根目录自身。 */
   function absPathOf(logical) {
-    const clean = assertLogicalPath(logical);
+    const raw = String(logical == null ? '' : logical).trim();
+    if (raw === '' || raw === '.' || raw === '/') return { logical: '', path: root };
+    const clean = assertLogicalPath(raw);
     const target = resolve(root, clean);
     if (target !== root && !target.startsWith(root + sep)) {
       throw new Error(`路径 "${logical}" 越界`);
@@ -142,8 +228,28 @@ export function createFeatureTreeStore(featureIntentDir) {
     return out;
   }
 
+  /** 把一个已发现的 feature intent 目录挂成顶层 overview 文件夹。 */
+  function mountNode(mount) {
+    const overviewPath = join(mount.abs, OVERVIEW_FILE);
+    const hasOverview = existsSync(overviewPath);
+    const meta = hasOverview ? readMeta(overviewPath, mount.rel) : { name: mount.rel, title: '', size: 0, mtime: '' };
+    return {
+      type: 'overview',
+      name: mount.rel,
+      path: mount.rel,
+      mounted: true,
+      hasOverview,
+      ...meta,
+      children: scanDir(mount.abs, mount.rel),
+    };
+  }
+
   /** 读取整棵树（根节点数组）。 */
   function tree() {
+    // 多项目 workspace：顶层就是各个项目目录（文件夹），不是所有子目录。
+    if (mounts.length > 0) {
+      return mounts.map((mount) => mountNode(mount)).sort((a, b) => a.path.localeCompare(b.path));
+    }
     ensureRoot();
     return scanDir(root, '');
   }
@@ -167,8 +273,16 @@ export function createFeatureTreeStore(featureIntentDir) {
     return out;
   }
 
+  /** 多项目 workspace 下，顶层不允许直接写（必须先选一个项目目录）。 */
+  function assertParentWritable(parentLogical) {
+    if (mounts.length > 0 && !parentLogical) {
+      throw new Error('当前 workspace 下发现多个 feature intent 目录：请先选择要写入的项目目录（顶层文件夹）作为父 overview。');
+    }
+  }
+
   /** 在指定父路径下创建一个 overview（文件夹节点，含 overview.md）。 */
   function createOverview(parentLogical, name, body) {
+    assertParentWritable(parentLogical);
     ensureRoot();
     const cleanName = assertLogicalPath(name, 'overview 名称');
     if (cleanName.includes('/')) throw new Error(`overview 名称 "${name}" 不能包含 "/"`);
@@ -187,6 +301,7 @@ export function createFeatureTreeStore(featureIntentDir) {
 
   /** 在指定父路径下创建一个 feature intent 叶子文件。 */
   function createIntent(parentLogical, name, body) {
+    assertParentWritable(parentLogical);
     ensureRoot();
     const cleanName = assertLogicalPath(name, 'feature intent 名称');
     if (cleanName.includes('/')) throw new Error(`feature intent 名称 "${name}" 不能包含 "/"`);
@@ -207,7 +322,7 @@ export function createFeatureTreeStore(featureIntentDir) {
   function contentOf(type, logical) {
     const base = absPathOf(logical);
     const file = type === 'overview' ? join(base.path, OVERVIEW_FILE) : `${base.path}.md`;
-    if (!existsSync(file)) throw new Error(`节点 "${logical}" 的文档不存在`);
+    if (!existsSync(file)) throw new Error(`节点 "${logical || '(根)'}" 的文档不存在`);
     return { path: relative(root, file).split(sep).join('/'), content: readFileSync(file, 'utf8') };
   }
 
@@ -271,21 +386,28 @@ export function createFeatureTreeStore(featureIntentDir) {
       return da - db || a.localeCompare(b);
     });
     // 3. 每层若存在非空 architecture.md 就纳入（去重）。
+    //    根层额外看「intent 目录的父目录」：architecture.md 的默认位置就是
+    //    dirname(featureIntentDir)（例如 documentation/feature_intents →
+    //    documentation/architecture.md），父目录即最外层，放在最前。
     const out = [];
     const seenPaths = new Set();
     for (const dir of dirs) {
-      const file = dir ? join(root, dir, 'architecture.md') : join(root, 'architecture.md');
-      if (!existsSync(file)) continue;
-      if (seenPaths.has(file)) continue;
-      let text = '';
-      try {
-        text = readFileSync(file, 'utf8');
-      } catch (_err) {
-        continue;
+      const candidates = dir
+        ? [join(root, dir, 'architecture.md')]
+        : [join(dirname(root), 'architecture.md'), join(root, 'architecture.md')];
+      for (const file of candidates) {
+        if (!existsSync(file)) continue;
+        if (seenPaths.has(file)) continue;
+        let text = '';
+        try {
+          text = readFileSync(file, 'utf8');
+        } catch (_err) {
+          continue;
+        }
+        if (!text.trim()) continue;
+        seenPaths.add(file);
+        out.push({ level: dir || '(根)', path: file, content: text });
       }
-      if (!text.trim()) continue;
-      seenPaths.add(file);
-      out.push({ level: dir || '(根)', path: file, content: text });
     }
     return out;
   }
@@ -305,23 +427,28 @@ export function createFeatureTreeStore(featureIntentDir) {
    */
   function describeNode(logical) {
     const clean = assertLogicalPath(logical);
-    const segments = clean.split('/');
-    // 逐层下钻定位节点；同时记录父链。
+    // 逐层下钻定位节点；同时记录父链。挂载的顶层文件夹路径可能有多段
+    // （如 documentation/feature_intents），因此按「路径前缀」下钻。
     let levelNodes = tree();
     const ancestors = [];
     let found = null;
-    for (let i = 0; i < segments.length; i += 1) {
-      const target = segments[i];
-      const hit = (levelNodes || []).find((node) => node.name === target || node.path === segments.slice(0, i + 1).join('/'));
-      if (!hit) {
-        throw new Error(`节点 "${clean}" 不存在（在第 ${i + 1} 层 "${target}" 处断开）。请先用 feature_tree 不带参数查看根层级。`);
+    let prefix = '';
+    let rest = clean;
+    while (rest && !found) {
+      const full = prefix ? `${prefix}/${rest}` : rest;
+      const exact = (levelNodes || []).find((node) => node.path === full);
+      const branch = exact || (levelNodes || []).find((node) => node.path && full.startsWith(`${node.path}/`));
+      if (!branch) {
+        throw new Error(`节点 "${clean}" 不存在（在 "${rest}" 处断开）。请先用 feature_tree 不带参数查看根层级。`);
       }
-      if (i === segments.length - 1) {
-        found = hit;
-      } else {
-        ancestors.push({ type: hit.type, path: hit.path, name: hit.name, title: hit.title || '' });
-        levelNodes = hit.children || [];
+      if (exact) {
+        found = exact;
+        break;
       }
+      ancestors.push({ type: branch.type, path: branch.path, name: branch.name, title: branch.title || '' });
+      levelNodes = branch.children || [];
+      prefix = branch.path;
+      rest = full.slice(branch.path.length + 1);
     }
     if (!found) throw new Error(`节点 "${clean}" 不存在。`);
     const children = (found.children || []).map((node) => ({

@@ -268,6 +268,12 @@ export function normalizeSessionEntry(entry) {
     featureArchitectureContext: source.featureArchitectureContext && typeof source.featureArchitectureContext === 'object'
       ? source.featureArchitectureContext
       : null,
+    // 本轮锁定的 feature intent 目录（多项目 workspace 下由 INIT 的树选择决定）。
+    // 锁定后 feature intent / 功能列表 / pattern / journal / architecture 全部落到
+    // 该项目自己的文件里；白名单必须显式保留，否则下次写入会被静默丢掉。
+    featureIntentDir: typeof source.featureIntentDir === 'string' && source.featureIntentDir.trim()
+      ? source.featureIntentDir.trim()
+      : null,
   };
 }
 
