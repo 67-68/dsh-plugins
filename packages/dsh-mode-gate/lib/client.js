@@ -1676,7 +1676,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("getState", "GetStateResult"),
 				remoteArgsDescriptor("getWorkflows", "GetWorkflowsResult"),
 				remoteArgsDescriptor("selectWorkflow", "SelectWorkflowResult"),
-				remoteDescriptor("getFeatureTree", "GetFeatureTreeResult"),
+				remoteArgsDescriptor("getFeatureTree", "GetFeatureTreeResult"),
 				remoteArgsDescriptor("getFeatureNode", "GetFeatureNodeResult"),
 				remoteArgsDescriptor("createFeatureNode", "CreateFeatureNodeResult"),
 				remoteArgsDescriptor("submitFeatureSelection", "SubmitFeatureSelectionResult"),
@@ -1884,7 +1884,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 		}
 
 		/** Fetch the feature overview/intent tree for the picker. */
-		function useFeatureTree(api, enabled) {
+		function useFeatureTree(api, enabled, sessionId) {
 			const [data, setData] = react.useState({ tree: [], dir: "", error: "" });
 			const [nonce, setNonce] = react.useState(0);
 			react.useEffect(() => {
@@ -1892,7 +1892,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				let current = true;
 				const refresh = async () => {
 					try {
-						const result = await api().getFeatureTree();
+						const result = await api().getFeatureTree({ sessionId });
 						if (!current) return;
 						if (result && result.ok) {
 							setData({ tree: result.tree || [], dir: result.dir || "", error: "" });
@@ -1906,7 +1906,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				refresh();
 				const timer = setInterval(refresh, 5000);
 				return () => { current = false; clearInterval(timer); };
-			}, [api, enabled, nonce]);
+			}, [api, enabled, sessionId, nonce]);
 			return { ...data, refresh: () => setNonce((n) => n + 1) };
 		}
 
@@ -1919,8 +1919,8 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 		 * - 底部「提交」按钮把选中的节点集合交回上层。
 		 */
 		function FeatureTreePicker(props) {
-			const { api, busy, onSubmit, onError, selected, onSelectedChange, t } = props;
-			const { tree, error, refresh } = useFeatureTree(api, true);
+			const { api, busy, onSubmit, onError, selected, onSelectedChange, t, sessionId } = props;
+			const { tree, error, refresh } = useFeatureTree(api, true, sessionId);
 			const [expanded, setExpanded] = react.useState({});
 
 			/* 就地新建：类型 + 父 overview + 名称。 */
@@ -1980,7 +1980,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				setCreateMsg("");
 				try {
 					const result = await api().createFeatureNode({
-						kind: newKind, parent: newParent, name,
+						sessionId, kind: newKind, parent: newParent, name,
 					});
 					if (result && result.ok === false) {
 						setCreateMsg(String(result.error || "创建失败"));
@@ -2307,7 +2307,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,
-							onError: setPickError, onSubmit: submit,
+							onError: setPickError, onSubmit: submit, sessionId,
 						})
 					),
 					pickError

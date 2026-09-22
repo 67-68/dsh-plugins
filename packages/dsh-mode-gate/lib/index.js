@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -196,8 +196,14 @@ class ModeGateGateway extends TypertRemoteService {
       })),
     };
   }
-  async getFeatureTree() {
-    const store = this.options.featureTree;
+  // feature intent 树属于「每个项目自己的文件」：store 必须按 session 的
+  // workspace 解析，不能用一个全局目录（否则换个项目就看不到 / 串项目）。
+  featureTreeFor(sessionId) {
+    if (typeof this.options.treeForSession !== 'function') return null;
+    return this.options.treeForSession(sessionId);
+  }
+  async getFeatureTree(args) {
+    const store = this.featureTreeFor(args && args.sessionId);
     if (!store) return { ok: false, error: 'feature tree store 未初始化' };
     try {
       return { ok: true, dir: store.dir, tree: store.tree() };
@@ -206,7 +212,7 @@ class ModeGateGateway extends TypertRemoteService {
     }
   }
   async getFeatureNode(args) {
-    const store = this.options.featureTree;
+    const store = this.featureTreeFor(args && args.sessionId);
     if (!store) return { ok: false, error: 'feature tree store 未初始化' };
     try {
       const type = args && args.type === 'overview' ? 'overview' : 'intent';
@@ -217,7 +223,7 @@ class ModeGateGateway extends TypertRemoteService {
     }
   }
   async createFeatureNode(args) {
-    const store = this.options.featureTree;
+    const store = this.featureTreeFor(args && args.sessionId);
     if (!store) return { ok: false, error: 'feature tree store 未初始化' };
     try {
       const kind = args && args.kind === 'overview' ? 'overview' : 'intent';
@@ -510,43 +516,82 @@ export default {
     const log = (msg) => console.log(`[dsh-mode-gate] ${msg}`);
     const cfg = config || {};
 
-    const globalDefaultIntentDir = join(homedir(), '.dsh', 'feature_intents');
-    const featureIntentDir = expandHome(
-      typeof cfg.featureIntentDir === 'string' && cfg.featureIntentDir.trim()
-        ? cfg.featureIntentDir.trim()
-        : globalDefaultIntentDir,
-    );
+    // ── 每个项目自己的 feature intent 目录 ────────────────────────────────
+    // feature intent 属于项目文件（类似 AGENT.md），不是全局数据：一个项目
+    // 一份，跟着 session 的 workspace 走。候选目录按顺序探测，命中即用；
+    // 都不存在就用第一个并自动创建。其余长期记忆（features / patterns /
+    // journal / history / architecture.md）沿用既有 dirname 派生规则，
+    // 因此它们也一起变成项目根下的兄弟路径。
+    const INTENT_DIR_CANDIDATES = [
+      'feature_intents',
+      join('document', 'feature_intent'),
+      join('DOCUMENTATIONS', 'feature_intents'),
+      join('DOCUMENT', 'feature_intents'),
+    ];
     const presetActionDir = expandHome(
       typeof cfg.presetActionDir === 'string' && cfg.presetActionDir.trim()
         ? cfg.presetActionDir.trim()
         : join(homedir(), '.dsh', 'preset-actions'),
     );
-    const defaultWorkspace = dirname(resolve(featureIntentDir));
-    const featureListDir = expandHome(
-      typeof cfg.featureListDir === 'string' && cfg.featureListDir.trim()
-        ? cfg.featureListDir.trim()
-        : defaultFeatureListDir(featureIntentDir),
+    // agent 没带 cwd 时的兜底工作区（正常路径都会用 session 的 workspace）。
+    const defaultWorkspace = expandHome(
+      typeof cfg.workspace === 'string' && cfg.workspace.trim() ? cfg.workspace.trim() : process.cwd(),
     );
-    const patternDir = expandHome(
-      typeof cfg.patternDir === 'string' && cfg.patternDir.trim()
-        ? cfg.patternDir.trim()
-        : defaultPatternDir(featureIntentDir),
-    );
-    const journalDir = expandHome(
-      typeof cfg.journalDir === 'string' && cfg.journalDir.trim()
-        ? cfg.journalDir.trim()
-        : defaultJournalDir(featureIntentDir),
-    );
-    const historyDir = expandHome(
-      typeof cfg.historyDir === 'string' && cfg.historyDir.trim()
-        ? cfg.historyDir.trim()
-        : defaultHistoryDir(featureIntentDir),
-    );
-    const architecturePath = expandHome(
-      typeof cfg.architecturePath === 'string' && cfg.architecturePath.trim()
-        ? cfg.architecturePath.trim()
-        : defaultArchitecturePath(featureIntentDir),
-    );
+
+    /** 目录里是否有真实内容（空目录不算命中，避免空壳目录把真目录挡掉）。 */
+    function dirHasContent(dir) {
+      try {
+        return readdirSync(dir).some((entry) => !entry.startsWith('.'));
+      } catch (_err) {
+        return false;
+      }
+    }
+
+    /**
+     * 解析某个工作区的 feature intent 目录。
+     * 候选名按顺序探测：优先第一个**有内容**的候选；都为空目录时取第一个已存在的；
+     * 都不存在则用第一个候选并自动创建（用户可选“就地新建”生成第一份 intent）。
+     */
+    function resolveFeatureIntentDir(workspace) {
+      const root = resolve(String(workspace || '').trim() || defaultWorkspace);
+      let firstExisting = '';
+      for (const candidate of INTENT_DIR_CANDIDATES) {
+        const dir = join(root, candidate);
+        let isDir = false;
+        try {
+          isDir = existsSync(dir) && statSync(dir).isDirectory();
+        } catch (_err) { /* 探测失败就继续下一个候选 */ }
+        if (!isDir) continue;
+        if (dirHasContent(dir)) return dir;
+        if (!firstExisting) firstExisting = dir;
+      }
+      return firstExisting || join(root, INTENT_DIR_CANDIDATES[0]);
+    }
+
+    /** intent 目录 -> 该项目全部长期记忆 store（按项目缓存，避免重复建 store）。 */
+    const storeBundles = new Map();
+    function storesForWorkspace(workspace) {
+      const dir = resolveFeatureIntentDir(workspace);
+      const cached = storeBundles.get(dir);
+      if (cached) return cached;
+      const bundle = {
+        dir,
+        workspace: dirname(dir),
+        featureIntents: createFeatureIntentStore(dir),
+        featureTree: createFeatureTreeStore(dir),
+        featureList: createFeatureListStore(defaultFeatureListDir(dir)),
+        patternStore: createPatternStore(defaultPatternDir(dir)),
+        journal: createJournalStore(defaultJournalDir(dir)),
+        history: createHistoryStore(defaultHistoryDir(dir)),
+        architecture: createArchitectureStore(defaultArchitecturePath(dir)),
+      };
+      storeBundles.set(dir, bundle);
+      return bundle;
+    }
+    /** 某个 agent 所属项目的 store 集合。 */
+    function storesFor(agent) {
+      return storesForWorkspace(workspaceOf(agent, defaultWorkspace));
+    }
     const globalWorkflowDir = expandHome(
       typeof cfg.workflowsDir === 'string' && cfg.workflowsDir.trim()
         ? cfg.workflowsDir.trim()
@@ -558,14 +603,7 @@ export default {
         : join(homedir(), '.dsh', 'restrictions'),
     );
 
-    const featureIntents = createFeatureIntentStore(featureIntentDir);
-    const featureTree = createFeatureTreeStore(featureIntentDir);
     const restrictions = createRestrictionStore(restrictionsDir);
-    const featureList = createFeatureListStore(featureListDir);
-    const patternStore = createPatternStore(patternDir);
-    const journal = createJournalStore(journalDir);
-    const history = createHistoryStore(historyDir);
-    const architecture = createArchitectureStore(architecturePath);
     const workflowRegistry = createWorkflowRegistry({
       builtinDir: BUILTIN_WORKFLOW_DIR,
       globalDir: globalWorkflowDir,
@@ -685,13 +723,10 @@ export default {
     const goalEngine = createGoalEngine({ goals: createBuiltinGoals(), log });
 
     function envFor(agent, state) {
+      const stores = storesFor(agent);
       return {
-        featureIntents,
-        featureList,
-        patternStore,
-        journal,
-        history,
-        architecture,
+        // 项目内长期记忆：feature intent / 功能列表 / 模式 / journal / history / architecture。
+        ...stores,
         presetActionSkills,
         registry: registryFor(agent),
         workspace: workspaceOf(agent, defaultWorkspace),
@@ -1108,6 +1143,7 @@ export default {
     }
 
     async function buildPendingProtocolDisplay(agent, parsed) {
+      const { featureIntents } = storesFor(agent);
       let fields = { userWords: '', understanding: '', userVisibleBehavior: '', featureIntent: '', checklist: [] };
       try {
         const file = await featureIntents.get(parsed.featureIntentFile);
@@ -1127,6 +1163,7 @@ export default {
     }
 
     async function submitGoalTool(agent, toolName, args) {
+      const { history } = storesFor(agent);
       const before = readState(agent);
       const stateDefForSubmit = registryFor(agent).stateOf(before.workflowId, before.phase);
       const unmet = unmetStateRequirements(before, stateDefForSubmit);
@@ -1214,6 +1251,15 @@ export default {
     }
 
     /**
+     * sessionId -> 该项目（按 workspace 解析）的 feature 树 store。
+     * feature intent 是项目文件：活着的 agent 优先用它真实的 cwd，
+     * 否则用状态里记录的 workspace 兜底。
+     */
+    function treeForSession(sessionId) {
+      return storesFor(agentFor(sessionId)).featureTree;
+    }
+
+    /**
      * INIT 阶段用户从 feature 树里提交选择。
      *
      * 记入 state.featureSelection（供后续两条路线使用：选中 overview → AI 自动
@@ -1251,7 +1297,7 @@ export default {
         featureIntentWrites: [],
       });
       // 沿树上溯冒泡收集各层 architecture.md 及其父文件夹 code map，去重后注入。
-      const context = collectFeatureArchitectureContext(clean);
+      const context = collectFeatureArchitectureContext(agent, clean);
       writeState(agent, { featureArchitectureContext: context.state });
       if (!ignorePromptEnabled(readState(agent), 'create', 'REQUIREMENT_RECOGNITION')) {
         injectFeatureArchitectureContext(agent, context.text);
@@ -1297,7 +1343,8 @@ export default {
      *
      * @returns {{ state: object, text: string }}
      */
-    function collectFeatureArchitectureContext(selection) {
+    function collectFeatureArchitectureContext(agent, selection) {
+      const { featureTree } = storesFor(agent);
       let architectures = [];
       try {
         architectures = featureTree.architecturesFor(selection);
@@ -1366,6 +1413,7 @@ export default {
      */
     function injectFeatureSelectionContext(agent, selection) {
       if (!agent || typeof agent.inject !== 'function') return false;
+      const { featureTree } = storesFor(agent);
       const lines = ['## 已选择的 feature overview（请据此自行寻找 / 新建具体 feature intent）'];
       for (const item of selection || []) {
         if (!item || item.type !== 'overview') continue;
@@ -1401,6 +1449,7 @@ export default {
      */
     function injectFeatureBubbleContext(agent, selection) {
       if (!agent || typeof agent.inject !== 'function') return false;
+      const { featureTree } = storesFor(agent);
       const intents = (selection || []).filter((item) => item && item.type === 'intent');
       // 冒泡：所有被选 intent 的祖先 overview（去重、父在前）。
       const overviewPaths = [];
@@ -1603,8 +1652,10 @@ export default {
     ctx.systemPrompt.context({
       name: 'mode-gate:architecture',
       order: 96,
-      text: () => {
+      text: (assembleCtx) => {
         try {
+          // architecture.md 属于项目文件：按当前 agent 的 workspace 取该项目的那一份。
+          const { architecture } = storesFor(assembleCtx && assembleCtx.agent);
           return architecture.prompt();
         } catch (err) {
           log(`architecture limited prompt 读取失败：${(err && err.message) || err}`);
@@ -1886,7 +1937,9 @@ export default {
       description: '列出 feature intent 目录下的所有需求意图文件。',
       parameters: {},
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute() {
+      async execute(_args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureIntents } = storesFor(exec.agent);
         const intents = await featureIntents.list();
         return JSON.stringify({ ok: true, dir: featureIntents.dir, intents }, null, 2);
       },
@@ -1898,7 +1951,9 @@ export default {
         path: { type: 'string', description: '节点逻辑路径（如 ui 或 ui/nested/deep）；省略则列出根层级。' },
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute(args) {
+      async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureTree } = storesFor(exec.agent);
         const path = typeof args.path === 'string' ? args.path.trim() : '';
         if (!path) {
           const roots = featureTree.tree().map((node) => ({
@@ -1920,7 +1975,9 @@ export default {
       description: '读取指定的 feature intent 文件内容。',
       parameters: { name: { type: 'string', required: true, description: 'feature intent 文件名（不带目录，可选 .md 后缀）。' } },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute(args) {
+      async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureIntents } = storesFor(exec.agent);
         const resolved = featureIntents.get(args.name);
         return JSON.stringify({ ok: true, name: resolved.name, file: resolved.file, path: resolved.path, content: resolved.content }, null, 2);
       },
@@ -1940,6 +1997,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureIntents } = storesFor(exec.agent);
         const checklist = Array.isArray(args.checklist) ? args.checklist.filter((s) => typeof s === 'string' && s.trim()) : [];
         if (checklist.length === 0) throw new Error('checklist 不能为空，请提供至少一个可验收节点。');
         const agent = exec && exec.agent;
@@ -2019,6 +2078,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { journal } = storesFor(exec.agent);
         const state = readState(exec.agent);
         const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile || '';
         if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
@@ -2046,6 +2107,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { patternStore } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
         const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
@@ -2104,6 +2167,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { patternStore } = storesFor(exec.agent);
         const state = readState(exec.agent);
         const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
         if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
@@ -2137,6 +2202,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { patternStore } = storesFor(exec.agent);
         const state = readState(exec.agent);
         const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
         if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
@@ -2153,6 +2220,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { patternStore } = storesFor(exec.agent);
         const state = readState(exec.agent);
         const project = (typeof args.project === 'string' && args.project.trim()) || state.featureIntentFile;
         if (!project) throw new Error('无法确定 project：请传 project 参数，或先完成 feature intent 记录。');
@@ -2205,6 +2274,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { architecture } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
         const goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
@@ -2224,7 +2295,9 @@ export default {
       description: '查看 architecture.md 的变更记录（audit 冷文件）：每次写入的时间、行数/tokens 与 reason。',
       parameters: {},
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
-      async execute() {
+      async execute(_args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { architecture } = storesFor(exec.agent);
         const text = architecture.readAudit();
         return text || '（architecture.md 暂无变更记录）';
       },
@@ -2261,6 +2334,8 @@ export default {
       parameters: {},
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(_args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { architecture, featureIntents, featureList } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
         assertLongTermDocsFirst((state.goal && state.goal.calls) || {});
@@ -2298,6 +2373,7 @@ export default {
 
     // /init 的实现：inspect 全库并幂等填充长期记忆。只补空缺、不覆盖。
     async function initRepositoryMemory(agent) {
+      const { architecture, featureIntents, featureList } = storesFor(agent);
       const root = workspaceOf(agent, defaultWorkspace);
       const lines = [`仓库：${root}`];
       const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', '.next', '.turbo', 'coverage', 'vendor', '.cache', 'out']);
@@ -2477,6 +2553,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureList } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
         const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile;
@@ -2503,6 +2581,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureList } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
         const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile;
@@ -2534,6 +2614,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureList } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
         const workspace = workspaceOf(agent, defaultWorkspace);
@@ -2585,6 +2667,8 @@ export default {
       },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
       async execute(args, exec) {
+      // 项目内的长期记忆 store：按 exec.agent 的 workspace 解析。
+      const { featureList } = storesFor(exec.agent);
         const state = readState(exec.agent);
         const featureId = (typeof args.feature_id === 'string' && args.feature_id.trim()) || state.featureIntentFile;
         if (!featureId) throw new Error('无法确定 feature id：请传 feature_id，或先完成 feature intent 记录。');
@@ -2802,7 +2886,7 @@ export default {
       const registry = registryFor(agent);
       const stateDef = registry.stateOf(state.workflowId, state.phase);
 
-      if (isFeatureIntentDirectWrite(name, exec.arguments, featureIntents.dir)) {
+      if (isFeatureIntentDirectWrite(name, exec.arguments, storesFor(agent).dir)) {
         return Promise.resolve({
           kind: 'deny',
           reason: 'feature_intent 文件禁止直接修改。请使用 update_feature_intent 工具在文件末尾追加记录。',
@@ -3065,7 +3149,7 @@ export default {
       goalEngine,
       buildAutoGuide,
       restrictions,
-      featureTree,
+      treeForSession,
       submitFeatureSelection,
     });
   },
