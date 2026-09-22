@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -543,6 +543,8 @@ export default {
       'feature_intent',
       join('document', 'feature_intent'),
       join('document', 'feature_intents'),
+      join('documentation', 'feature_intent'),
+      join('documentation', 'feature_intents'),
       join('DOCUMENTATIONS', 'feature_intents'),
       join('DOCUMENTATION', 'feature_intents'),
       join('DOCUMENT', 'feature_intents'),
@@ -563,6 +565,19 @@ export default {
         return readdirSync(dir).some((entry) => !entry.startsWith('.'));
       } catch (_err) {
         return false;
+      }
+    }
+
+    /**
+     * 目录的真实身份（用于去重）：macOS 等大小写不敏感文件系统上
+     * `documentation/` 与 `DOCUMENTATION/` 是同一个目录，光比字符串会把同一份
+     * intent 目录挂两次。realpath 失败时退回原路径。
+     */
+    function canonicalDir(dir) {
+      try {
+        return realpathSync(dir);
+      } catch (_err) {
+        return String(dir || '');
       }
     }
 
@@ -606,7 +621,15 @@ export default {
         } catch (_err) { /* 锁定目录失效就退回自动探测 */ }
       }
       const direct = directIntentDir(root);
-      const nested = discoverFeatureIntentDirs(root, INTENT_DIR_CANDIDATES).filter((item) => item.abs !== direct.dir);
+      const directKey = direct.dir ? canonicalDir(direct.dir) : '';
+      const seenKeys = new Set(directKey ? [directKey] : []);
+      const nested = [];
+      for (const item of discoverFeatureIntentDirs(root, INTENT_DIR_CANDIDATES)) {
+        const key = canonicalDir(item.abs);
+        if (seenKeys.has(key)) continue; // 同一个物理目录（大小写/软链别名）只挂一次
+        seenKeys.add(key);
+        nested.push(item);
+      }
       if (nested.length === 0) {
         const dir = direct.dir || direct.firstExisting || join(root, INTENT_DIR_CANDIDATES[0]);
         return { workspace: root, root: dir, dirs: [dir], rels: [], flat: true, autoCreate: !direct.dir };
