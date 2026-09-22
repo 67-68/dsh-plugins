@@ -3198,22 +3198,54 @@ export default {
       return next();
     });
 
+    // INIT 闸门期间 pre-step 直接 reject：消息会被从 inbox 里移除，不会产生
+    // user/message 事件，所以用户原话只能在 agent/inbox/spliced 里捞。
+    // 两个事件都可能带上同一条消息，用 rpcId 去重，保证 userInputs 不重复。
+    const capturedUserMessages = new Set();
+    function captureUserText(sessionId, text, source) {
+      const clean = String(text || '').trim();
+      if (!clean) return;
+      const entry = readSessionEntry(sessionId);
+      // 与既有行为一致：IDLE（没进任何工作流）不收集原话。
+      if (!entry.workflowId || entry.workflowId === 'IDLE') return;
+      const rpcId = source && typeof source.rpcId === 'string' ? source.rpcId : '';
+      if (rpcId) {
+        const key = `${sessionId}:${rpcId}`;
+        if (capturedUserMessages.has(key)) return;
+        capturedUserMessages.add(key);
+      } else {
+        const list = entry.userInputs || [];
+        if (list[list.length - 1] === clean) return;
+      }
+      writeState(agentFor(sessionId), { userInputs: [...(entry.userInputs || []), clean] });
+    }
+
     ctx.on('session/event', (session, event) => {
       try {
-        if (!event || event.type !== 'user/message') return;
-        const source = event.data && event.data.source;
-        if (!source || source.kind !== 'user') return;
+        if (!event) return;
         const sessionId = typeof session === 'string'
           ? session
           : (session && (session.id ?? session.sessionId));
         if (typeof sessionId !== 'string') return;
-        const entry = readSessionEntry(sessionId);
-        const text = extractUserText(event);
-        if (text && entry.workflowId && entry.workflowId !== 'IDLE') {
-          writeState(agentFor(sessionId), {
-            userInputs: [...(entry.userInputs || []), text],
-          });
+        if (event.type === 'user/message') {
+          const source = event.data && event.data.source;
+          if (!source || source.kind !== 'user') return;
+          captureUserText(sessionId, extractUserText(event), source);
+        } else if (event.type === 'agent/inbox/spliced') {
+          // INIT 禁言路径：用户消息被 pre-step reject 拦下、从 inbox 移除，不会产生
+          // user/message 事件；不在这里捞，需求分解阶段就读不到「用户原话」。
+          const data = event.data && typeof event.data === 'object' ? event.data : {};
+          if (data.target !== 'next-turn' || !Array.isArray(data.inserted)) return;
+          for (const item of data.inserted) {
+            const source = item && item.source;
+            if (!source || source.kind !== 'user') continue;
+            captureUserText(sessionId, extractUserText({ data: item }), source);
+          }
+          return;
+        } else {
+          return;
         }
+        const entry = readSessionEntry(sessionId);
         if (!entry || !entry.pendingProtocol) return;
         rejectPendingProtocol(sessionId)
           .then((result) => log(`用户发送消息，已拒绝待确认需求协议：${sessionId} -> ${result && result.workflowId}/${result && result.phase}`))
