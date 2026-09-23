@@ -1997,16 +1997,63 @@ export default {
       } catch (_e) { /* 清理绝不抛错 */ }
     }
     function provisionStageTools(agent, toolNames) {
+      const sessionId = agent && agent.session ? agent.session.id : undefined;
+      let phase = '';
+      let goalId = '';
+      try {
+        const st = readState(agent);
+        phase = st.phase || '';
+        goalId = (st.goal && st.goal.id) || '';
+      } catch (_e) { /* 读不到状态也继续供给，结果如实记录 */ }
+      const probe = {
+        sessionId: sessionId === undefined ? null : sessionId,
+        phase,
+        goalId,
+        agentFound: Boolean(agent && agent.session),
+        hasLiveAgent: sessionId !== undefined && agents.has(sessionId),
+        hasCtxTools: false,
+        usedFallbackCtx: false,
+        visibleCount: Array.isArray(toolNames) ? toolNames.length : 0,
+        supplied: [],
+        verified: [],
+        failed: [],
+      };
+      const finishProbe = (patch) => {
+        try {
+          const store = loadStateStore();
+          const summary = { ...probe, ...patch, at: new Date().toISOString() };
+          const prev = store.toolProvisionProbe;
+          if (prev && JSON.stringify({ ...prev, at: undefined }) === JSON.stringify({ ...summary, at: undefined })) return;
+          saveStateStore({ ...store, toolProvisionProbe: summary });
+        } catch (err) {
+          log(`记录工具供给探针失败：${(err && err.message) || err}`);
+        }
+      };
       clearScopedTools(agent);
       const list = Array.isArray(toolNames) ? toolNames : [];
-      if (!list.length) return true;
+      if (!list.length) {
+        finishProbe({});
+        return true;
+      }
       try {
         const agentCtx = agent && agent.ctx;
-        const scopeTools = agentCtx && agentCtx.tools;
-        if (!scopeTools || typeof scopeTools.register !== 'function') {
+        let scopeTools = agentCtx && agentCtx.tools;
+        if ((!scopeTools || typeof scopeTools.register !== 'function') && agent && agent.scope && agent.scope.ctx) {
+          // 兜底：某些 agent 对象把 scope 挂在 .scope 上，ctx 链不同。
+          const fallback = agent.scope.ctx && agent.scope.ctx.tools;
+          if (fallback && typeof fallback.register === 'function') {
+            scopeTools = fallback;
+            probe.usedFallbackCtx = true;
+          }
+        }
+        probe.hasCtxTools = Boolean(scopeTools && typeof scopeTools.register === 'function');
+        if (!probe.hasCtxTools) {
           log('阶段工具供给跳过：agent.ctx.tools 不可用（沿用 dev_tool_search 手动解锁路径）。');
+          finishProbe({ error: 'agent.ctx.tools 不可用' });
           return false;
         }
+        const supplied = [];
+        const failed = [];
         const disposers = [];
         for (const name of list) {
           const spec = TOOL_SPECS.get(name);
@@ -2014,16 +2061,37 @@ export default {
           try {
             const dispose = scopeTools.register(defineTool(spec));
             if (typeof dispose === 'function') disposers.push(dispose);
+            supplied.push(name);
           } catch (err) {
+            failed.push({ name, error: String((err && err.message) || err) });
             log(`scope 注册工具 ${name} 失败：${(err && err.message) || err}`);
           }
         }
+        // 供给后自检：按 agent 视角回查关键工具是否真的可见（模型看到的即 view(scope).visible）。
+        const verified = [];
+        const verifyFailed = [];
+        if (scopeTools && typeof scopeTools.get === 'function') {
+          for (const name of supplied) {
+            try {
+              if (scopeTools.get(name, agent)) verified.push(name);
+              else verifyFailed.push(name);
+            } catch (err) {
+              verifyFailed.push(`${name}(回查抛错:${(err && err.message) || err})`);
+            }
+          }
+        }
+        probe.supplied = supplied;
+        probe.verified = verified;
+        probe.failed = failed;
+        if (verifyFailed.length > 0) probe.verifyFailed = verifyFailed;
         const key = agent && agent.session ? agent.session.id : undefined;
         if (key !== undefined) scopedToolDisposers.set(key, disposers);
-        log(`阶段工具已供给 ${disposers.length} 个：${list.filter((n) => TOOL_SPECS.has(n)).join('、')}`);
+        log(`阶段工具已供给 ${disposers.length} 个：${list.filter((n) => TOOL_SPECS.has(n)).join('、')}；回查可见 ${verified.length}/${supplied.length}。`);
+        finishProbe({});
         return true;
       } catch (err) {
         log(`阶段工具供给失败：${(err && err.message) || err}`);
+        finishProbe({ error: String((err && err.message) || err) });
         return false;
       }
     }

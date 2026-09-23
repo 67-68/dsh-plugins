@@ -311,6 +311,10 @@ export function loadStateStore() {
       featureTreeProbe: parsed.featureTreeProbe && typeof parsed.featureTreeProbe === 'object'
         ? parsed.featureTreeProbe
         : null,
+      // 排查用：最近一次阶段工具供给的结果（agent 为什么看不到阶段工具）。
+      toolProvisionProbe: parsed.toolProvisionProbe && typeof parsed.toolProvisionProbe === 'object'
+        ? parsed.toolProvisionProbe
+        : null,
     };
   } catch (_err) {
     return base;
