@@ -27,7 +27,6 @@ mode-gate 是 DSH 的工作流/状态门禁插件，控制各阶段 agent 可用
 use submit_requirement_protocol
 
 ### Agent 理解
-
 Create首阶段prompt丢失为bug需定位修复；阶段限制Set新增初始命令（下拉+输入，启动注入，tool-search白名单优先放行：先匹配有则放行无则禁止）与Universal注入（默认todo-write/submit-state，每阶段自动注入）；Research先抽象各阶段依赖成表再建Set填充；需求5要求立即给REQUIREMENT_RECOGNITION加上初始命令三件套以解死锁。
 
 ### 用户可见行为
