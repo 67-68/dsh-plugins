@@ -1894,31 +1894,35 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					try {
 						const result = await api().getFeatureTree({ sessionId });
 						if (!current) return;
+						/* Typert 回的是 {ok, value} 信封：host 的返回值包在 value 里，
+						   直接读 result.tree 会永远是 undefined（这就是之前空树的根因）。 */
+						const payload = result && result.ok ? (result.value || {}) : null;
 						try {
 							if (typeof console !== "undefined" && console.log) {
 								console.log("[mg-client][feature-tree] getFeatureTree 返回：", JSON.stringify({
 									session: typeof sessionId === "string" ? sessionId : ("(非字符串:" + typeof sessionId + ")"),
 									ok: Boolean(result && result.ok),
-									mode: result && result.mode,
-									tree: result && Array.isArray(result.tree) ? result.tree.length : null,
-									dir: result && result.dir,
-									workspace: result && result.workspace,
-									roots: result && result.roots,
-									error: result && result.error,
+									hostOk: payload ? payload.ok : null,
+									mode: payload && payload.mode,
+									tree: payload && Array.isArray(payload.tree) ? payload.tree.length : null,
+									dir: payload && payload.dir,
+									workspace: payload && payload.workspace,
+									roots: payload && payload.roots,
+									error: (payload && payload.error) || (result && result.error),
 								}));
 							}
 						} catch (_logErr) { /* 日志失败不影响取树 */ }
-						if (result && result.ok) {
+						if (payload && payload.ok !== false) {
 							setData({
-								tree: result.tree || [],
-								dir: result.dir || "",
+								tree: payload.tree || [],
+								dir: payload.dir || "",
 								error: "",
-								mode: result.mode === "mounts" ? "mounts" : "flat",
-								workspace: result.workspace || "",
-								roots: Array.isArray(result.roots) ? result.roots : [],
+								mode: payload.mode === "mounts" ? "mounts" : "flat",
+								workspace: payload.workspace || "",
+								roots: Array.isArray(payload.roots) ? payload.roots : [],
 							});
 						} else {
-							setData({ tree: [], dir: "", error: String((result && result.error) || "读取 feature 树失败"), mode: "flat", workspace: "", roots: [] });
+							setData({ tree: [], dir: "", error: String((payload && payload.error) || (result && result.error) || "读取 feature 树失败"), mode: "flat", workspace: "", roots: [] });
 						}
 					} catch (err) {
 						if (current) setData({ tree: [], dir: "", error: String((err && err.message) || err), mode: "flat", workspace: "", roots: [] });
@@ -2020,8 +2024,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					const result = await api().createFeatureNode({
 						sessionId, kind: newKind, parent: newParent, name,
 					});
-					if (result && result.ok === false) {
-						setCreateMsg(String(result.error || "创建失败"));
+					const created = result && result.ok ? (result.value || {}) : null;
+					if (!result || result.ok === false || (created && created.ok === false)) {
+						setCreateMsg(String((created && created.error) || (result && result.error) || "创建失败"));
 					} else {
 						setCreateMsg(`已创建 ${newKind === "overview" ? "feature overview" : "feature intent"}：${name}`);
 						setNewName("");
@@ -2336,8 +2341,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					setPickError("");
 					try {
 						const result = await api().submitFeatureSelection({ sessionId, selection });
-						if (result && result.ok === false) {
-							setPickError(String(result.error || "提交失败"));
+						const submitted = result && result.ok ? (result.value || {}) : null;
+						if (!result || result.ok === false || (submitted && submitted.ok === false)) {
+							setPickError(String((submitted && submitted.error) || (result && result.error) || "提交失败"));
 						} else {
 							activateChatView();
 						}
@@ -2365,7 +2371,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						// 界面版本标记：插件的浏览器端 bundle 会被宿主以 immutable 缓存，
 						// 浏览器缓存旧 bundle 时现象是「树永远是空的 / Remote 报参数错误」。
 						// 这行小字用来一眼确认页面跑的是不是最新前端。
-						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-4")),
+						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-5")),
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,
