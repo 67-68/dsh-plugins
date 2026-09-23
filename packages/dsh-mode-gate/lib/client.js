@@ -1894,6 +1894,20 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					try {
 						const result = await api().getFeatureTree({ sessionId });
 						if (!current) return;
+						try {
+							if (typeof console !== "undefined" && console.log) {
+								console.log("[mg-client][feature-tree] getFeatureTree 返回：", JSON.stringify({
+									session: typeof sessionId === "string" ? sessionId : ("(非字符串:" + typeof sessionId + ")"),
+									ok: Boolean(result && result.ok),
+									mode: result && result.mode,
+									tree: result && Array.isArray(result.tree) ? result.tree.length : null,
+									dir: result && result.dir,
+									workspace: result && result.workspace,
+									roots: result && result.roots,
+									error: result && result.error,
+								}));
+							}
+						} catch (_logErr) { /* 日志失败不影响取树 */ }
 						if (result && result.ok) {
 							setData({
 								tree: result.tree || [],
@@ -2117,7 +2131,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				// 解析出来的项目目录 / 模式 / 节点数：树是空的时候，这行能直接说明
 				// Host 到底把树解析到了哪里（空列表 + 目录正确 = 该目录里确实没有文件）。
 				react.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 11, wordBreak: "break-all" } },
-					`目录：${dir || "（未知）"}　模式：${multiRoot ? "多项目 workspace" : "单项目"}　节点：${tree.length}${roots.length > 0 ? `　发现 ${roots.length} 个项目目录` : ""}`),
+					`目录：${dir || "（未知）"}　模式：${multiRoot ? "多项目 workspace" : "单项目"}　节点：${tree.length}${roots.length > 0 ? `　发现 ${roots.length} 个项目目录` : ""}${typeof sessionId === "string" ? "" : "　会话：取不到当前会话 id（这是空树的头号嫌疑）"}`),
 				react.createElement("div", {
 					style: {
 						maxHeight: 360, overflowY: "auto", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,0.3))",
@@ -2351,7 +2365,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						// 界面版本标记：插件的浏览器端 bundle 会被宿主以 immutable 缓存，
 						// 浏览器缓存旧 bundle 时现象是「树永远是空的 / Remote 报参数错误」。
 						// 这行小字用来一眼确认页面跑的是不是最新前端。
-						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-3")),
+						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-4")),
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,

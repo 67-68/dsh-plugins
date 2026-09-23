@@ -208,13 +208,20 @@ class ModeGateGateway extends TypertRemoteService {
   }
   async getFeatureTree(args) {
     const sessionId = args && args.sessionId;
+    log('[feature-tree] getFeatureTree 调用：sessionId=' + (typeof sessionId === 'string' ? sessionId : '(非字符串:' + typeof sessionId + ')'));
     if (!sessionId) {
       const error = '缺少 sessionId：feature 树按会话所属项目解析。若界面是旧版前端（浏览器缓存了插件的 client bundle），请硬刷新页面（Cmd+Shift+R）后重试。';
-      this.recordFeatureTreeProbe({ sessionId: null, source: 'none', liveCwd: null, entryWorkspace: null, workspace: null, mode: null, dir: null, roots: [], treeSize: 0, error });
+      log(`[feature-tree] 缺少 sessionId，直接报错（多半是前端拿不到当前会话，或旧 bundle 没传 sessionId）。`);
+      this.recordFeatureTreeProbe({ sessionId: null, source: 'none', liveCwd: null, entryWorkspace: null, workspace: null, mode: null, flat: null, pinned: false, dir: null, storeDir: null, storeDirExists: false, roots: [], treeSize: 0, error });
       return { ok: false, error };
     }
     const store = this.featureTreeFor(sessionId);
     const layout = typeof this.options.layoutForSession === 'function' ? this.options.layoutForSession(sessionId) : null;
+    let storeDirExists = false;
+    try {
+      const d = store ? store.dir : null;
+      storeDirExists = typeof d === 'string' && d.length > 0 && existsSync(d) && statSync(d).isDirectory();
+    } catch (_err) { /* 探测失败即视为不存在 */ }
     const base = {
       sessionId,
       source: layout ? layout.source : 'none',
@@ -222,16 +229,23 @@ class ModeGateGateway extends TypertRemoteService {
       entryWorkspace: layout ? layout.entryWorkspace : null,
       workspace: layout ? layout.workspace : null,
       mode: layout && !layout.flat ? 'mounts' : 'flat',
+      flat: layout ? Boolean(layout.flat) : null,
+      pinned: Boolean(layout && layout.pinned),
       dir: store ? store.dir : null,
+      storeDir: store ? store.dir : null,
+      storeDirExists,
       roots: layout ? layout.rels || [] : [],
     };
+    log(`[feature-tree] 解析结果：source=${base.source} liveCwd=${base.liveCwd} entryWorkspace=${base.entryWorkspace} workspace=${base.workspace} mode=${base.mode} pinned=${base.pinned} storeDir=${base.storeDir} storeDirExists=${storeDirExists} roots=${JSON.stringify(base.roots)}`);
     if (!store) {
       const error = '无法确定该会话的项目目录（session 里没有 workspace），请先进入 CREATE 工作流。';
+      log(`[feature-tree] store 为空（workspace 解析失败），报错。`);
       this.recordFeatureTreeProbe({ ...base, treeSize: 0, error });
       return { ok: false, error };
     }
     try {
       const tree = store.tree();
+      log(`[feature-tree] 取树成功：顶层节点数=${tree.length}。`);
       this.recordFeatureTreeProbe({ ...base, treeSize: tree.length, error: null });
       return {
         ok: true,
@@ -244,6 +258,7 @@ class ModeGateGateway extends TypertRemoteService {
       };
     } catch (err) {
       const error = String((err && err.message) || err);
+      log(`[feature-tree] 取树抛错：${error}`);
       this.recordFeatureTreeProbe({ ...base, treeSize: 0, error });
       return { ok: false, error };
     }
@@ -637,9 +652,11 @@ export default {
         const abs = isAbsolute(String(pinned)) ? String(pinned) : join(root, String(pinned));
         try {
           if (existsSync(abs) && statSync(abs).isDirectory()) {
+            log(`[feature-tree] 布局：pinned 命中 root=${root} dir=${abs}（flat）。`);
             return { workspace: root, root: abs, dirs: [abs], rels: [], flat: true, pinned: true };
           }
         } catch (_err) { /* 锁定目录失效就退回自动探测 */ }
+        log(`[feature-tree] 布局：pinned 失效 pinned=${pinned}，退回自动探测。`);
       }
       const direct = directIntentDir(root);
       const directKey = direct.dir ? canonicalDir(direct.dir) : '';
@@ -653,9 +670,11 @@ export default {
       }
       if (nested.length === 0) {
         const dir = direct.dir || direct.firstExisting || join(root, INTENT_DIR_CANDIDATES[0]);
+        log(`[feature-tree] 布局：root=${root} 根层直挂=${direct.dir || '(无)'} 嵌套发现=0 → flat，dir=${dir}。`);
         return { workspace: root, root: dir, dirs: [dir], rels: [], flat: true, autoCreate: !direct.dir };
       }
       const dirs = (direct.dir ? [direct.dir] : []).concat(nested.map((item) => item.abs));
+      log(`[feature-tree] 布局：root=${root} 根层直挂=${direct.dir || '(无)'} 嵌套发现=${nested.length} → mounts，rels=${JSON.stringify(dirs.map((dir) => relative(root, dir).split(sep).join('/')))}。`);
       return {
         workspace: root,
         root,
@@ -1434,7 +1453,10 @@ export default {
           && prev.entryWorkspace === summary.entryWorkspace
           && prev.workspace === summary.workspace
           && prev.mode === summary.mode
+          && prev.flat === summary.flat
+          && prev.pinned === summary.pinned
           && prev.dir === summary.dir
+          && prev.storeDirExists === summary.storeDirExists
           && prev.treeSize === summary.treeSize
           && prev.error === summary.error
           && JSON.stringify(prev.roots || []) === JSON.stringify(summary.roots || []);
