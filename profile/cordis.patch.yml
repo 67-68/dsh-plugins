@@ -20,12 +20,11 @@
     # half renders the IDLE workflow modal, composer placeholder, header toggle
     # and the settings tab.
     # NOTE: feature intent 不再有全局目录配置：它是项目文件（类似 AGENT.md），
-    # 由插件按 session 的 workspace 在项目内自动探测 —— 依次尝试
-    # <workspace>/feature_intents、<workspace>/document/feature_intent、
-    # <workspace>/DOCUMENTATIONS/feature_intents、<workspace>/DOCUMENT/feature_intents，
-    # 优先命中「有内容」的那个，都没有就在 <workspace>/feature_intents 自动创建。
-    # 其余长期记忆（features / patterns / journal / history / architecture.md）
-    # 作为该项目根的兄弟路径一起派生。
+    # 固定放在项目根目录下的 feature_intents/（唯一规范位置）。
+    # session 的 workspace 即项目根；workspace 若是多项目容器，则每个子项目根
+    # 下的 feature_intents/ 会被发现并挂载。都没有就在 <workspace>/feature_intents
+    # 自动创建。其余长期记忆（features / patterns / journal / history /
+    # architecture.md）作为该项目根的兄弟路径一起派生。
     - id: mode-gate
       name: 'dsh-mode-gate'
       config:

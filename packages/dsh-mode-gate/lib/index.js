@@ -570,20 +570,14 @@ export default {
 
     // ── 每个项目自己的 feature intent 目录 ────────────────────────────────
     // feature intent 属于项目文件（类似 AGENT.md），不是全局数据：一个项目
-    // 一份，跟着 session 的 workspace 走。候选目录按顺序探测，命中即用；
-    // 都不存在就用第一个并自动创建。其余长期记忆（features / patterns /
-    // journal / history / architecture.md）沿用既有 dirname 派生规则，
-    // 因此它们也一起变成项目根下的兄弟路径。
+    // 一份，固定放在项目根目录下的 `feature_intents/`（唯一规范位置，不再探测
+    // 其它历史别名）。session 的 workspace 即项目根；workspace 若是多项目容器，
+    // 则每个子项目根下的 `feature_intents/` 会被发现并挂载。其余长期记忆
+    // （features / patterns / journal / history / architecture.md）沿用既有
+    // dirname 派生规则，因此它们也一起落在项目根下的兄弟路径。
+    // 唯一候选：项目根下的 feature_intents/。
     const INTENT_DIR_CANDIDATES = [
       'feature_intents',
-      'feature_intent',
-      join('document', 'feature_intent'),
-      join('document', 'feature_intents'),
-      join('documentation', 'feature_intent'),
-      join('documentation', 'feature_intents'),
-      join('DOCUMENTATIONS', 'feature_intents'),
-      join('DOCUMENTATION', 'feature_intents'),
-      join('DOCUMENT', 'feature_intents'),
     ];
     const presetActionDir = expandHome(
       typeof cfg.presetActionDir === 'string' && cfg.presetActionDir.trim()
@@ -605,9 +599,8 @@ export default {
     }
 
     /**
-     * 目录的真实身份（用于去重）：macOS 等大小写不敏感文件系统上
-     * `documentation/` 与 `DOCUMENTATION/` 是同一个目录，光比字符串会把同一份
-     * intent 目录挂两次。realpath 失败时退回原路径。
+     * 目录的真实身份（用于去重）：软链别名可能让同一份 intent 目录以不同
+     * 路径出现，光比字符串会把它挂两次。realpath 失败时退回原路径。
      */
     function canonicalDir(dir) {
       try {
@@ -1187,7 +1180,9 @@ export default {
           target: { target: INIT_GATE_TARGET, mode: stateId },
         });
         applyStateModelSelection(agent, workflowId, stateId);
-        void injectModeGateContext(agent, 'state');
+        // 必须等阶段上下文排进 inbox 再返回：调用方（submitFeatureSelection 的
+        // followup 唤醒）紧接着就会开新一轮，fire-and-forget 会让首轮看不到政策。
+        await injectModeGateContext(agent, 'state');
         provisionStageTools(agent, []);
         return { prompt: INIT_GATE_TARGET, messages: [] };
       }
@@ -1200,7 +1195,7 @@ export default {
           target: isIdle ? null : { target: prompt, mode: stateId },
         });
         applyStateModelSelection(agent, workflowId, stateId);
-        void injectModeGateContext(agent, 'state');
+        await injectModeGateContext(agent, 'state');
         // 无 goal 的状态（含 IDLE）：只清理 scope，不供给。
         provisionStageTools(agent, []);
         return { prompt, messages: [] };
@@ -1209,7 +1204,7 @@ export default {
       const targetText = result.prompt || effectiveStatePrompt(state, workflowId, stateId, stateDef) || stateId;
       writeState(agent, { ...basePatch, ...result.statePatch, target: { target: targetText, mode: stateId } });
       applyStateModelSelection(agent, workflowId, stateId);
-      void injectModeGateContext(agent, 'state');
+      await injectModeGateContext(agent, 'state');
       // 按本状态 goal 可见集供给 scope 工具（与门禁同一份名单）。
       provisionStageTools(agent, visibleToolsForGoal(goalRef));
       return result;
@@ -1553,17 +1548,22 @@ export default {
       // 沿树上溯冒泡收集各层 architecture.md 及其父文件夹 code map，去重后注入。
       const context = collectFeatureArchitectureContext(agent, clean);
       writeState(agent, { featureArchitectureContext: context.state });
+      // 顺序很关键：先激活 RR（内部已同步等待阶段上下文注入），再注入架构/
+      // 选择上下文，最后 followup 唤醒。这样唤醒开出的首轮一定能看到 RR 政策
+      // + 架构 + 选择（之前是先注入后激活，政策 inject 与唤醒赛跑，首轮经常缺席）。
+      const activated = await activateStateGoal(agent, 'create', 'REQUIREMENT_RECOGNITION');
       if (!ignorePromptEnabled(readState(agent), 'create', 'REQUIREMENT_RECOGNITION')) {
-        injectFeatureArchitectureContext(agent, context.text);
+        const archOk = injectFeatureArchitectureContext(agent, context.text);
         // auto-discover 路线：把所选 overview 的内容 + 路径也喂给 AI，供其自行寻找 intent。
+        let routeOk = true;
         if (route === 'auto-discover') {
-          injectFeatureSelectionContext(agent, clean);
+          routeOk = injectFeatureSelectionContext(agent, clean);
         } else if (route === 'inject') {
           // inject 路线：从所选 intent 向上冒泡收集 overview 链 + 底层被选 intent。
-          injectFeatureBubbleContext(agent, clean);
+          routeOk = injectFeatureBubbleContext(agent, clean);
         }
+        console.log(`[dsh-mode-gate] [feature-tree] 提交后注入：arch=${archOk} route=${route}:${routeOk}。`);
       }
-      const activated = await activateStateGoal(agent, 'create', 'REQUIREMENT_RECOGNITION');
       // INIT 闸门期间 AI 被禁言、用户消息也不会触发 AI：这里必须主动唤醒，
       // 否则需求分解阶段永远不跑（用户原话仍在会话历史里，AI 能看到）。
       const live = agents.get(sessionId);
@@ -1581,6 +1581,10 @@ export default {
         } catch (err) {
           log(`feature 选择提交后唤醒 Agent 失败：${(err && err.message) || err}`);
         }
+      } else {
+        // 没有 live agent 就没有首轮：RR 状态已落盘，用户下一次输入才会开轮。
+        // 记一笔，免得下次又以为是注入丢了。
+        console.log(`[dsh-mode-gate] [feature-tree] 提交后无 live agent（session=${sessionId}），等待用户下一条消息开轮。`);
       }
       const after = readState(agent);
       return {

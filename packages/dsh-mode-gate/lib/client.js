@@ -2371,7 +2371,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						// 界面版本标记：插件的浏览器端 bundle 会被宿主以 immutable 缓存，
 						// 浏览器缓存旧 bundle 时现象是「树永远是空的 / Remote 报参数错误」。
 						// 这行小字用来一眼确认页面跑的是不是最新前端。
-						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-5")),
+						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-6")),
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,

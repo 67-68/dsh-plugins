@@ -91,7 +91,7 @@ function matchesCandidate(relPath, candidates) {
  * 各有一份 feature_intents）。这时不能只看 workspace 根层，而要往下找。
  *
  * @param {string} workspaceRoot 工作区根目录
- * @param {string[]} candidates 候选相对目录名（如 feature_intents、document/feature_intent）
+ * @param {string[]} candidates 候选相对目录名（唯一规范：feature_intents）
  * @param {{maxDepth?: number}} [options] maxDepth 为向下递归的层数（默认 3）
  * @returns {Array<{rel: string, abs: string}>} 命中的目录（有内容才算），按 rel 排序
  */
