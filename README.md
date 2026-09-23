@@ -38,16 +38,18 @@ dsh-plugins/
 │   ├── mode-experience.mjs   #   按 preset 名注入 DOCUMENT/{preset}.md 到 system prompt
 │   └── requirements.txt      #   外部插件声明（source@version，# 注释，版本锁死）
 ├── packages/                 # 本地双面包插件（每包一个目录，basename = 包名）
-│   └── .gitkeep
 ├── presets/                  # 自建 agent preset（每 preset 一个目录）
-│   ├── architect/
-│   └── g-chat/
 ├── preset-actions/           # mode-gate preset actions（每 action 一个目录，内含 SKILL.md）
 ├── profile/
 │   └── cordis.patch.yml      # web profile 的 user patch 层，引用 ../plugins/*.mjs
 ├── document/                 # 经验文档（GENERAL.md 全模式 + {mode}.md 按模式）
 │   ├── GENERAL.md
 │   └── cordis.md
+├── feature_intents/          # 需求意图（唯一规范位置）
+├── scripts/                  # 运维脚本
+├── patches/                  # install.sh 引用的补丁
+├── extensions/               # 浏览器扩展（独立交付物，不由 install.sh 部署）
+├── docs/plans/               # 设计文档
 ├── install.sh                # 一键把上面内容 symlink/安装 进 ~/.dsh
 └── README.md
 ```

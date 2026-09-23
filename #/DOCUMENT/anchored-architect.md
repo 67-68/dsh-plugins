@@ -1,1 +1,0 @@
-/Users/a67_68/projects/dsh-plugins/document/anchored-architect.md

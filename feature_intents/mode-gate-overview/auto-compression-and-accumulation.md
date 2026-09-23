@@ -1,1 +1,0 @@
-# auto-compression-and-accumulation
