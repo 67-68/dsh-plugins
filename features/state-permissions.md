@@ -9,11 +9,11 @@
 
 ## user_visible_behavior
 
-Create初始prompt不再丢失；阶段限制可配初始命令（下拉+输入，启动注入）与Universal命令（默认todo-write/submit-state，每阶段注入）；tool-search对白名单优先放行；各阶段有独立Set并填充，初始阶段默认带三初始命令。
+Create 首轮带阶段政策与初始命令且不再每步重注；Universal 与阶段 Set 在设置页可配；提交协议后 agent 禁言等用户确认
 
 ## feature_intent
 
-阶段门禁支持初始/全局命令注入与优先放行
+阶段政策只阶段激活注入一次；Universal 与阶段 Set 进设置页可配；协议提交后禁言等确认
 
 ## completion_evidence
 

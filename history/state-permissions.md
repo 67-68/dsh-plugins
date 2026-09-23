@@ -39,3 +39,30 @@ Create初始prompt不再丢失；阶段限制可配初始命令与Universal命�
 - [ ] 阶段权限门禁初始命令与Universal注入及tool-search白名单优先：初始命令可在阶段启动注入，tool-search搜白名单内放行、白名单外仍禁止，Universal命令每阶段自动注入
 - [ ] 各阶段Set抽象与填充及Research依赖表：输出阶段x命令依赖表并为各阶段建Set填充，含REQUIREMENT_RECOGNITION初始命令三件套
 - [ ] Create首阶段prompt丢失修复：复现并修复初始使用create工作流prompt丢失，初始阶段默认带三初始命令后可验证保留
+
+## 2026-09-23T12:18:24.821Z
+
+- summary: 续投下线只阶段激活注入一次；Universal 与阶段 Set 进设置页可配；协议提交后禁言等确认
+
+## 用户原话
+
+universal 注入命令放到 mode-gate 设置工作流页（对每个 state 注入）；新 Create 首轮 prompt 仍缺席，每调工具就重注政策的“续投”立即下掉、只在阶段开始注入一次；阶段 Set 落为可配表并展示到设置-模式门禁-限制界面，同时自查其他有行为无 UI 的项；submit_requirement_protocol 之后 agent 要像 INIT 一样禁言等确认。
+
+## Agent 理解
+
+用户四条新需求：1）universal 注入命令搬到 mode-gate 设置工作流页，因为它对每个 state 都注入，应为全局配置；2）新 Create 首轮 prompt 仍缺席（projects 会话实测），且每调一个工具就全量重注政策（“续投”）来源不明、token 开销巨大，要求立即下掉——经查线上包确含之前写的每步续投代码，已删除整套续投/补投机制，回到阶段激活一次性注入；3）阶段 Set（BUILTIN_STAGE_COMMAND_SETS，12 阶段）目前只是代码内置表，要落为可配置表并展示到设置-模式门禁-限制界面，同时自查其他“有行为无 UI”的项；4）submit_requirement_protocol 之后 agent 应像 INIT 一样完全禁言等用户确认，而不是继续运行（即“截断”缺失，需新增 awaiting_user 闸门）。用户已明确：政策只在 create requirement recognition 等阶段开始时硬注入一次，步内不再补；已知代价是抑制路由下后续轮次可能再度缺席，待线上验证后定案。
+
+## 用户可见行为
+
+新开 Create 工作流：首轮即带阶段政策与 RR 三初始命令，之后每调工具不再重注政策；Universal 与阶段 Set 在设置页可见可改；提交需求协议后 agent 停下等用户确认，不再继续跑
+
+## 功能意图
+
+mode-gate 阶段政策只在阶段激活时注入一次；Universal 与阶段 Set 进设置页可配；协议提交后禁言等用户确认
+
+## Checklist
+
+- [ ] mode-gate 设置工作流页 Universal 全局配置：全局一份对所有 state 注入（下拉+输入），限制套件 universal 改为覆盖/继承
+- [ ] 阶段 Set 可配置表 + UI 缺口自查补齐：BUILTIN_STAGE_COMMAND_SETS 落为可配表并展示到设置-模式门禁-限制界面，自查补齐其他有行为无 UI 的项
+- [ ] 需求协议提交后禁言闸门：awaiting_user 期间 pre-step 硬 reject，对标 INIT 闸门
+- [ ] 续投机制下线：步内全量续投/缺席补投已删除，政策只在阶段激活时注入一次（token 止血）；首轮缺席问题已知回退，待线上验证后定案

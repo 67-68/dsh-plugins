@@ -4,7 +4,10 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const BUILTIN_WORKFLOW_DIR = resolve(HERE, '..', 'workflows');
+// 本文件位于 lib/engine/，内置工作流在包根 workflows/（package.json files 含
+// "workflows"），需上两级再进 workflows；少一级会指向不存在的 lib/workflows，
+// collectDir 静默返回空 → byId 无 IDLE → 抛「workflow 配置缺少内置 IDLE 定义」。
+export const BUILTIN_WORKFLOW_DIR = resolve(HERE, '..', '..', 'workflows');
 
 export function expandHome(path) {
   if (typeof path !== 'string' || path.length === 0) return path;

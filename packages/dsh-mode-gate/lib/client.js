@@ -72,6 +72,12 @@ window.__ModuleLoader__.load({
 			restrictionInitialCommands: "初始命令（阶段启动注入；逗号分隔）",
 			restrictionUniversalCommands: "Universal 注入命令（每阶段都注入；逗号分隔）",
 			restrictionCommandPick: "从下拉选择命令",
+			stageSetTitle: "阶段命令 Set（可配置表）",
+			stageSetDesc: "每个阶段启动即注入并优先放行的命令。未覆盖的行使用内置值；保存即覆盖，恢复默认即回到内置。",
+			stageSetSourceBuiltin: "内置",
+			stageSetSourceOverridden: "已覆盖",
+			stageSetCommands: "初始命令（逗号分隔）",
+			stageSetReset: "恢复默认",
 			modelAliasColumn: "代号",
 			modelAliasTargetColumn: "具体模型",
 			modelThinkingAliasColumn: "思考等级",
@@ -99,6 +105,13 @@ window.__ModuleLoader__.load({
 			loadWorkflowSettingsFailed: "读取工作流设置失败",
 			saveWorkflowSettingsFailed: "保存工作流设置失败",
 			workflowSettingsSaveSuccess: "已保存",
+			universalTitle: "Universal 注入命令（全局）",
+			universalDesc: "对所有工作流所有阶段生效的默认注入命令（逗号分隔）。阶段引用的限制套件里显式填写了 universal 则覆盖这里；留空即继承。",
+			universalPlaceholder: "todo_write, submit_state",
+			universalPick: "从目录选择添加",
+			saveUniversal: "保存 Universal 命令",
+			loadUniversalFailed: "读取 Universal 命令失败",
+			saveUniversalFailed: "保存 Universal 命令失败",
 			workflowRefsTitle: "工作流与阶段引用",
 			workflowRefsDesc: "点击工作流展开它引用的阶段；每个阶段对应「所有模式」里的一个模式。",
 			openStage: "打开对应阶段",
@@ -195,6 +208,12 @@ window.__ModuleLoader__.load({
 			restrictionInitialCommands: "Initial commands (injected at stage start; comma-separated)",
 			restrictionUniversalCommands: "Universal injected commands (every stage; comma-separated)",
 			restrictionCommandPick: "Pick a command",
+			stageSetTitle: "Stage command sets (configurable)",
+			stageSetDesc: "Commands injected and priority-allowed at each stage start. Rows without override use builtin values; save overrides, reset restores builtin.",
+			stageSetSourceBuiltin: "builtin",
+			stageSetSourceOverridden: "overridden",
+			stageSetCommands: "Initial commands (comma-separated)",
+			stageSetReset: "Reset to default",
 			restrictionNewLabel: "Display name",
 			modelAliasColumn: "Codename",
 			modelAliasTargetColumn: "Concrete model",
@@ -223,6 +242,13 @@ window.__ModuleLoader__.load({
 			loadWorkflowSettingsFailed: "Failed to load workflow settings",
 			saveWorkflowSettingsFailed: "Failed to save workflow settings",
 			workflowSettingsSaveSuccess: "Saved",
+			universalTitle: "Universal injected commands (global)",
+			universalDesc: "Default injected commands for every phase of every workflow (comma separated). A restriction set with explicit non-empty universal commands overrides this; empty inherits.",
+			universalPlaceholder: "todo_write, submit_state",
+			universalPick: "Pick from catalog",
+			saveUniversal: "Save universal commands",
+			loadUniversalFailed: "Failed to load universal commands",
+			saveUniversalFailed: "Failed to save universal commands",
 			workflowRefsTitle: "Workflow and stage references",
 			workflowRefsDesc: "Expand a workflow to see the stages it references; each stage maps to one mode in All modes.",
 			openStage: "Open stage",
@@ -448,6 +474,38 @@ window.__ModuleLoader__.load({
 			const [data, setData] = react.useState({ workflows: [], overrides: {}, workspace: null });
 			const [error, setError] = react.useState("");
 			const [savedAt, setSavedAt] = react.useState(0);
+			const [universal, setUniversal] = react.useState("");
+
+			const refreshUniversal = react.useCallback(async () => {
+				try {
+					const result = await api().getUniversalCommands({});
+					if (result && result.ok && Array.isArray(result.commands)) {
+						setUniversal(result.commands.join(", "));
+					} else {
+						setError("loadUniversalFailed");
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+
+			const saveUniversal = react.useCallback(async (text) => {
+				try {
+					const commands = String(text || "").split(/[\s,]+/).filter(Boolean);
+					const result = await api().setUniversalCommands({ commands });
+					if (!result || result.ok === false) {
+						setError(String((result && result.error) || "saveUniversalFailed"));
+						return false;
+					}
+					setUniversal((result.commands || []).join(", "));
+					setError("");
+					setSavedAt(Date.now());
+					return true;
+				} catch (err) {
+					setError(String((err && err.message) || err));
+					return false;
+				}
+			}, [api]);
 
 			const refresh = react.useCallback(async () => {
 				try {
@@ -501,11 +559,12 @@ window.__ModuleLoader__.load({
 
 			react.useEffect(() => {
 				refresh();
+				refreshUniversal();
 				const timer = setInterval(refresh, 4000);
 				return () => clearInterval(timer);
-			}, [refresh]);
+			}, [refresh, refreshUniversal]);
 
-			return { ...data, error, refresh, saveOverride, saveStage, savedAt };
+			return { ...data, error, refresh, saveOverride, saveStage, savedAt, universal, setUniversal, refreshUniversal, saveUniversal };
 		}
 
 
@@ -533,6 +592,24 @@ window.__ModuleLoader__.load({
 			const [expanded, setExpanded] = react.useState({});
 			const [drafts, setDrafts] = react.useState({});
 			const initialized = react.useRef(false);
+			// Universal 全局注入命令：本地草稿 + 命令目录下拉（复用 getCommandCatalog）。
+			const [commandCatalog, setCommandCatalog] = react.useState([]);
+			const [universalDraft, setUniversalDraft] = react.useState(null);
+			react.useEffect(() => {
+				let alive = true;
+				(async () => {
+					try {
+						const result = await api().getCommandCatalog({});
+						if (!alive) return;
+						const tools = result && result.ok && Array.isArray(result.tools) ? result.tools : [];
+						setCommandCatalog(tools.map((tool) => tool.name).filter(Boolean));
+					} catch (_err) {
+						if (alive) setCommandCatalog([]);
+					}
+				})();
+				return () => { alive = false; };
+			}, [api]);
+			const universalText = universalDraft === null ? (settings.universal || "") : universalDraft;
 
 			react.useEffect(() => {
 				if (!Array.isArray(settings.workflows) || settings.workflows.length === 0) return;
@@ -598,6 +675,38 @@ window.__ModuleLoader__.load({
 			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
 				react.createElement("h3", { style: styles.denyHead }, t("workflowSettingsTitle")),
 				react.createElement("p", { style: styles.desc }, t("workflowSettingsDesc")),
+				react.createElement("div", { style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 } },
+					react.createElement("h4", { style: { ...styles.denyHead, fontSize: 14 } }, t("universalTitle")),
+					react.createElement("p", { style: styles.desc }, t("universalDesc")),
+					react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+						react.createElement("input", {
+							style: { ...styles.input, flex: 1 },
+							placeholder: t("universalPlaceholder"),
+							value: universalText,
+							onChange: (e) => setUniversalDraft(e.target.value),
+						}),
+						react.createElement("select", {
+							style: { ...styles.input, maxWidth: 200 },
+							value: "",
+							onChange: (e) => {
+								const v = e.target.value;
+								if (v) setUniversalDraft([String(universalText || "").trim(), v].filter(Boolean).join(", "));
+							},
+						},
+							react.createElement("option", { value: "" }, t("universalPick")),
+							commandCatalog.map((name) => react.createElement("option", { key: name, value: name }, name)),
+						),
+					),
+					react.createElement("div", null,
+						react.createElement("button", {
+							style: styles.button,
+							onClick: async () => {
+								const ok = await settings.saveUniversal(universalText);
+								if (ok) setUniversalDraft(null);
+							},
+						}, t("saveUniversal")),
+					),
+				),
 				settings.workflows.map((wf) => {
 					const isOpen = Boolean(expanded[wf.id]);
 					const rows = drafts[wf.id] || [];
@@ -1527,7 +1636,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const getDraftById = (id) => {
 				if (drafts[id]) return drafts[id];
 				const set = store.sets.find((e) => e.id === id);
-				if (!set) return { label: id, mode: "blacklist", denyCommands: "", denyReason: "", denySkills: "", allowSkills: "" };
+				if (!set) return { label: id, mode: "blacklist", denyCommands: "", denyReason: "", denySkills: "", allowSkills: "", initialCommands: "", universalCommands: "" };
 				return {
 					label: set.label || set.id,
 					mode: set.mode || "blacklist",
@@ -1535,6 +1644,8 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					denyReason: (set.denyCommands && set.denyCommands[0] && set.denyCommands[0].reason) || "",
 					denySkills: (set.denySkills || []).join(", "),
 					allowSkills: (set.allowSkills || []).join(", "),
+					initialCommands: (set.initialCommands || []).join(", "),
+					universalCommands: (set.universalCommands || []).join(", "),
 				};
 			};
 			const splitList = (text) => String(text || "").split(/[\s,]+/).filter(Boolean);
@@ -1626,6 +1737,137 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					),
 					react.createElement("button", { style: styles.button, onClick: addSet }, t("add")),
 				),
+				store.error ? react.createElement("p", { style: styles.error }, store.error) : null,
+				react.createElement(StageCommandSetsSection, { t, api, commandCatalog }),
+			);
+		}
+
+		/** 「阶段命令 Set」可配置表的数据源：内置 12 阶段 + 用户覆盖合并后的全量表。 */
+		function useStageCommandSets(api) {
+			const [rows, setRows] = react.useState([]);
+			const [error, setError] = react.useState("");
+			const refresh = react.useCallback(async () => {
+				try {
+					const result = await api().getStageCommandSets();
+					if (result && result.ok && result.value && Array.isArray(result.value.sets)) {
+						setRows(result.value.sets);
+						setError("");
+					} else if (result && result.ok === false) {
+						setError(typeof result.error === "string" ? result.error : "loadFailed");
+					} else {
+						setRows([]);
+					}
+				} catch (err) {
+					setError(String((err && err.message) || err));
+				}
+			}, [api]);
+			react.useEffect(() => { refresh(); }, [refresh]);
+			const saveRow = react.useCallback(async (key, initialCommands) => {
+				try {
+					const result = await api().setStageCommandSet({ key, initialCommands });
+					if (result && result.ok && result.value) {
+						setError("");
+						await refresh();
+						return { ok: true };
+					}
+					const msg = result && typeof result.error === "string" ? result.error : "saveFailed";
+					setError(msg);
+					return { ok: false, error: msg };
+				} catch (err) {
+					const msg = String((err && err.message) || err);
+					setError(msg);
+					return { ok: false, error: msg };
+				}
+			}, [api, refresh]);
+			const resetRow = react.useCallback(async (key) => {
+				try {
+					const result = await api().deleteStageCommandSet({ key });
+					if (result && result.ok !== false) {
+						setError("");
+						await refresh();
+						return { ok: true };
+					}
+					const msg = result && typeof result.error === "string" ? result.error : "saveFailed";
+					setError(msg);
+					return { ok: false, error: msg };
+				} catch (err) {
+					const msg = String((err && err.message) || err);
+					setError(msg);
+					return { ok: false, error: msg };
+				}
+			}, [api, refresh]);
+			return { rows, error, refresh, saveRow, resetRow };
+		}
+
+		/** 「阶段命令 Set」可配置表：每阶段一行，可展开编辑初始命令（input + 下拉），可恢复默认。 */
+		function StageCommandSetsSection(props) {
+			const { t, api, commandCatalog } = props;
+			const store = useStageCommandSets(api);
+			const [expanded, setExpanded] = react.useState({});
+			const [drafts, setDrafts] = react.useState({});
+			const splitList = (text) => String(text || "").split(/[\s,]+/).filter(Boolean);
+			const getDraft = (row) => (drafts[row.key] !== void 0 && drafts[row.key] !== null)
+				? drafts[row.key]
+				: (row.effectiveInitial || []).join(", ");
+			const saveDraft = async (row) => {
+				const result = await store.saveRow(row.key, splitList(getDraft(row)));
+				if (result && result.ok) {
+					setDrafts((prev) => {
+						const next = { ...prev };
+						delete next[row.key];
+						return next;
+					});
+				}
+			};
+			const resetDefault = async (row) => {
+				const result = await store.resetRow(row.key);
+				if (result && result.ok) {
+					setDrafts((prev) => {
+						const next = { ...prev };
+						delete next[row.key];
+						return next;
+					});
+				}
+			};
+			const sourceBadge = (overridden) => react.createElement("span", {
+				style: { whiteSpace: "nowrap", background: overridden ? "var(--dsw-alias-bg-module-platform)" : "var(--dsw-alias-border-l2)", borderRadius: 999, padding: "1px 8px", fontSize: 11, lineHeight: "17px" },
+			}, overridden ? t("stageSetSourceOverridden") : t("stageSetSourceBuiltin"));
+			return react.createElement("div", { style: { ...styles.section, marginTop: 12 } },
+				react.createElement("h3", { style: styles.denyHead }, t("stageSetTitle")),
+				react.createElement("p", { style: styles.desc }, t("stageSetDesc")),
+				store.rows.map((row) => {
+					const isOpen = Boolean(expanded[row.key]);
+					const draft = getDraft(row);
+					return react.createElement("div", {
+						key: row.key,
+						style: { border: "1px solid var(--dsw-alias-border-l2)", borderRadius: 10, overflow: "hidden" },
+					},
+						react.createElement("button", {
+							type: "button",
+							onClick: () => setExpanded((prev) => ({ ...prev, [row.key]: !prev[row.key] })),
+							style: { ...styles.button, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, border: "none", borderRadius: 0, padding: "10px 12px" },
+						},
+							react.createElement("span", { style: { fontSize: 12, lineHeight: "18px" } }, isOpen ? "▾" : "▸"),
+							react.createElement("code", { style: styles.code }, row.key),
+							react.createElement("span", { style: { color: "var(--dsw-alias-label-primary)", fontSize: 13, flex: 1 } }, row.label || row.key),
+							react.createElement("code", { style: { ...styles.code, fontSize: 11 } }, (row.effectiveInitial || []).join(", ") || "—"),
+							sourceBadge(Boolean(row.overridden)),
+						),
+						isOpen && react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, padding: "10px 12px" } },
+							react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+								react.createElement("input", { style: { ...styles.input, flex: 1 }, placeholder: t("stageSetCommands"), value: draft, onChange: (e) => setDrafts((prev) => ({ ...prev, [row.key]: e.target.value })) }),
+								react.createElement("select", { style: { ...styles.input, maxWidth: 200 }, value: "", onChange: (e) => { const v = e.target.value; if (v) setDrafts((prev) => ({ ...prev, [row.key]: [String(draft || "").trim(), v].filter(Boolean).join(", ") })); } },
+									react.createElement("option", { value: "" }, t("restrictionCommandPick")),
+									(commandCatalog || []).map((tool) => react.createElement("option", { key: tool.name, value: tool.name }, tool.name)),
+								),
+							),
+							react.createElement("div", { style: { display: "flex", gap: 8 } },
+								react.createElement("button", { style: styles.button, onClick: () => saveDraft(row) }, t("save")),
+								Boolean(row.overridden) ? react.createElement("button", { style: styles.button, onClick: () => resetDefault(row) }, t("stageSetReset")) : null,
+							),
+						),
+					);
+				}),
 				store.error ? react.createElement("p", { style: styles.error }, store.error) : null,
 			);
 		}
@@ -1730,6 +1972,11 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("getRestriction", "GetRestrictionResult"),
 				remoteArgsDescriptor("setRestriction", "SetRestrictionResult"),
 				remoteArgsDescriptor("deleteRestriction", "DeleteRestrictionResult"),
+				remoteArgsDescriptor("getUniversalCommands", "GetUniversalCommandsResult"),
+				remoteArgsDescriptor("setUniversalCommands", "SetUniversalCommandsResult"),
+				remoteDescriptor("getStageCommandSets", "GetStageCommandSetsResult"),
+				remoteArgsDescriptor("setStageCommandSet", "SetStageCommandSetResult"),
+				remoteArgsDescriptor("deleteStageCommandSet", "DeleteStageCommandSetResult"),
 				remoteDescriptor("getWorkflowSettings", "GetWorkflowSettingsResult"),
 				remoteArgsDescriptor("setWorkflowOverride", "SetWorkflowOverrideResult"),
 				remoteArgsDescriptor("setStageOverride", "SetStageOverrideResult"),

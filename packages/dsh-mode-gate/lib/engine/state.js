@@ -163,6 +163,58 @@ export function normalizeWorkflowOverrides(value) {
 }
 
 /**
+ * 全局 Universal 注入命令：对所有工作流所有 state 生效的默认值
+ * （设置-工作流页编辑）。缺省/非法时回退 todo_write / submit_state。
+ * 限制套件里显式声明了非空 universalCommands 则覆盖它（覆盖/继承语义）。
+ */
+export function normalizeUniversalCommands(value) {
+  if (value === void 0 || value === null) return ['todo_write', 'submit_state'];
+  if (!Array.isArray(value)) return ['todo_write', 'submit_state'];
+  const out = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const text = item.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+/**
+ * 阶段命令 Set 的用户覆盖表：key 为 `<workflowId>.<stateId>`，
+ * value 为 { label?, initialCommands[] }。只存「与内置的差异」：
+ * 用户保存即覆盖该阶段的内置 Set，删除即恢复内置。
+ * 非法 key（无点 / 空段）直接丢弃；initialCommands 做去重 trim。
+ */
+export function normalizeStageCommandSets(value) {
+  const out = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof key !== 'string') continue;
+    const text = key.trim();
+    const dot = text.indexOf('.');
+    if (dot <= 0 || dot >= text.length - 1) continue;
+    if (!/^[a-zA-Z0-9._-]+$/.test(text)) continue;
+    const raw = entry && typeof entry === 'object' ? entry : {};
+    const cmds = [];
+    const seen = new Set();
+    const list = Array.isArray(raw.initialCommands) ? raw.initialCommands : [];
+    for (const item of list) {
+      if (typeof item !== 'string') continue;
+      const name = item.trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      cmds.push(name);
+    }
+    const label = typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : '';
+    out[text] = label ? { label, initialCommands: cmds } : { initialCommands: cmds };
+  }
+  return out;
+}
+
+/**
  * Migrate legacy per-(workflow,state) overrides into stage-scoped overrides.
  * A stage already carrying a different override is a conflict: keep the legacy
  * entry instead of guessing which one wins, so no user config is lost.
@@ -293,6 +345,8 @@ export function loadStateStore() {
     compressionOverrides: {},
     workflowOverrides: normalizeWorkflowOverrides(),
     stageOverrides: {},
+    universalCommands: normalizeUniversalCommands(),
+    stageCommandSets: normalizeStageCommandSets(),
     workflowRegistryVersion: 1,
   };
   try {
@@ -312,6 +366,8 @@ export function loadStateStore() {
       compressionOverrides: normalizeCompressionOverrides(parsed.compressionOverrides),
       workflowOverrides: migrated.workflowOverrides,
       stageOverrides: migrated.stageOverrides,
+      universalCommands: normalizeUniversalCommands(parsed.universalCommands),
+      stageCommandSets: normalizeStageCommandSets(parsed.stageCommandSets),
       workflowRegistryVersion: parsed.workflowRegistryVersion || 1,
       // 排查用：最近一次 getFeatureTree 的解析结果（为什么树是空的）。
       featureTreeProbe: parsed.featureTreeProbe && typeof parsed.featureTreeProbe === 'object'

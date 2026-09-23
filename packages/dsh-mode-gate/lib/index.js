@@ -41,7 +41,9 @@ import {
   normalizeModelAliases,
   normalizeModelCatalog,
   normalizeRequirements,
+  normalizeStageCommandSets,
   normalizeStageOverrides,
+  normalizeUniversalCommands,
   normalizeWorkflowOverrides,
   readSessionEntry,
   readState,
@@ -504,6 +506,64 @@ class ModeGateGateway extends TypertRemoteService {
   async deleteRestriction(args) {
     return await this.options.restrictions.remove(args && args.id);
   }
+  /**
+   * 全局 Universal 注入命令（设置-工作流页编辑，对所有工作流所有 state 生效）。
+   * 限制套件里显式声明了非空 universalCommands 则覆盖它，否则继承这里。
+   */
+  async getUniversalCommands() {
+    const store = loadStateStore();
+    return { ok: true, commands: normalizeUniversalCommands(store.universalCommands) };
+  }
+  async setUniversalCommands(args) {
+    const store = loadStateStore();
+    store.universalCommands = normalizeUniversalCommands(args && args.commands);
+    saveStateStore(store);
+    return { ok: true, commands: store.universalCommands };
+  }
+    /**
+     * 阶段命令 Set 可配置表（设置-限制页展示/编辑）。
+     * 返回内置阶段与用户覆盖合并后的全量表，
+     * 每行 { key, label, builtinInitial, effectiveInitial, overridden }。
+     */
+  async getStageCommandSets() {
+    const store = loadStateStore();
+    const overrides = normalizeStageCommandSets(store.stageCommandSets);
+    const rows = Object.entries(BUILTIN_STAGE_COMMAND_SETS).map(([key, builtin]) => {
+      const over = overrides[key];
+      const builtinInitial = Array.isArray(builtin.initialCommands) ? [...builtin.initialCommands] : [];
+      return {
+        key,
+        label: (over && over.label) || builtin.label || key,
+        builtinInitial,
+        effectiveInitial: over ? [...over.initialCommands] : builtinInitial,
+        overridden: Boolean(over),
+      };
+    });
+    return { ok: true, sets: rows };
+  }
+  async setStageCommandSet(args) {
+    const key = args && typeof args.key === 'string' ? args.key.trim() : '';
+    const cleaned = normalizeStageCommandSets({
+      [key]: { label: args && args.label, initialCommands: args && args.initialCommands },
+    });
+    if (!cleaned[key]) throw new Error(`阶段 Set key "${key}" 非法，应为 <workflowId>.<stateId> 形式`);
+    const store = loadStateStore();
+    const overrides = normalizeStageCommandSets(store.stageCommandSets);
+    overrides[key] = cleaned[key];
+    store.stageCommandSets = overrides;
+    saveStateStore(store);
+    return { ok: true, key, set: overrides[key] };
+  }
+    /** 删除用户覆盖，恢复该阶段的内置 Set。 */
+  async deleteStageCommandSet(args) {
+    const key = args && typeof args.key === 'string' ? args.key.trim() : '';
+    const store = loadStateStore();
+    const overrides = normalizeStageCommandSets(store.stageCommandSets);
+    delete overrides[key];
+    store.stageCommandSets = overrides;
+    saveStateStore(store);
+    return { ok: true, key };
+  }
   async getWorkflowSettings() {
     const registry = this.options.registryForWorkspace(this.options.defaultWorkspace || null);
     const store = loadStateStore();
@@ -670,6 +730,8 @@ markRemoteMethods(ModeGateGateway, [
   'getModelCatalog', 'setModelCatalog', 'getModelAliases', 'setModelAliases', 'getModelCompressionTable',
   'getCompressionOverrides', 'setCompressionOverrides',
   'getRestrictions', 'getRestriction', 'setRestriction', 'deleteRestriction',
+  'getUniversalCommands', 'setUniversalCommands',
+  'getStageCommandSets', 'setStageCommandSet', 'deleteStageCommandSet',
   'getWorkflowSettings', 'setWorkflowOverride', 'setStageOverride',
   'approveRequirementProtocol', 'rejectRequirementProtocol',
   // /grant 下拉的数据源与授权入口（客户端 popupSelect 调用）。
@@ -2229,8 +2291,22 @@ export default {
      */
     function stageCommandSetFor(workflowId, stateId) {
       const key = `${workflowId}.${stateId}`;
-      // 允许用户在 projects 的 state store 里覆盖同名 Set（未来扩展点）；
-      // 当前以内置为准，缺省返回空集。
+      // 用户覆盖优先（设置-限制页「阶段命令 Set」表编辑，存 state store），缺省回退内置。
+      try {
+        const store = loadStateStore();
+        const overrides = normalizeStageCommandSets(store && store.stageCommandSets);
+        if (overrides[key]) {
+          const base = BUILTIN_STAGE_COMMAND_SETS[key] || {};
+          return {
+            id: key,
+            label: overrides[key].label || base.label || key,
+            initialCommands: [...overrides[key].initialCommands],
+            builtin: false,
+          };
+        }
+      } catch (_e) {
+        // 读不到覆盖则回退内置
+      }
       const builtin = BUILTIN_STAGE_COMMAND_SETS[key] || null;
       return builtin ? { ...builtin, builtin: true } : null;
     }
@@ -2241,11 +2317,13 @@ export default {
      * 命令来源（合并去重，初始在前）：
      *  1. 阶段命令 Set（stageCommandSetFor）的 initialCommands —— checklist-2 抽象；
      *  2. 阶段引用限制套件的 initialCommands（兼容用户在 Set 里自定义）；
-     *  3. Universal 命令（限制套件 universalCommands，默认 todo_write / submit_state）。
+     *  3. Universal 命令：限制套件显式声明非空则覆盖，否则用全局默认值
+     *     （设置-工作流页编辑，见 globalUniversalCommands）。
      */
     function stageInjectedCommands(state, workflowId, stateId, stateDef) {
       const set = resolveStateRestriction(state, workflowId, stateId, stateDef);
-      const { initial, universal } = restrictionInjectedCommands(set);
+      const { initial } = restrictionInjectedCommands(set);
+      const universal = universalCommandsForStage(state, workflowId, stateId, stateDef);
       const stageSet = stageCommandSetFor(workflowId, stateId);
       const stageInitial = stageSet && Array.isArray(stageSet.initialCommands) ? stageSet.initialCommands : [];
       const out = [];
@@ -2259,13 +2337,29 @@ export default {
     }
 
     /**
-     * Universal 命令的「每阶段兜底」集合：即使阶段没有引用任何限制套件，
-     * 也要注入默认的 universalCommands（todo_write / submit_state）。
+     * 全局 Universal 默认值（设置-工作流页「Universal 注入命令」区编辑，
+     * 对所有工作流所有 state 生效）。读不到时回退内置默认。
+     */
+    function globalUniversalCommands() {
+      try {
+        const store = loadStateStore();
+        return normalizeUniversalCommands(store.universalCommands);
+      } catch (_e) {
+        return [...DEFAULT_UNIVERSAL_COMMANDS];
+      }
+    }
+
+    /**
+     * Universal 命令的「每阶段兜底」集合：限制套件显式声明了非空
+     * universalCommands 则覆盖全局，否则继承全局默认值。
      */
     function universalCommandsForStage(state, workflowId, stateId, stateDef) {
       const set = resolveStateRestriction(state, workflowId, stateId, stateDef);
-      if (set) return restrictionInjectedCommands(set).universal;
-      return [...DEFAULT_UNIVERSAL_COMMANDS];
+      if (set) {
+        const scoped = restrictionInjectedCommands(set).universal;
+        if (scoped.length > 0) return scoped;
+      }
+      return globalUniversalCommands();
     }
 
     /**
@@ -2299,15 +2393,9 @@ export default {
     async function injectModeGateContext(agent, reason) {
       if (!agent || typeof agent.inject !== 'function') return false;
       try {
-        const delivered = await modeGateContextDelivered(agent);
-        if (agent.session && agent.session.id !== undefined) {
-          policyDeliveredByContext.set(policySessionKey(agent), delivered === true);
-        }
-        if (delivered) return false;
+        if (await modeGateContextDelivered(agent)) return false;
         const text = buildModeGatePolicyText(agent);
         if (!text) return false;
-        // 状态激活时立刻投递一份，保证「紧随其后的第一步」也有政策
-        // （典型场景：feature 选择提交后 followup 唤醒，此前没有步可跑续投）。
         agent.inject(createUserMessage({
           content: [{ type: 'text', text }],
           source: {
@@ -2317,120 +2405,11 @@ export default {
             summary: `mode-gate 阶段上下文（${reason || 'state'}）`,
           },
         }));
-        // 记成「已经给下一步备好」；下一步的 pre-step 会先消费再按需续投。
-        policyStampBySession.set(policySessionKey(agent), { sig: policySignature(agent), pending: true });
         return true;
       } catch (err) {
         log(`mode-gate 阶段上下文注入失败：${(err && err.message) || err}`);
         return false;
       }
-    }
-
-    // ── 每步政策续投（修复「create 初始阶段 prompt 丢失」）─────────────────
-    // 背景：宿主 preset（anchored-architect 等）用 complete persona +
-    // includeRuntimeContext:false，装配时 `contexts` 恒为空；且其 context-gate 会
-    // 剥离未晋升轮次里 pre-step 追加的消息。于是本插件的
-    // `SystemPrompt.context('mode-gate:policy')` 永远不会进入 system prompt，
-    // 而一次性 `agent.inject()` 只被紧邻的下一步 claim 一次——之后每一轮都看不到
-    // 政策（阶段说明 / 目标 / checklist / 初始命令全部丢失），这正是用户报告的
-    // 「初始使用 create 工作流，prompt 会丢掉」。
-    //
-    // 修法：在每一步结束时幂等续投一份政策到 `next-step`。`next-step` 属于下一步
-    // 的 claim 批次，天然豁免 context-gate 的「非 claim 消息剥离」。用状态签名去重：
-    // 签名不变时也保证「恰好下一步一份」（上一份已被当前步 claim 掉），既不堆叠、
-    // 也不会断供。
-    const policyStampBySession = new Map();
-
-    // 是否由 SystemPrompt.context 正规通道投递（可用的模型路由）：为 true 时
-    // 无需每步续投，避免重复堆叠。由 injectModeGateContext 在激活时异步探测后写入；
-    // 探不到（preset 抑制 contexts）则维持 false，走每步续投。
-    const policyDeliveredByContext = new Map();
-
-    function policySessionKey(agent) {
-      const id = agent && agent.session && agent.session.id;
-      return id === undefined || id === null ? '' : String(id);
-    }
-
-    function policySignature(agent) {
-      try {
-        const state = readState(agent);
-        const registry = registryFor(agent);
-        const stateDef = registry.stateOf(state.workflowId, state.phase);
-        const injected = stageInjectedCommands(state, state.workflowId, state.phase, stateDef);
-        const goal = state.goal || {};
-        const dynamic = state.dynamicPlan && Array.isArray(state.dynamicPlan.items) ? state.dynamicPlan.items : [];
-        const staticPlan = state.staticPlan && Array.isArray(state.staticPlan.items) ? state.staticPlan.items : [];
-        return JSON.stringify([
-          state.workflowId,
-          state.phase,
-          goal.status === 'active' ? (goal.prompt || '') : '',
-          goal.ref || null,
-          goal.status || null,
-          state.pendingProtocol ? state.pendingProtocol.status : null,
-          staticPlan.map((it) => `${it.status}:${it.id}`),
-          dynamic.map((it) => `${it.status}:${it.content}`),
-          injected,
-        ]);
-      } catch (_e) {
-        return '';
-      }
-    }
-
-    /**
-     * 保证「下一步」的 claim 批次里有一份最新政策。
-     *
-     * 调用点在 `agent/pre-step`：此时当前步**已经**把上一步投递的政策 claim 掉了
-     * （claim 先于 waterfall），所以这里再投一份就是「每步恰好一份」。用
-     * `pending` 标记防止同一步内重复调用导致堆叠；签名变化时立即用新政策替换
-     * 待取的那一份（旧的那份若还在 next-step 里则会被下一步一起 claim，但由于
-     * 政策文本总是「当前状态」的快照，重复一份只是冗余不会错误）。
-     */
-    function ensurePolicyInStep(agent) {
-      if (!agent || typeof agent.inject !== 'function' || !agent.session || agent.session.id === undefined) return false;
-      // 正规通道（SystemPrompt.context）已投递的模型路由：无需续投，避免重复堆叠。
-      if (policyDeliveredByContext.get(policySessionKey(agent)) === true) return false;
-      // IDLE（未进入任何工作流）无需阶段政策：不续投，避免污染。
-      try {
-        const probe = readState(agent);
-        if (!probe.workflowId || probe.workflowId === 'IDLE') return false;
-      } catch (_e) {
-        return false;
-      }
-      const key = policySessionKey(agent);
-      const sig = policySignature(agent);
-      if (!sig) return false;
-      const stamp = policyStampBySession.get(key);
-      if (stamp && stamp.sig === sig && stamp.pending) return false;
-      let text;
-      try {
-        text = buildModeGatePolicyText(agent);
-      } catch (_e) {
-        return false;
-      }
-      if (!text) return false;
-      try {
-        agent.inject(createUserMessage({
-          content: [{ type: 'text', text }],
-          source: {
-            kind: 'plugin',
-            plugin: 'mode-gate',
-            form: 'notice',
-            summary: 'mode-gate 阶段上下文（续投）',
-          },
-        }));
-        policyStampBySession.set(key, { sig, pending: true });
-        return true;
-      } catch (err) {
-        log(`mode-gate 政策续投失败：${(err && err.message) || err}`);
-        return false;
-      }
-    }
-
-    /** 当前步 claim 之后，标记待取政策已被消费，允许下一步续投。 */
-    function markPolicyConsumed(agent) {
-      const key = policySessionKey(agent);
-      const stamp = policyStampBySession.get(key);
-      if (stamp && stamp.pending) policyStampBySession.set(key, { ...stamp, pending: false });
     }
 
     // ── tools ────────────────────────────────────────────────────────────
@@ -3925,19 +3904,18 @@ export default {
         if (state.workflowId === 'create' && state.phase === 'INIT') {
           return { kind: 'reject' };
         }
+        // 需求协议禁言闸门（对标 INIT 闸门）：协议提交待确认期间 agent 完全禁言。
+        // 不限工作流：pendingProtocol.status === 'awaiting_user' 本身即是条件。
+        // 接受走 UI（Remote approve，不经过 agent）；拒绝走发消息（见下方
+        // agent/inbox/spliced 分支：禁言后 user/message 不再产生，在那里触发拒绝）。
+        if (state.pendingProtocol && state.pendingProtocol.status === 'awaiting_user') {
+          return { kind: 'reject' };
+        }
       } catch (err) {
         log(`INIT 禁言判定失败：${(err && err.message) || err}`);
       }
-      // 每一步续投政策：preset 的 context-gate 会剥离 system-prompt contexts 与
-      // pre-step 追加消息，只有 claim 批次能穿过；把政策塞进 next-step 即可让
-      // 「下一步」始终携带最新阶段政策（阶段说明 / 目标 / checklist / 初始命令）。
-      // pre-step 的 claim 已把上一步投递的那份取走，故这里标记消费后再投一份。
-      try {
-        markPolicyConsumed(agent);
-        ensurePolicyInStep(agent);
-      } catch (err) {
-        log(`mode-gate 政策续投失败：${(err && err.message) || err}`);
-      }
+      // 政策只在阶段激活时注入一次（activateStateGoal / agent 创建恢复），
+      // 步里不再补投：全量政策塞进每一步 token 开销太大。
       return next();
     });
 
@@ -3975,14 +3953,26 @@ export default {
           if (!source || source.kind !== 'user') return;
           captureUserText(sessionId, extractUserText(event), source);
         } else if (event.type === 'agent/inbox/spliced') {
-          // INIT 禁言路径：用户消息被 pre-step reject 拦下、从 inbox 移除，不会产生
+          // INIT / 协议禁言路径：用户消息被 pre-step reject 拦下、从 inbox 移除，不会产生
           // user/message 事件；不在这里捞，需求分解阶段就读不到「用户原话」。
           const data = event.data && typeof event.data === 'object' ? event.data : {};
           if (data.target !== 'next-turn' || !Array.isArray(data.inserted)) return;
+          let sawUserMessage = false;
           for (const item of data.inserted) {
             const source = item && item.source;
             if (!source || source.kind !== 'user') continue;
             captureUserText(sessionId, extractUserText({ data: item }), source);
+            sawUserMessage = true;
+          }
+          // 禁言后 user/message 事件不再产生：等待确认期间用户发消息，
+          // 在这里视为拒绝待确认协议（与 user/message 分支同语义），回到 RR 继续改需求。
+          if (sawUserMessage) {
+            const entry = readSessionEntry(sessionId);
+            if (entry && entry.pendingProtocol) {
+              rejectPendingProtocol(sessionId)
+                .then((result) => log(`禁言期间用户发送消息，已拒绝待确认需求协议：${sessionId} -> ${result && result.workflowId}/${result && result.phase}`))
+                .catch((err) => log(`拒绝待确认需求协议失败：${(err && err.message) || err}`));
+            }
           }
           return;
         } else if (event.type === 'request/context') {
@@ -4030,12 +4020,12 @@ export default {
           const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
           provisionStageTools(agent, goalRef ? visibleToolsForGoal(goalRef) : []);
         } catch (_e) { /* 供给失败不阻塞创建，沿用手动解锁路径 */ }
-        // 恢复/中途接入的会话：立刻备好一份政策，并让后续每一步续投。
+        // 恢复/中途接入的会话：立刻备好一份政策（阶段激活时的一次性注入）。
         try {
           if (readState(agent).workflowId && readState(agent).workflowId !== 'IDLE') {
             void injectModeGateContext(agent, 'agentCreated');
           }
-        } catch (_e) { /* 政策预投失败不阻塞创建，pre-step 续投会兜底 */ }
+        } catch (_e) { /* 政策预投失败不阻塞创建 */ }
         const agentCtx = agent && agent.ctx;
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
