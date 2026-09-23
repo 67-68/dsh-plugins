@@ -53,6 +53,8 @@ import {
 import {
   ALWAYS_ALLOWED,
   KNOWN_WRITE_TOOLS,
+  grantedToolsOutsideOf,
+  isToolGranted,
   stageExplicitlyGrants,
   toolDisposition,
 } from './permissions.js';
@@ -138,6 +140,40 @@ function isFeatureIntentDirectWrite(name, args, dir) {
   }
   if (!KNOWN_WRITE_TOOLS.has(name) && name !== 'str_replace_editor') return false;
   return pathLikeArgs(args).some((p) => p.includes(dir));
+}
+
+/**
+ * mode-gate 的**单点授权豁免判断**：工具是否被用户通过 /grant 显式解锁。
+ *
+ * 这是「用户授权优先于一切 mode-gate 规则」的唯一落点。所有门禁分支（阶段
+ * tools 白名单、goal allowedTools、STAGE_GRANTED_TOOLS、restriction denyTools、
+ * 自行解锁锁定、bash 策略、写保护、feature_intent 直写保护）在拒绝之前都必须
+ * 先问这里一次；命中即放行到 next()，不再由 mode-gate 施加任何限制。
+ *
+ * 之所以集中成一处，是因为以前每处各写一份判断，语义会漂移，也会漏掉某个
+ * 分支（例如「当前阶段禁止自行解锁新工具」这类单独锁定最容易成为漏网之鱼）。
+ *
+ * @param {object} state - readState(agent) 的结果。
+ * @param {string} name - 工具名。
+ * @returns {boolean} 是否应跳过 mode-gate 的全部限制。
+ */
+function grantBypass(state, name) {
+  try {
+    return isToolGranted(state && state.grantedTools, name);
+  } catch (_err) {
+    return false;
+  }
+}
+
+/** 当前授权的工具名列表（已归一化、去重）。 */
+function grantedToolsOf(state) {
+  try {
+    return Array.isArray(state && state.grantedTools)
+      ? [...new Set(state.grantedTools.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim()))]
+      : [];
+  } catch (_err) {
+    return [];
+  }
 }
 
 function workspaceOf(agent, fallback) {
@@ -327,6 +363,33 @@ class ModeGateGateway extends TypertRemoteService {
     }
     const activated = await this.options.activateStateGoal(agent, workflowId, start);
     return { ok: true, workflowId, state: start, ...(activated && activated.prompt ? { prompt: activated.prompt } : {}) };
+  }
+  /**
+   * /grant 下拉的数据源：列出当前会话可授权的工具及已授权集合。
+   * 走 Remote 是因为下拉选项必须由客户端在打开面板时拉取（见 client.js）。
+   */
+  async getGrantableTools(args) {
+    const sessionId = args && args.sessionId;
+    const agent = (this.options.getAgent ? this.options.getAgent(sessionId) : null)
+      || { session: { id: sessionId, header: { cwd: readSessionEntry(sessionId).workspace } } };
+    const tools = typeof this.options.listGrantableTools === 'function'
+      ? this.options.listGrantableTools(agent)
+      : [];
+    const granted = typeof this.options.grantedToolsFor === 'function'
+      ? this.options.grantedToolsFor(agent)
+      : [];
+    return { ok: true, tools, granted };
+  }
+  /** 客户端下拉选中后调用：把工具授权给该会话。 */
+  async grantTool(args) {
+    const sessionId = args && args.sessionId;
+    const names = args && args.tools;
+    const agent = (this.options.getAgent ? this.options.getAgent(sessionId) : null)
+      || { session: { id: sessionId, header: { cwd: readSessionEntry(sessionId).workspace } } };
+    if (typeof this.options.grantTools !== 'function') {
+      return { ok: false, error: 'mode-gate 尚未初始化 grantTools' };
+    }
+    return this.options.grantTools(agent, names, { allowUnknown: false });
   }
   async getBashDenyList() {
     return { entries: readBashDenyList() };
@@ -596,6 +659,8 @@ markRemoteMethods(ModeGateGateway, [
   'getRestrictions', 'getRestriction', 'setRestriction', 'deleteRestriction',
   'getWorkflowSettings', 'setWorkflowOverride', 'setStageOverride',
   'approveRequirementProtocol', 'rejectRequirementProtocol',
+  // /grant 下拉的数据源与授权入口（客户端 popupSelect 调用）。
+  'getGrantableTools', 'grantTool',
 ]);
 
 export default {
@@ -801,6 +866,112 @@ export default {
 
     function registryFor(agent) {
       return registryForWorkspace(workspaceOf(agent, defaultWorkspace));
+    }
+
+    // ── /grant：用户显式授权工具（mode-gate 的单点豁免入口） ────────────────
+    //
+    // 语义：用户点名 → mode-gate 全面让路。授权写进会话级 state.grantedTools，
+    // 跨阶段保留；pre-execute 的每一处拒绝分支都先问 grantBypass，命中即
+    // `next()`。这里只负责写状态与补 scope 供给，判断逻辑统一在 permissions.js。
+
+    /** 列出当前会话可见的工具目录（含已解锁 / 未解锁标记），供 /grant 下拉与文本列表复用。 */
+    function listGrantableTools(agent) {
+      const out = [];
+      const seen = new Set();
+      try {
+        const schemas = ctx.tools.schemas(agent) || [];
+        for (const schema of schemas) {
+          const name = schema && typeof schema.name === 'string' ? schema.name : '';
+          if (!name || seen.has(name)) continue;
+          seen.add(name);
+          out.push({
+            name,
+            description: String((schema && schema.description) || '').split('\n')[0].slice(0, 160),
+          });
+        }
+      } catch (err) {
+        log(`读取工具目录失败：${(err && err.message) || err}`);
+      }
+      out.sort((a, b) => a.name.localeCompare(b.name));
+      return out;
+    }
+
+    /**
+     * 授权一个（或多个）工具给指定会话。
+     * @returns {{ ok: boolean, granted?: string[], error?: string }}
+     */
+    function grantTools(agent, names, options) {
+      const opts = options && typeof options === 'object' ? options : {};
+      const requested = (Array.isArray(names) ? names : [names])
+        .map((n) => (typeof n === 'string' ? n.trim() : ''))
+        .filter(Boolean);
+      if (requested.length === 0) return { ok: false, error: '请提供要授权的工具名。' };
+      const state = readState(agent);
+      const catalog = new Map(listGrantableTools(agent).map((t) => [t.name, t]));
+      const unknown = requested.filter((n) => !catalog.has(n) && !opts.allowUnknown);
+      if (unknown.length > 0) {
+        return { ok: false, error: `工具不存在：${unknown.join('、')}。可用 /grant 不带参数查看全部工具。` };
+      }
+      const next = [...new Set([...grantedToolsOf(state), ...requested])];
+      writeState(agent, { grantedTools: next });
+      // 立即重算 scope：授权工具必须当轮就可见，不能等下一次状态切换。
+      try {
+        const registry = registryFor(agent);
+        const stateDef = registry.stateOf(state.workflowId, state.phase);
+        const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
+        provisionStageTools(agent, goalRef ? visibleToolsForGoal(goalRef) : []);
+      } catch (err) {
+        log(`授权后补供 scope 失败（授权已写入，仍会生效）：${(err && err.message) || err}`);
+      }
+      return { ok: true, granted: next };
+    }
+
+    /** 撤销授权。`name` 为空表示清空全部授权。 */
+    function revokeTools(agent, names) {
+      const state = readState(agent);
+      const current = grantedToolsOf(state);
+      const requested = (Array.isArray(names) ? names : [names])
+        .map((n) => (typeof n === 'string' ? n.trim() : ''))
+        .filter(Boolean);
+      const next = requested.length === 0 ? [] : current.filter((n) => !requested.includes(n));
+      writeState(agent, { grantedTools: next });
+      try {
+        const registry = registryFor(agent);
+        const stateDef = registry.stateOf(state.workflowId, state.phase);
+        const goalRef = stateDef && stateDef.goal && stateDef.goal.ref;
+        provisionStageTools(agent, goalRef ? visibleToolsForGoal(goalRef) : []);
+      } catch (err) {
+        log(`撤销后重算 scope 失败：${(err && err.message) || err}`);
+      }
+      return { ok: true, granted: next };
+    }
+
+    /** `/grant` 的文本回显：无参数列目录，有参数走授权。 */
+    function formatGrantResult(agent, rawInput) {
+      const input = typeof rawInput === 'string' ? rawInput.trim() : '';
+      const state = readState(agent);
+      const granted = grantedToolsOf(state);
+      if (!input) {
+        const tools = listGrantableTools(agent);
+        if (tools.length === 0) return '当前会话没有可授权的工具。';
+        const lines = tools.map((t) => `${granted.includes(t.name) ? '●' : '○'} ${t.name}${t.description ? ` — ${t.description}` : ''}`);
+        return [
+          `可授权工具（共 ${tools.length} 个，● = 已授权）：`,
+          ...lines,
+          '',
+          '授权：/grant <工具名>（可空格分隔多个）；撤销：/grant --revoke <工具名>；清空：/grant --revoke',
+        ].join('\n');
+      }
+      const tokens = input.split(/\s+/).filter(Boolean);
+      if (tokens[0] === '--revoke' || tokens[0] === '-r') {
+        const result = revokeTools(agent, tokens.slice(1));
+        return result.granted.length === 0
+          ? '已清空全部工具授权。'
+          : `已撤销。当前已授权工具：${result.granted.join('、')}。`;
+      }
+      const result = grantTools(agent, tokens);
+      if (!result.ok) return `授权失败：${result.error}`;
+      return `已授权：${tokens.join('、')}。此授权优先于 mode-gate 的一切限制（阶段工具白名单、目标可见集、限制套件、bash 策略等），并已立即对模型可见。\n当前已授权工具：${result.granted.join('、')}。`;
     }
 
     // ── preset actions ───────────────────────────────────────────────────
@@ -2125,7 +2296,15 @@ export default {
         }
       };
       clearScopedTools(agent);
-      const list = Array.isArray(toolNames) ? toolNames : [];
+      // 单点叠加：无论调用方给的是什么可见集，用户 /grant 解锁的工具一律并入
+      // scope（grantedToolsOutsideOf 顺带剔除重复项）。这样每个状态——含 INIT /
+      // IDLE / 无 goal 状态——都自动带上授权工具，不必逐个调用点去补。
+      const base = Array.isArray(toolNames) ? toolNames : [];
+      let stateGranted = [];
+      try {
+        stateGranted = grantedToolsOutsideOf(readState(agent)?.grantedTools, base);
+      } catch (_e) { /* 读不到状态则视为无授权 */ }
+      const list = [...base, ...stateGranted];
       if (!list.length) {
         finishProbe({});
         return true;
@@ -2763,7 +2942,8 @@ export default {
         // 压缩只在显式授予 compress_context 的阶段执行，'*' 不算授予。
         const stateDef = registryFor(agent).stateOf(state.workflowId, state.phase);
         const grantedTools = stateDef && stateDef.permissions ? stateDef.permissions.tools : undefined;
-        if (!stageExplicitlyGrants(grantedTools, 'compress_context')) {
+        // 与 pre-execute 同一份判断：/grant 过的 compress_context 不受阶段显式授予约束。
+        if (!stageExplicitlyGrants(grantedTools, 'compress_context') && !grantBypass(state, 'compress_context')) {
           throw new Error(
             `compress_context 只在显式授予它的阶段可用（当前 ${state.workflowId}/${state.phase}）。`
             + '需要压缩时请先调用 goto_accumulation 进入 ACCUMULATION，或由用户使用 /accumulation-and-init。',
@@ -3270,7 +3450,24 @@ export default {
           }
         },
       });
-      log('手动沉淀 / 命令已注册：/goto-accumulation、/accumulation-and-init、/skip-mode、/init');
+      // /grant：把工具授权给 agent。不带参数时列出全部可用工具（客户端会把这个
+      // 命令挂成下拉选择列表，见 client.js 的 commandUi contribution）。
+      // 这是 mode-gate 的**单点豁免入口**：被授权的工具在 pre-execute 的每一处
+      // 拒绝分支上都会先命中 grantBypass 而直接放行。
+      commandCtx.commands.register({
+        name: 'grant',
+        description: '把工具授权给 agent：不带参数列出所有可用工具，带工具名则解锁该工具（授权优先于 mode-gate 的一切限制）',
+        input: { hint: '<工具名> [更多工具名…] | --revoke [工具名]' },
+        recordInput: false,
+        handler: async ({ agent, rawInput }) => {
+          try {
+            return { kind: 'success', text: formatGrantResult(agent, rawInput) };
+          } catch (err) {
+            return { kind: 'error', text: (err && err.message) || String(err) };
+          }
+        },
+      });
+      log('手动沉淀 / 命令已注册：/goto-accumulation、/accumulation-and-init、/skip-mode、/init、/grant');
     });
 
 
@@ -3283,7 +3480,9 @@ export default {
       // submit_state / switch_mode 不受影响，agent 仍可推进阶段。
       if (name === 'dev_tool_search' || name === 'request_extra') {
         try {
-          if (exec.agent && goalEngine.unlockLocked(readState(exec.agent))) {
+          const unlockState = exec.agent ? readState(exec.agent) : null;
+          // 单独锁定同样受 /grant 豁免：用户显式授权过的解禁工具不再被阶段锁定。
+          if (unlockState && goalEngine.unlockLocked(unlockState) && !grantBypass(unlockState, name)) {
             return Promise.resolve({
               kind: 'deny',
               reason: '当前阶段禁止自行解锁新工具，请专心分解需求；完成后调用 submit_state 推进。',
@@ -3320,7 +3519,7 @@ export default {
       const registry = registryFor(agent);
       const stateDef = registry.stateOf(state.workflowId, state.phase);
 
-      if (isFeatureIntentDirectWrite(name, exec.arguments, storesFor(agent).dir)) {
+      if (isFeatureIntentDirectWrite(name, exec.arguments, storesFor(agent).dir) && !grantBypass(state, name)) {
         return Promise.resolve({
           kind: 'deny',
           reason: 'feature_intent 文件禁止直接修改。请使用 update_feature_intent 工具在文件末尾追加记录。',
@@ -3335,19 +3534,19 @@ export default {
       // declare_target 机制已移除：不再要求先声明 Target，工具调用不再因此被拦截。
       // state 引用的限制套件：工具 / skill / 命令三层强制执行。
       const restrictionSet = resolveStateRestriction(state, state.workflowId, state.phase, stateDef);
-      if (restrictionSet && isToolDeniedByRestriction(restrictionSet, name)) {
+      if (restrictionSet && isToolDeniedByRestriction(restrictionSet, name) && !grantBypass(state, name)) {
         return Promise.resolve({ kind: 'deny', reason: `当前阶段引用的限制「${restrictionSet.label || restrictionSet.id}」禁止使用工具 ${name}。` });
       }
       if (restrictionSet && (name === 'skill_load' || name === 'skill')) {
         const requestedSkill = exec.arguments && typeof exec.arguments.name === 'string' ? exec.arguments.name : '';
-        if (requestedSkill && isSkillDeniedByRestriction(restrictionSet, requestedSkill)) {
+        if (requestedSkill && isSkillDeniedByRestriction(restrictionSet, requestedSkill) && !grantBypass(state, name)) {
           return Promise.resolve({ kind: 'deny', reason: `当前阶段引用的限制「${restrictionSet.label || restrictionSet.id}」禁止使用 skill "${requestedSkill}"。` });
         }
       }
       const activeGoalDef = goalEngine.defFor(state);
       if (state.goal && state.goal.status === 'active' && activeGoalDef) {
         const allowed = goalEngine.allowedToolSet(activeGoalDef);
-        if (!allowed.has(name)) {
+        if (!allowed.has(name) && !grantBypass(state, name)) {
           return Promise.resolve({
             kind: 'deny',
             reason: `当前目标 "${activeGoalDef.id}" 进行中，只允许：${[...allowed].join(', ')}。${name} 不在其中；请先完成当前目标或调用 submit_state。`,
@@ -3356,6 +3555,9 @@ export default {
       }
 
       if (name === 'bash' || name === 'pwsh') {
+        // 用户 /grant bash 即视为对该工具整体放行：命令黑名单与阶段 bash 策略
+        // 都不再由 mode-gate 施加（安全边界交回用户/宿主）。
+        if (grantBypass(state, name)) return next();
         const command = String((exec.arguments && exec.arguments.command) || '');
         if (restrictionSet) {
           const hit = matchRestrictionDenyCommand(restrictionSet, command);
@@ -3368,11 +3570,15 @@ export default {
       }
 
       // declare_target 机制已移除：skill 不再受声明白名单限制。
+      // 单点授权豁免：用户 /grant 过的工具直接放行，连 toolDisposition（阶段
+      // tools 白名单 + STAGE_GRANTED_TOOLS 压缩/累积保护）也不再施加。
+      if (grantBypass(state, name)) return next();
       const decision = toolDisposition(name, stateDef.permissions || {}, `${state.workflowId}/${state.phase}`);
       if (decision.kind === 'deny') return Promise.resolve(decision);
 
       if (name === 'str_replace_editor' && stateDef.permissions && stateDef.permissions.write === false) {
         if (exec.arguments && exec.arguments.command === 'view') return next();
+        if (grantBypass(state, name)) return next();
         return Promise.resolve({ kind: 'deny', reason: `当前状态 ${state.phase} 禁止写工具 str_replace_editor。` });
       }
 
@@ -3615,6 +3821,9 @@ export default {
       goalEngine,
       buildAutoGuide,
       restrictions,
+      listGrantableTools,
+      grantedToolsFor: (agent) => grantedToolsOf(readState(agent)),
+      grantTools,
       treeForSession,
       layoutForSession,
       recordFeatureTreeProbe,

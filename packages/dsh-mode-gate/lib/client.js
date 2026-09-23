@@ -1698,6 +1698,8 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("setStageOverride", "SetStageOverrideResult"),
 				remoteArgsDescriptor("approveRequirementProtocol", "ApproveRequirementProtocolResult"),
 				remoteArgsDescriptor("rejectRequirementProtocol", "RejectRequirementProtocolResult"),
+				remoteArgsDescriptor("getGrantableTools", "GetGrantableToolsResult"),
+				remoteArgsDescriptor("grantTool", "GrantToolResult"),
 			],
 		};
 
@@ -2747,7 +2749,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 		}
 
 		const NS = "settings.modeGate";
-		const inject = ["slots", "locale", "sessions", "remote"];
+		// commandUi 是 /grant 下拉的挂载点：宿主命令（lib/index.js 的
+		// commands.register）负责文本执行，客户端 decorate 负责把它变成选择列表。
+		const inject = ["slots", "locale", "sessions", "remote", "commandUi"];
 
 		async function apply(ctx) {
 			console.log("[dsh-mode-gate] client apply start");
@@ -2760,6 +2764,48 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				if (modeGate === undefined) throw new Error("remote.modeGate service is not mounted");
 				return modeGate;
 			};
+
+			// ── /grant 下拉 ──────────────────────────────────────────────────
+			// 宿主已用 commands.register 注册 /grant（文本入口）。这里再用
+			// commandUi.decorate（**不是** register——同名 register 会抛
+			// "collides with a host command"）给它挂一个 popupSelect：
+			//   · 打开面板 → getGrantableTools 拉全量工具目录（已授权项高亮）
+			//   · 选中 → grantTool → 走宿主同一条授权路径，立即生效
+			ctx.effect(() => {
+				const commandUi = ctx.get("commandUi");
+				if (commandUi === undefined) {
+					console.log("[dsh-mode-gate] commandUi 不可用，/grant 仅保留文本入口");
+					return () => {};
+				}
+				if (typeof commandUi.decorate !== "function") {
+					console.log("[dsh-mode-gate] commandUi.decorate 不可用，/grant 仅保留文本入口");
+					return () => {};
+				}
+				return commandUi.decorate({
+					name: "grant",
+					available: () => true,
+					ui: {
+						kind: "popupSelect",
+						options: async (session) => {
+							const sessionId = session && session.sessionId;
+							const result = await api().getGrantableTools({ sessionId });
+							if (!result || result.ok !== true) throw new Error((result && result.error) || "无法读取工具目录");
+							const granted = new Set(Array.isArray(result.granted) ? result.granted : []);
+							return (Array.isArray(result.tools) ? result.tools : []).map((tool) => ({
+								id: tool.name,
+								label: tool.name,
+								...(tool.description ? { detail: tool.description } : {}),
+								...(granted.has(tool.name) ? { active: true } : {}),
+							}));
+						},
+						onSelect: async (option, session) => {
+							const sessionId = session && session.sessionId;
+							const result = await api().grantTool({ sessionId, tools: [option.id] });
+							if (!result || result.ok !== true) throw new Error((result && result.error) || "授权失败");
+						},
+					},
+				});
+			}, "dsh-mode-gate: /grant popup");
 
 			ctx.slots.inject("settings.section", () => ctx.slots.register({
 				name: "settings.section",

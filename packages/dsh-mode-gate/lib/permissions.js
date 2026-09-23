@@ -54,6 +54,62 @@ export function stageExplicitlyGrants(tools, name) {
   return tools.some((entry) => String(entry) === String(name));
 }
 
+/**
+ * 用户显式授权（/grant）的单点判断。
+ *
+ * 这是 mode-gate 里**唯一**的授权豁免入口：granted 集合命中时，所有门禁分支
+ * （阶段 tools 白名单 / goal allowedTools / STAGE_GRANTED_TOOLS / restriction
+ * denyTools / 自行解锁锁定 / bash 策略 / 写保护）一律放行到 `next()`，不再由
+ * mode-gate 施加任何限制。之所以集中成一处，是为了避免各处各写一份
+ * `grantedTools.includes(...)` 后语义漂移。
+ *
+ * 归一化规则：两侧都 trim 后比较；支持 `<name>:view` 形态（解锁
+ * str_replace_editor 的 view 子命令等价于解锁该工具）。
+ *
+ * @param {string[]|undefined} grantedTools - state.grantedTools（会话级持久）。
+ * @param {string} name - 工具名。
+ * @returns {boolean} 是否已被用户显式授权。
+ */
+export function isToolGranted(grantedTools, name) {
+  const target = String(name == null ? '' : name).trim();
+  if (!target) return false;
+  if (!Array.isArray(grantedTools)) return false;
+  for (const entry of grantedTools) {
+    const value = String(entry == null ? '' : entry).trim();
+    if (!value) continue;
+    if (value === target) return true;
+    // 允许授权写成 `name:view` 这类子命令形态；取 `:` 前的工具名比对。
+    const head = value.includes(':') ? value.slice(0, value.indexOf(':')) : value;
+    if (head === target) return true;
+    if (value === `${target}:view`) return true;
+  }
+  return false;
+}
+
+/**
+ * 过滤出「用户已授权、但不在给定可见集里」的工具名（用于把它补进 scope 供给，
+ * 让模型真正看得见——看得见才调得动）。
+ *
+ * @param {string[]|undefined} grantedTools
+ * @param {Iterable<string>|undefined} visible - 当前阶段可见集。
+ * @returns {string[]} 需要额外供给的工具名。
+ */
+export function grantedToolsOutsideOf(grantedTools, visible) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(grantedTools) ? grantedTools : []) {
+    const value = String(raw == null ? '' : raw).trim();
+    if (!value) continue;
+    // `name:view` 形态授权的是子命令，工具本体仍是 `name`。
+    const name = value.includes(':') ? value.slice(0, value.indexOf(':')) : value;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    if (visible && new Set(visible).has(name)) continue;
+    out.push(name);
+  }
+  return out;
+}
+
 /** Tool names that are always classified as writes. */
 export const KNOWN_WRITE_TOOLS = new Set([
   'write', 'edit', 'create', 'apply_patch', 'patch', 'str_replace_editor',

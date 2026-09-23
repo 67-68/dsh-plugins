@@ -235,6 +235,12 @@ export function normalizeSessionEntry(entry) {
     target: source.target && typeof source.target === 'object' ? source.target : null,
     skills: Array.isArray(source.skills) ? source.skills.filter((s) => typeof s === 'string' && s.trim()) : [],
     bash: Array.isArray(source.bash) ? source.bash.filter((s) => typeof s === 'string' && s.trim()) : [],
+    // 用户通过 /grant 显式解锁的工具（会话级、跨阶段保留）。它优先于阶段
+    // permissions.tools 白名单与 goal.allowedTools：用户既然点名给了，就不再被
+    // mode-gate 拦下。白名单必须显式保留，否则下次 writeState 归一化会被静默丢掉。
+    grantedTools: Array.isArray(source.grantedTools)
+      ? [...new Set(source.grantedTools.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim()))]
+      : [],
     goal,
     staticPlan: source.staticPlan && typeof source.staticPlan === 'object' ? source.staticPlan : emptyStaticPlan(),
     dynamicPlan: source.dynamicPlan && typeof source.dynamicPlan === 'object'

@@ -59,7 +59,8 @@
  * post-promotion regression measured on the zero variant). Instead the
  * catalog narrows to the bootstrap tool pair PLUS the three discovery tools
  * (`dev_tool_search`, `skill_search`, `skill_load`) plus whatever the model
- * explicitly unlocked via `dev_tool_search`. Heavier Standard tools
+ * explicitly unlocked via `dev_tool_search`, PLUS whatever the user authorized
+ * with mode-gate's `/grant` (user intent outranks the narrowing). Heavier Standard tools
  * (web_search, subagent, workflow, …) are one `dev_tool_search` call away;
  * unlocked names are derived from durable `tool/call` events, so resume and
  * reload keep them. read/write/edit/glob/grep/todo/ask are deliberately NOT
@@ -100,6 +101,10 @@ export const name = 'anchored-tool-bootstrap'
  * assembly. The optional budget listener registers with `prepend: true` so a
  * later listener can never override the first-round cap after we set it.
  */
+import { readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 export const inject = []
 
 /** Durable session event types that count as a promotion signal per mode. */
@@ -211,6 +216,49 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Tool names the USER explicitly authorized for one session via mode-gate's
+   * `/grant` slash command.
+   *
+   * `/grant` writes `state.sessions[<id>].grantedTools` into mode-gate's
+   * durable state file (`~/.dsh/mode-gate-state.json`) — NOT into the session
+   * log, because the harness has no public API to append a synthetic
+   * `tool/call` block and faking one would break the call/result pairing
+   * invariants. This plugin therefore reads that file directly.
+   *
+   * USER INTENT OUTRANKS THE NARROWING: a granted name is merged into the
+   * keep-set exactly like a `dev_tool_search` unlock, so `/grant foo` makes
+   * `foo` visible from the next request on. A missing/unreadable file simply
+   * contributes nothing (the narrowing must never fail because mode-gate is
+   * not mounted).
+   *
+   * Read is mtime-cached: `/grant` can fire mid-session and the file is read
+   * at most once per change.
+   */
+  const MODE_GATE_STATE_FILE = join(homedir(), '.dsh', 'mode-gate-state.json')
+  let grantCache = { mtimeMs: -1, bySession: new Map() }
+  const grantedFor = (sessionId) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return new Set()
+    try {
+      const stat = statSync(MODE_GATE_STATE_FILE)
+      if (stat.mtimeMs !== grantCache.mtimeMs) {
+        const raw = JSON.parse(readFileSync(MODE_GATE_STATE_FILE, 'utf8'))
+        const sessions = raw && typeof raw.sessions === 'object' && raw.sessions !== null ? raw.sessions : {}
+        const bySession = new Map()
+        for (const [id, entry] of Object.entries(sessions)) {
+          const list = entry && Array.isArray(entry.grantedTools) ? entry.grantedTools : []
+          const names = list.filter((n) => typeof n === 'string' && n.length > 0)
+          if (names.length > 0) bySession.set(id, new Set(names))
+        }
+        grantCache = { mtimeMs: stat.mtimeMs, bySession }
+      }
+    } catch {
+      // Missing file / parse error / no permission: contribute nothing.
+      return new Set()
+    }
+    return grantCache.bySession.get(sessionId) ?? new Set()
+  }
+
+  /**
    * Tool names the model explicitly unlocked via `dev_tool_search` for one
    * session. Derived from durable `tool/call` events so resume/reload keeps
    * them. The event's `arguments` is the raw JSON string the model produced;
@@ -232,13 +280,24 @@ export function apply(ctx, config) {
       const names = args.toolNames
       if (Array.isArray(names)) for (const name of names) if (typeof name === 'string' && name.length > 0) unlocked.add(name)
     }
+    // User-authorized tools (/grant) join the same keep-set: the user asked
+    // for them explicitly, so the catalog narrowing must not hide them.
+    for (const name of grantedFor(session.id)) unlocked.add(name)
     return unlocked
   }
 
-  /** Narrow the assembled catalog to a keep-set; validate required names. */
-  const keepTools = (assembled, keep, missingAllowsFullCatalog) => {
+  /**
+   * Narrow the assembled catalog to a keep-set; validate required names.
+   *
+   * `dynamic` names (the gate escape hatch plus user `/grant` authorizations)
+   * are merged AFTER the missing check: they are intentionally outside the
+   * static phase list, so their absence must neither warn nor degrade — they
+   * simply match whatever happens to be assembled.
+   */
+  const keepTools = (assembled, keep, missingAllowsFullCatalog, dynamic) => {
     const available = new Set(assembled.tools.map((tool) => tool.name))
-    const missing = [...keep].filter((toolName) => !available.has(toolName))
+    const dynamicSet = dynamic instanceof Set ? dynamic : new Set()
+    const missing = [...keep].filter((toolName) => !available.has(toolName) && !dynamicSet.has(toolName))
     if (missing.length > 0) {
       warnOnce(
         `${name}: expected every phase tool; missing=${JSON.stringify(missing)} — `
@@ -250,7 +309,7 @@ export function apply(ctx, config) {
     // missing check so a gate tool that is absent (gate not mounted) neither
     // triggers the degrade above nor breaks the filter below — it just matches
     // nothing.
-    const keepPlusGate = new Set([...keep, ...GATE_CONTROL_TOOLS])
+    const keepPlusGate = new Set([...keep, ...GATE_CONTROL_TOOLS, ...dynamicSet])
     return {
       ...assembled,
       tools: assembled.tools.filter((tool) => keepPlusGate.has(tool.name)),
@@ -267,8 +326,11 @@ export function apply(ctx, config) {
         // discovery tools + whatever the model explicitly unlocked via
         // dev_tool_search — instead of dumping the whole Standard catalog at
         // once (the post-promotion regression fix; see the header note).
-        const keep = new Set([...bootstrapTools, ...RESIDENT_DISCOVERY_TOOLS, ...unlockedFor(context.agent?.session)])
-        return keepTools(assembled, keep, false)
+        // dev_tool_search unlocks and /grant authorizations are "dynamic":
+        // never validated against the phase list, only merged into the filter.
+        const unlocked = unlockedFor(context.agent?.session)
+        const keep = new Set([...bootstrapTools, ...RESIDENT_DISCOVERY_TOOLS])
+        return keepTools(assembled, keep, false, unlocked)
       }
       // Controlled phase: the bootstrap pair; after a compaction, plus the
       // compaction work set so mid-task work can continue. Context control is
@@ -277,7 +339,10 @@ export function apply(ctx, config) {
       const { boundary } = status
       const keep = new Set(bootstrapTools)
       if (boundary >= 0) for (const toolName of compactionTools) keep.add(toolName)
-      return keepTools(assembled, keep, true)
+      // A /grant issued before the first promotion signal must still be honoured
+      // (the user asked for the tool; the first-request anchor is a heuristic,
+      // not a veto over explicit user intent).
+      return keepTools(assembled, keep, true, grantedFor(context.agent?.session?.id))
     } catch (error) {
       // A filter bug must never brick a session: degrade to the full catalog.
       warnOnce(`${name}: bootstrap filter failed, exposing the full catalog: ${String((error && error.message) || error)}`)
