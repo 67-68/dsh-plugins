@@ -169,7 +169,7 @@ export function createBuiltinGoals() {
           base.push(
             '本轮为「注入 prompt」路线：用户直接选择了底层 feature intent。',
             `被选中的 feature intent（一个都不能少）：${intents}。`,
-            '1. 必须对上述每一个被选中的 feature intent 调用 update_feature_intent 写入记录，不允许遗漏任何一个；',
+            '1. 必须对上述每一个被选中的 feature intent 调用 update_feature_intent 写入记录，不允许遗漏任何一个；update_feature_intent 的 name 只接受末段裸文件名（不带目录）：如所选路径为 `某-overview/某-intent`，传 `某-intent` 即可；',
             '2. 每个 feature intent 都需要提供 understanding、user_visible_behavior、feature_intent 与 checklist；',
             '3. 调用 submit_requirement_protocol 提交协议（只能提交一次，但这一次可覆盖多个 feature intent）。',
           );

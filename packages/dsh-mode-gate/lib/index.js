@@ -143,6 +143,15 @@ function workspaceOf(agent, fallback) {
   return typeof cwd === 'string' && cwd.length > 0 ? cwd : fallback;
 }
 
+/**
+ * 归一化 feature intent 写入比对键：树选择用 `overview/intent` 两层逻辑路径，
+ * 而 update_feature_intent 只接受裸文件名。两侧统一取末段、去 `.md` 后缀，
+ * 避免 `mode-gate-overview/x` 与 `x` 对不上导致协议校验误杀。
+ */
+function intentWriteKey(value) {
+  return String(value == null ? '' : value).trim().replace(/\.md$/i, '').split('/').pop().trim();
+}
+
 /** Remote service exposing durable mode-gate state and settings payloads. */
 class ModeGateGateway extends TypertRemoteService {
   static inject = [];
@@ -1746,7 +1755,7 @@ export default {
           }
         }
       }
-      lines.push('', '要求：submit_requirement_protocol 提交前，必须对上述每一个被选 feature intent 都调用 update_feature_intent 写入记录，缺一不可；协议会校验，未全部修改将被拒绝。');
+      lines.push('', '要求：submit_requirement_protocol 提交前，必须对上述每一个被选 feature intent 都调用 update_feature_intent 写入记录，缺一不可；协议会校验，未全部修改将被拒绝。update_feature_intent 的 name 只接受末段裸文件名（不带目录）：如所选路径为 `某-overview/某-intent`，传 `某-intent` 即可。');
       try {
         agent.inject(createUserMessage({
           content: [{ type: 'text', text: lines.join('\n') }],
@@ -2346,7 +2355,7 @@ export default {
         if (agent) {
           const prev = readState(agent);
           const written = Array.isArray(prev.featureIntentWrites) ? prev.featureIntentWrites : [];
-          const path = typeof args.name === 'string' ? args.name.trim().replace(/\.md$/i, '') : '';
+          const path = intentWriteKey(args.name);
           if (path && !written.includes(path)) {
             writeState(agent, { featureIntentWrites: [...written, path] });
           }
@@ -3030,11 +3039,14 @@ export default {
         const before = readState(agent);
         const selection = before.featureSelection;
         if (selection && selection.route === 'inject' && Array.isArray(selection.items)) {
-          const written = new Set(Array.isArray(before.featureIntentWrites) ? before.featureIntentWrites : []);
+          // 兼容历史 state 里已存的裸文件名：两侧都归一化成末段键后再比对。
+          const written = new Set(
+            (Array.isArray(before.featureIntentWrites) ? before.featureIntentWrites : []).map(intentWriteKey),
+          );
           const missing = selection.items
             .filter((item) => item && item.type === 'intent')
             .map((item) => item.path)
-            .filter((path) => !written.has(path));
+            .filter((path) => !written.has(intentWriteKey(path)));
           if (missing.length > 0) {
             throw new Error(`以下被选 feature intent 尚未用 update_feature_intent 写入记录，一个都不能少：${missing.join('、')}。请逐个补写后再提交协议。`);
           }
