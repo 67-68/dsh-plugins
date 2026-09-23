@@ -99,8 +99,88 @@ export const BUILTIN_RESTRICTION_SETS = {
       'read_image', 'web_search',
     ],
     allowSkills: [],
+    // 不读代码只是「权限」；阶段专属命令由 BUILTIN_STAGE_COMMAND_SETS 承担，
+    // 因此这里不声明 initialCommands（否则会污染引用它的非 RR 阶段）。
     initialCommands: [],
     universalCommands: [...DEFAULT_UNIVERSAL_COMMANDS],
+  },
+};
+
+/**
+ * 按阶段抽象的「命令 Set」：每个阶段一套，声明该阶段启动即注入并优先放行的命令。
+ *
+ * 设计依据（Research 阶段产出的阶段×命令依赖表）：
+ *  - initialCommands = goal.requiredCalls + submitTool 中「阶段专属、不会自动可见」的命令；
+ *    阶段推进通用的 submit_state / switch_mode 由 ALWAYS_ALLOWED 兜底，不必重复声明。
+ *  - universalCommands = 每阶段都注入的 todo_write / submit_state（默认）。
+ *
+ * 这些 Set 都是纯「注入声明」，不带权限（mode/deny*），因此不会影响各阶段原有的
+ * tools 白名单；它们只保证「阶段开始就能看到并直接调用必需命令」，并在 tool-search
+ * 时被优先放行。key 采用 `<workflowId>.<stateId>` 形式，与 stageOverrides 对齐。
+ */
+export const BUILTIN_STAGE_COMMAND_SETS = {
+  // create
+  'create.REQUIREMENT_RECOGNITION': {
+    id: 'create.REQUIREMENT_RECOGNITION',
+    label: 'CREATE / 需求分解 命令',
+    initialCommands: ['update_feature_intent', 'update_feature_list', 'submit_requirement_protocol'],
+  },
+  'create.RESEARCH': {
+    id: 'create.RESEARCH',
+    label: 'CREATE / 研究 命令',
+    initialCommands: ['todo_write'],
+  },
+  'create.EXECUTE': {
+    id: 'create.EXECUTE',
+    label: 'CREATE / 执行 命令',
+    initialCommands: [],
+  },
+  'create.DEBUG': {
+    id: 'create.DEBUG',
+    label: 'CREATE / 调试 命令',
+    initialCommands: ['git_commit'],
+  },
+  'create.ACCUMULATION': {
+    id: 'create.ACCUMULATION',
+    label: 'CREATE / 沉淀 命令',
+    initialCommands: ['pattern_reason', 'pattern_write', 'compress_context'],
+  },
+  'create.INIT': {
+    id: 'create.INIT',
+    label: 'CREATE / INIT 命令',
+    initialCommands: [],
+  },
+  // rough
+  'rough.BASE_READ': {
+    id: 'rough.BASE_READ',
+    label: 'ROUGH / 基准阅读 命令',
+    initialCommands: [],
+  },
+  'rough.REQUIREMENT_RECOGNITION': {
+    id: 'rough.REQUIREMENT_RECOGNITION',
+    label: 'ROUGH / 需求分解 命令',
+    initialCommands: ['update_feature_intent', 'submit_requirement_protocol'],
+  },
+  'rough.RESEARCH': {
+    id: 'rough.RESEARCH',
+    label: 'ROUGH / 研究 命令',
+    initialCommands: ['todo_write'],
+  },
+  'rough.IMPLEMENT': {
+    id: 'rough.IMPLEMENT',
+    label: 'ROUGH / 实现 命令',
+    initialCommands: ['git_commit'],
+  },
+  // simple-action
+  'simple-action.PRESET_ACTION': {
+    id: 'simple-action.PRESET_ACTION',
+    label: 'SIMPLE-ACTION / 匹配命令',
+    initialCommands: ['list_preset_actions', 'submit_preset_action'],
+  },
+  'simple-action.ACTION_EXECUTE': {
+    id: 'simple-action.ACTION_EXECUTE',
+    label: 'SIMPLE-ACTION / 执行命令',
+    initialCommands: [],
   },
 };
 

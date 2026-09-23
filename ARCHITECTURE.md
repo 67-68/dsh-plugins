@@ -36,6 +36,21 @@ scripts/                        # 运维脚本（含本护栏）
 
 `workflows.js` 内 `BUILTIN_WORKFLOW_DIR` 必须与包内 `workflows/` 目录保持同包。
 
+## 阶段命令 Set（规则 2b）
+
+每个阶段一套命令 Set，声明「阶段启动即注入并 tool-search 优先放行」的命令：
+
+- 定义：`packages/dsh-mode-gate/lib/stores/restrictions.js` 的 `BUILTIN_STAGE_COMMAND_SETS`，
+  按 `<workflowId>.<stateId>` 索引（如 `create.REQUIREMENT_RECOGNITION`）。
+- 内容：`initialCommands` = 该阶段 goal 的 requiredCalls + submitTool 中「阶段专属」部分；
+  通用的 `submit_state` / `switch_mode` 由 `ALWAYS_ALLOWED` 兜底，不进 Set。
+- Universal：`todo_write` / `submit_state` 每阶段注入（`DEFAULT_UNIVERSAL_COMMANDS`），
+  由限制套件 `universalCommands` 覆盖。
+- 消费：`index.js` 的 `stageCommandSetFor` / `stageInjectedCommands`；注入进 policy 文本 +
+  scope 供给，并在 `tools/pre-execute` 的 tool-search 白名单优先与注入白名单处生效。
+- 阶段×命令依赖表来源：各 workflow JSON 的 `states[].permissions.tools` 与
+  `engine/goals.js` 的 `requiredCalls` / `submitTool`。
+
 ## 依赖方向（规则 3）
 
 - 禁止跨包引用：`packages/A` 的代码不得 import `packages/B`。
