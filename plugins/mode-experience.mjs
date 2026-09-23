@@ -16,6 +16,17 @@ function expandHome(dir) {
   if (typeof dir !== 'string' || dir.length === 0) return dir
   if (dir === '~') return homedir()
   if (dir.startsWith('~/')) return join(homedir(), dir.slice(2))
+  // Portable deploy root: allow $DSH_HOME / ${DSH_HOME} prefix so custom
+  // DSH_HOME installs keep working (falls back to ~/.dsh when unset).
+  if (dir === '$DSH_HOME' || dir === '${DSH_HOME}') {
+    return process.env.DSH_HOME || join(homedir(), '.dsh')
+  }
+  if (dir.startsWith('$DSH_HOME/')) {
+    return join(process.env.DSH_HOME || join(homedir(), '.dsh'), dir.slice('$DSH_HOME/'.length))
+  }
+  if (dir.startsWith('${DSH_HOME}/')) {
+    return join(process.env.DSH_HOME || join(homedir(), '.dsh'), dir.slice('${DSH_HOME}/'.length))
+  }
   return dir
 }
 

@@ -5,33 +5,33 @@ import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'n
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
-import { createFeatureIntentStore } from './feature-intent-store.js';
-import { createFeatureTreeStore, assertLogicalPath, discoverFeatureIntentDirs } from './feature-tree-store.js';
-import { createFeatureListStore, defaultFeatureListDir } from './feature-list-store.js';
-import { createPatternStore, defaultPatternDir } from './pattern-store.js';
-import { createJournalStore, defaultJournalDir } from './journal-store.js';
-import { createHistoryStore, defaultHistoryDir } from './history-store.js';
-import { readHeadCommit } from './git-commit.js';
-import { runGitUpdate } from './git-update.js';
-import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh, limitedDigest } from './architecture-store.js';
-import { generateDependencyMap, buildDependencyGraph, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
-import { budgetDecision, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './context-budget.js';
-import { compressContext, assertLongTermDocsFirst } from './context-compressor.js';
-import { assertNotProgress, assertReasonValid, assertSelfCheckFresh } from './pattern-gate.js';
-import { createGoalEngine } from './goal-engine.js';
-import { MODEL_COMPRESSION_TABLE, effectiveCompressionPoint, normalizeCompressionOverrides } from './model-compression.js';
-import { createModelWindowCache } from './model-window-cache.js';
-import { createBuiltinGoals } from './goals.js';
-import { assertTextLength } from './text-limits.js';
-import { createRestrictionStore, getRestrictionOrBuiltin, isSkillDeniedByRestriction, isToolDeniedByRestriction, matchRestrictionDenyCommand, BUILTIN_RESTRICTION_SETS } from './restrictions.js';
-import { createWorkflowRegistry, expandHome, BUILTIN_WORKFLOW_DIR } from './workflows.js';
+import { createFeatureIntentStore } from './stores/feature-intent-store.js';
+import { createFeatureTreeStore, assertLogicalPath, discoverFeatureIntentDirs } from './stores/feature-tree-store.js';
+import { createFeatureListStore, defaultFeatureListDir } from './stores/feature-list-store.js';
+import { createPatternStore, defaultPatternDir } from './stores/pattern-store.js';
+import { createJournalStore, defaultJournalDir } from './stores/journal-store.js';
+import { createHistoryStore, defaultHistoryDir } from './stores/history-store.js';
+import { readHeadCommit } from './services/git-commit.js';
+import { runGitUpdate } from './services/git-update.js';
+import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh, limitedDigest } from './stores/architecture-store.js';
+import { generateDependencyMap, buildDependencyGraph, MAX_DEPENDENCY_TOKENS } from './engine/dependency-map.js';
+import { budgetDecision, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './services/context-budget.js';
+import { compressContext, assertLongTermDocsFirst } from './services/context-compressor.js';
+import { assertNotProgress, assertReasonValid, assertSelfCheckFresh } from './services/pattern-gate.js';
+import { createGoalEngine } from './engine/goal-engine.js';
+import { MODEL_COMPRESSION_TABLE, effectiveCompressionPoint, normalizeCompressionOverrides } from './services/model-compression.js';
+import { createModelWindowCache } from './services/model-window-cache.js';
+import { createBuiltinGoals } from './engine/goals.js';
+import { assertTextLength } from './services/text-limits.js';
+import { createRestrictionStore, getRestrictionOrBuiltin, isSkillDeniedByRestriction, isToolDeniedByRestriction, isToolWhitelistedByInjection, matchRestrictionDenyCommand, restrictionInjectedCommands, BUILTIN_RESTRICTION_SETS, DEFAULT_UNIVERSAL_COMMANDS } from './stores/restrictions.js';
+import { createWorkflowRegistry, expandHome, BUILTIN_WORKFLOW_DIR } from './engine/workflows.js';
 import {
   createDynamicPlan,
   extractEntryFields,
   staticPlanCurrent,
   staticPlanPendingCount,
-} from './plans.js';
-import { resolveTransition } from './transitions.js';
+} from './engine/plans.js';
+import { resolveTransition } from './engine/transitions.js';
 import {
   IDLE_STATE_ID,
   IDLE_WORKFLOW_ID,
@@ -49,7 +49,7 @@ import {
   saveStateStore,
   stageIdFor,
   writeState,
-} from './state.js';
+} from './engine/state.js';
 import {
   ALWAYS_ALLOWED,
   KNOWN_WRITE_TOOLS,
@@ -57,7 +57,7 @@ import {
   isToolGranted,
   stageExplicitlyGrants,
   toolDisposition,
-} from './permissions.js';
+} from './engine/permissions.js';
 import {
   classifyCommand,
   extractCommandVerbs,
@@ -65,7 +65,7 @@ import {
   isGitMutation,
   matchBashDeny,
   normalizeDenyList,
-} from './bash.js';
+} from './engine/bash.js';
 
 
 // CONTROL_TOOLS 已随 declare_target 机制一并移除：不再有强制握手，
@@ -476,6 +476,19 @@ class ModeGateGateway extends TypertRemoteService {
   async getRestriction(args) {
     return getRestrictionOrBuiltin(this.options.restrictions, args && args.id);
   }
+  /**
+   * 限制套件编辑器「初始命令 / Universal 命令」下拉的数据源：
+   * 返回当前会话可见的工具名 + 描述（内置 + 插件 + 已供给的 scope 工具）。
+   */
+  async getCommandCatalog(args) {
+    const sessionId = args && args.sessionId;
+    const agent = (this.options.getAgent ? this.options.getAgent(sessionId) : null)
+      || { session: { id: sessionId, header: { cwd: readSessionEntry(sessionId).workspace } } };
+    const tools = typeof this.options.listGrantableTools === 'function'
+      ? this.options.listGrantableTools(agent)
+      : [];
+    return { ok: true, tools };
+  }
   async getRestrictions() {
     const sets = await this.options.restrictions.list();
     const seen = new Set(sets.map((entry) => entry && entry.id));
@@ -661,6 +674,8 @@ markRemoteMethods(ModeGateGateway, [
   'approveRequirementProtocol', 'rejectRequirementProtocol',
   // /grant 下拉的数据源与授权入口（客户端 popupSelect 调用）。
   'getGrantableTools', 'grantTool',
+  // 限制套件编辑器「初始命令 / Universal 命令」下拉的数据源。
+  'getCommandCatalog',
 ]);
 
 export default {
@@ -2126,6 +2141,9 @@ export default {
       if (awaitingUser) {
         lines.push('', '当前有需求协议正在等待用户确认。请停止工具调用，等待用户在“工作流”界面点击“接受”，或发送消息以修改需求。');
       }
+      // 初始命令 / Universal 命令：阶段启动即声明，agent 无需自行搜索。
+      const injectedText = buildInjectedCommandsText(state, stateDef);
+      if (injectedText) lines.push('', injectedText);
       if (stagePrompt) lines.push('', '当前阶段说明：', stagePrompt);
       if (autoGuide) lines.push('', autoGuide);
       const requirementList = effectiveStateRequirements(state, state.workflowId, state.phase, stateDef);
@@ -2201,6 +2219,58 @@ export default {
     }
 
     /**
+     * 当前阶段生效的「初始命令 + Universal 命令」。
+     *
+     * - 初始命令：由阶段引用的限制套件 initialCommands 声明，阶段启动时注入；
+     * - Universal 命令：由限制套件 universalCommands 声明（默认 todo_write /
+     *   submit_state），每个阶段都注入，agent 不需要自己搜索。
+     *
+     * 返回去重后的有序列表（初始命令在前，Universal 在后）。
+     */
+    function stageInjectedCommands(state, workflowId, stateId, stateDef) {
+      const set = resolveStateRestriction(state, workflowId, stateId, stateDef);
+      const { initial, universal } = restrictionInjectedCommands(set);
+      const out = [];
+      const seen = new Set();
+      for (const name of [...initial, ...universal]) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+      }
+      return out;
+    }
+
+    /**
+     * Universal 命令的「每阶段兜底」集合：即使阶段没有引用任何限制套件，
+     * 也要注入默认的 universalCommands（todo_write / submit_state）。
+     */
+    function universalCommandsForStage(state, workflowId, stateId, stateDef) {
+      const set = resolveStateRestriction(state, workflowId, stateId, stateDef);
+      if (set) return restrictionInjectedCommands(set).universal;
+      return [...DEFAULT_UNIVERSAL_COMMANDS];
+    }
+
+    /**
+     * 把「本阶段初始命令 / Universal 命令」拼成政策文本片段。
+     * 文本里同时声明 tool-search 白名单优先放行语义，让 agent 知道可以直接
+     * 调用这些命令，也可以先用 tool-search 搜到再调用。
+     */
+    function buildInjectedCommandsText(state, stateDef) {
+      const set = resolveStateRestriction(state, state.workflowId, state.phase, stateDef);
+      const { initial } = restrictionInjectedCommands(set);
+      const universal = universalCommandsForStage(state, state.workflowId, state.phase, stateDef);
+      const commands = [...new Set([...initial, ...universal])];
+      if (commands.length === 0) return '';
+      return [
+        '本阶段初始命令（已直接注入，无需自行搜索）：',
+        ...commands.map((name) => `  - ${name}`),
+        '这些命令在 tool-search 时被优先放行：先实际匹配目录，命中即允许真实搜索；未命中仍按本阶段限制处理。',
+      ].join('\n');
+    }
+
+    /**
+     * Some agent presets use a `complete: true` persona and suppress runtime
+     * contexts (`includeRuntimeContext: false`).    /**
      * Some agent presets use a `complete: true` persona and suppress runtime
      * contexts (`includeRuntimeContext: false`). In that environment the
      * standard system prompt channels are intentionally unavailable, so
@@ -3475,10 +3545,50 @@ export default {
     ctx.on('tools/pre-execute', (exec, next) => {
       const name = exec.name;
 
+      // tool-search 白名单优先：即使本阶段「禁止自行解锁新工具」，只要本次
+      // tool-search 的查询 / toolNames 命中本阶段「初始命令 / Universal 命令」，
+      // 就先实际匹配目录——命中则放行，让真实搜索机制执行；未命中仍禁止。
+      // 优先级高于 unlockLocked（如：原本禁 tool-search + 允许 submit-state，
+      // 则允许用 tool-search 搜 submit_state）。
+      if (name === 'dev_tool_search' && exec.agent) {
+        try {
+          const searchState = readState(exec.agent);
+          if (goalEngine.unlockLocked(searchState) && !grantBypass(searchState, name)) {
+            const searchRegistry = registryFor(exec.agent);
+            const searchStateDef = searchRegistry.stateOf(searchState.workflowId, searchState.phase);
+            const searchSet = resolveStateRestriction(searchState, searchState.workflowId, searchState.phase, searchStateDef);
+            const allowed = [...new Set([
+              ...restrictionInjectedCommands(searchSet).initial,
+              ...universalCommandsForStage(searchState, searchState.workflowId, searchState.phase, searchStateDef),
+            ])];
+            const args = exec.arguments && typeof exec.arguments === 'object' ? exec.arguments : {};
+            const wanted = Array.isArray(args.toolNames)
+              ? args.toolNames.filter((entry) => typeof entry === 'string')
+              : [];
+            const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+            // 命中方式一：toolNames 里直接点名了白名单命令（精确匹配）。
+            const exactHit = wanted.filter((entry) => allowed.includes(entry));
+            // 命中方式二：query 关键词实际匹配到目录里存在的白名单命令。
+            const queryHit = query
+              ? allowed.filter((entry) => entry.toLowerCase().includes(query) || query.includes(entry.toLowerCase()))
+              : [];
+            const hits = [...new Set([...exactHit, ...queryHit])];
+            if (hits.length > 0) return next();
+            return Promise.resolve({
+              kind: 'deny',
+              reason: '当前阶段禁止自行解锁新工具，请专心分解需求；完成后调用 submit_state 推进。'
+                + (allowed.length > 0 ? `（本阶段初始命令：${allowed.join('、')}，可先用 tool-search 搜它们）` : ''),
+            });
+          }
+        } catch (_err) {
+          // 读不到状态时走常规流程，不在这里拦截。
+        }
+      }
+
       // 需求识别等阶段会锁定自行解锁新工具的能力：dev_tool_search /
       // request_extra 直接拒绝（必须放在 request_extra 的 ask 分支之前）。
       // submit_state / switch_mode 不受影响，agent 仍可推进阶段。
-      if (name === 'dev_tool_search' || name === 'request_extra') {
+      if (name === 'request_extra') {
         try {
           const unlockState = exec.agent ? readState(exec.agent) : null;
           // 单独锁定同样受 /grant 豁免：用户显式授权过的解禁工具不再被阶段锁定。
@@ -3534,6 +3644,10 @@ export default {
       // declare_target 机制已移除：不再要求先声明 Target，工具调用不再因此被拦截。
       // state 引用的限制套件：工具 / skill / 命令三层强制执行。
       const restrictionSet = resolveStateRestriction(state, state.workflowId, state.phase, stateDef);
+      // 初始命令 / Universal 命令白名单优先：命中即放行（相当于该阶段显式授予），
+      // 不受 denyTools / 阶段 tools 白名单 / goal allowedTools 拦截。
+      const injectedWhitelist = Boolean(restrictionSet && isToolWhitelistedByInjection(restrictionSet, name));
+      if (injectedWhitelist && !grantBypass(state, name)) return next();
       if (restrictionSet && isToolDeniedByRestriction(restrictionSet, name) && !grantBypass(state, name)) {
         return Promise.resolve({ kind: 'deny', reason: `当前阶段引用的限制「${restrictionSet.label || restrictionSet.id}」禁止使用工具 ${name}。` });
       }

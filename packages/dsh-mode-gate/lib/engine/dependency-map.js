@@ -9,7 +9,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 
-import { estimateTokens } from './architecture-store.js';
+import { estimateTokens } from '../stores/architecture-store.js';
 
 export const MAX_DEPENDENCY_TOKENS = 1024;
 export const MAX_SCAN_FILES = 800;

@@ -13,7 +13,7 @@
  * 无模型信息时回落到本表。
  */
 
-import { estimateTokens } from './architecture-store.js';
+import { estimateTokens } from '../stores/architecture-store.js';
 import { effectiveCompressionPoint } from './model-compression.js';
 
 export const DEFAULT_CONTEXT_BUDGET_TOKENS = 64000;

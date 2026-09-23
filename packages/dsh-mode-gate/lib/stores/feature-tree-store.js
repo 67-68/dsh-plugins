@@ -87,7 +87,7 @@ function matchesCandidate(relPath, candidates) {
 /**
  * 在一个 workspace 里发现所有 feature intent 目录（相对 workspace 的路径）。
  *
- * 场景：workspace 可能是「多个项目的容器」（例如 /Users/x/projects 下每个子项目
+ * 场景：workspace 可能是「多个项目的容器」（例如 ~/projects 下每个子项目
  * 各有一份 feature_intents）。这时不能只看 workspace 根层，而要往下找。
  *
  * @param {string} workspaceRoot 工作区根目录

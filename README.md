@@ -46,11 +46,13 @@ dsh-plugins/
 │   ├── GENERAL.md
 │   └── cordis.md
 ├── feature_intents/          # 需求意图（唯一规范位置）
-├── scripts/                  # 运维脚本
+├── scripts/                  # 运维脚本（顶层仅构建+护栏，一次性进 archive/）
 ├── patches/                  # install.sh 引用的补丁
-├── extensions/               # 浏览器扩展（独立交付物，不由 install.sh 部署）
-├── docs/plans/               # 设计文档
+├── extensions/               # 浏览器扩展（独立交付物，不由 install.sh 部署；目录名不带版本）
+├── docs/                     # 设计文档（INDEX.md 为索引，plans/ 为计划）
+├── temp/                     # 构建缓存（gitignored，不提交）
 ├── install.sh                # 一键把上面内容 symlink/安装 进 ~/.dsh
+├── ARCHITECTURE.md           # 架构地图 + 依赖规则（护栏: scripts/verify-architecture.sh）
 └── README.md
 ```
 

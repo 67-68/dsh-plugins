@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { assertTextLength } from './text-limits.js';
+import { assertTextLength } from '../services/text-limits.js';
 import { dirname, join, resolve, sep } from 'node:path';
 
 /**

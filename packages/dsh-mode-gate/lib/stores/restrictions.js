@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
-import { matchBashDeny, normalizeDenyList } from './bash.js';
+import { matchBashDeny, normalizeDenyList } from '../engine/bash.js';
 
 /**
  * 通用 AI 限制抽象（一套限制配置）。
@@ -22,13 +22,22 @@ import { matchBashDeny, normalizeDenyList } from './bash.js';
  *   denySkills: string[],                                    // 仅 blacklist
  *   denyTools: string[],                                     // 仅 blacklist（禁整个工具，如 read/grep）
  *   allowSkills: string[],                                   // 仅 whitelist
+ *   initialCommands: string[],    // 阶段启动时注入并优先放行的命令/工具（两种模式都可用）
+ *   universalCommands: string[],  // 每阶段都注入并优先放行的命令/工具（两种模式都可用）
  * }
+ *
+ * initialCommands / universalCommands 与黑白名单正交：它们不是「权限」，而是
+ * 「阶段启动时主动送给 agent 的命令」。命中它们的工具在 tool-search 时会被优先
+ * 放行（先实际匹配目录，找到才放行），因此不受 denyTools / 阶段 tools 白名单拦截。
  *
  * 互斥规则：blacklist 模式下 allowSkills 必须为空；whitelist 模式下
  * denyCommands / denySkills / denyTools 必须为空。违反时 normalize 抛错，保存被拒绝。
  */
 
 export const RESTRICTION_MODES = ['blacklist', 'whitelist'];
+
+/** Universal 注入命令的默认集合：每个阶段都会自动注入，agent 无需自行搜索。 */
+export const DEFAULT_UNIVERSAL_COMMANDS = ['todo_write', 'submit_state'];
 
 function cleanStringArray(value) {
   if (!Array.isArray(value)) return [];
@@ -59,13 +68,18 @@ export function normalizeRestrictionSet(raw) {
   const denySkills = cleanStringArray(raw.denySkills);
   const denyTools = cleanStringArray(raw.denyTools);
   const allowSkills = cleanStringArray(raw.allowSkills);
+  // 初始命令 / Universal 命令与黑白名单正交：两种模式都可以配置。
+  const initialCommands = cleanStringArray(raw.initialCommands);
+  const universalCommands = raw.universalCommands === void 0
+    ? [...DEFAULT_UNIVERSAL_COMMANDS]
+    : cleanStringArray(raw.universalCommands);
   if (mode === 'blacklist' && allowSkills.length > 0) {
     throw new Error(`限制 "${id}" 为 blacklist 模式，不能同时填写 allowSkills（白名单）；一套配置只能使用其中之一`);
   }
   if (mode === 'whitelist' && (denyCommands.length > 0 || denySkills.length > 0 || denyTools.length > 0)) {
     throw new Error(`限制 "${id}" 为 whitelist 模式，不能同时填写 denyCommands / denySkills / denyTools（黑名单）；一套配置只能使用其中之一`);
   }
-  return { id, label, mode, denyCommands, denySkills, denyTools, allowSkills };
+  return { id, label, mode, denyCommands, denySkills, denyTools, allowSkills, initialCommands, universalCommands };
 }
 
 /**
@@ -85,6 +99,8 @@ export const BUILTIN_RESTRICTION_SETS = {
       'read_image', 'web_search',
     ],
     allowSkills: [],
+    initialCommands: [],
+    universalCommands: [...DEFAULT_UNIVERSAL_COMMANDS],
   },
 };
 
@@ -135,6 +151,34 @@ export function isSkillDeniedByRestriction(set, skillName) {
     return !(Array.isArray(set.allowSkills) && set.allowSkills.includes(skillName));
   }
   return false;
+}
+
+/**
+ * 取该套限制声明的「初始命令」与「Universal 命令」（均已去重、trim）。
+ * 它们与黑白名单正交：不是权限，而是阶段启动时主动注入并优先放行的命令。
+ *
+ * @returns {{ initial: string[], universal: string[] }}
+ */
+export function restrictionInjectedCommands(set) {
+  if (!set || typeof set !== 'object') return { initial: [], universal: [] };
+  const initial = Array.isArray(set.initialCommands)
+    ? cleanStringArray(set.initialCommands)
+    : [];
+  const universal = Array.isArray(set.universalCommands)
+    ? cleanStringArray(set.universalCommands)
+    : [...DEFAULT_UNIVERSAL_COMMANDS];
+  return { initial, universal };
+}
+
+/**
+ * 工具是否在该套限制的「初始命令 / Universal 命令」白名单内。
+ * 命中即表示：tool-search 允许搜它，且搜到后放行走真实搜索机制；
+ * 同时该工具在 pre-execute 门禁处也被优先放行（不受 denyTools / 阶段白名单拦截）。
+ */
+export function isToolWhitelistedByInjection(set, toolName) {
+  if (typeof toolName !== 'string' || !toolName) return false;
+  const { initial, universal } = restrictionInjectedCommands(set);
+  return initial.includes(toolName) || universal.includes(toolName);
 }
 
 /**

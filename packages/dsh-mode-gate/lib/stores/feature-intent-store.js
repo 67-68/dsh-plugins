@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, extname, join, resolve, sep } from 'node:path';
-import { buildEntryMarkdown } from './plans.js';
+import { buildEntryMarkdown } from '../engine/plans.js';
 
 /**
  * Append-only store for raw feature-intent records.

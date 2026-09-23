@@ -11,7 +11,7 @@
     - id: mode-experience
       name: './mode-experience.mjs'
       config:
-        docDir: '/Users/a67_68/projects/dsh-plugins/document'
+        docDir: '~/.dsh/DOCUMENT'
         promoteGatedModes: ['anchored-architect']
 
     # Mode gate: flat multi-workflow state machine (IDLE / SIMPLE-ACTION /

@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
-import { detectProgress } from './journal-guard.js';
-import { isSelfCheckFresh, assertReasonValid } from './pattern-gate.js';
+import { detectProgress } from '../services/journal-guard.js';
+import { isSelfCheckFresh, assertReasonValid } from '../services/pattern-gate.js';
 
 /**
  * architecture.md —— 常驻 limited prompt（结构层）。

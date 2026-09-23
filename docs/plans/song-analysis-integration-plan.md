@@ -1,5 +1,10 @@
 # song-analysis × MusicFree 整合计划
 
+> 范围声明：这是**设计文档**（docs/plans/，不部署）。运行时 skill 是
+> `document/song-analysis.md`（随 install.sh 部署到 `~/.dsh/DOCUMENT/` 并注册为
+> 按需 skill）；模块意图见 `feature_intents/song-analysis.md`。三者各司其职，
+> 不要合并。
+
 ## 0. 一句话
 
 给一首本地音频，自动产出「拆轨 + 结构分段 + 和弦/节拍/旋律 + Genius 资料 + Agent 讲解报告」，并在 Sonic Visualiser 中边听边看；后续把报告接入 MusicFree 播放器，与歌词高亮/AI 讲解合并。

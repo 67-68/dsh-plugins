@@ -69,6 +69,9 @@ window.__ModuleLoader__.load({
 			restrictionAllowSkills: "仅允许的 skill（逗号分隔）",
 			restrictionNewId: "新限制 id",
 			restrictionNewLabel: "展示名",
+			restrictionInitialCommands: "初始命令（阶段启动注入；逗号分隔）",
+			restrictionUniversalCommands: "Universal 注入命令（每阶段都注入；逗号分隔）",
+			restrictionCommandPick: "从下拉选择命令",
 			modelAliasColumn: "代号",
 			modelAliasTargetColumn: "具体模型",
 			modelThinkingAliasColumn: "思考等级",
@@ -189,6 +192,9 @@ window.__ModuleLoader__.load({
 			restrictionDenySkills: "Denied skills (comma-separated)",
 			restrictionAllowSkills: "Allowed skills only (comma-separated)",
 			restrictionNewId: "New restriction id",
+			restrictionInitialCommands: "Initial commands (injected at stage start; comma-separated)",
+			restrictionUniversalCommands: "Universal injected commands (every stage; comma-separated)",
+			restrictionCommandPick: "Pick a command",
 			restrictionNewLabel: "Display name",
 			modelAliasColumn: "Codename",
 			modelAliasTargetColumn: "Concrete model",
@@ -1498,6 +1504,21 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const { t, api } = props;
 			const store = useRestrictions(api);
 			const [expanded, setExpanded] = react.useState({});
+			const [commandCatalog, setCommandCatalog] = react.useState([]);
+			react.useEffect(() => {
+				let alive = true;
+				(async () => {
+					try {
+						const result = await api().getCommandCatalog({});
+						if (!alive) return;
+						const tools = result && result.ok && Array.isArray(result.tools) ? result.tools : [];
+						setCommandCatalog(tools.map((tool) => ({ name: tool.name, description: tool.description || "" })));
+					} catch (_err) {
+						if (alive) setCommandCatalog([]);
+					}
+				})();
+				return () => { alive = false; };
+			}, [api]);
 			const [drafts, setDrafts] = react.useState({});
 			const [newId, setNewId] = react.useState("");
 			const [newLabel, setNewLabel] = react.useState("");
@@ -1529,11 +1550,13 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 					denyCommands: denyGroups,
 					denySkills: splitList(d.denySkills),
 					allowSkills: splitList(d.allowSkills),
+					initialCommands: splitList(d.initialCommands),
+					universalCommands: splitList(d.universalCommands),
 				});
 			};
 			const addSet = async () => {
 				if (!newId.trim()) return;
-				const result = await store.saveSet({ id: newId.trim(), label: newLabel.trim() || newId.trim(), mode: newMode, denyCommands: [], denySkills: [], allowSkills: [] });
+				const result = await store.saveSet({ id: newId.trim(), label: newLabel.trim() || newId.trim(), mode: newMode, denyCommands: [], denySkills: [], allowSkills: [], initialCommands: [], universalCommands: [] });
 				if (result && result.ok) {
 					setNewId("");
 					setNewLabel("");
@@ -1573,6 +1596,20 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						d.mode === "blacklist" ? react.createElement("input", { style: styles.input, placeholder: t("denyReason"), value: d.denyReason, onChange: (e) => updateDraft(set.id, "denyReason", e.target.value) }) : null,
 							d.mode === "blacklist" ? react.createElement("input", { style: styles.input, placeholder: t("restrictionDenySkills"), value: d.denySkills, onChange: (e) => updateDraft(set.id, "denySkills", e.target.value) }) : null,
 							d.mode === "whitelist" ? react.createElement("input", { style: styles.input, placeholder: t("restrictionAllowSkills"), value: d.allowSkills, onChange: (e) => updateDraft(set.id, "allowSkills", e.target.value) }) : null,
+							react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+								react.createElement("input", { style: { ...styles.input, flex: 1 }, placeholder: t("restrictionInitialCommands"), value: d.initialCommands, onChange: (e) => updateDraft(set.id, "initialCommands", e.target.value) }),
+								react.createElement("select", { style: { ...styles.input, maxWidth: 200 }, value: "", onChange: (e) => { const v = e.target.value; if (v) updateDraft(set.id, "initialCommands", [String(d.initialCommands || "").trim(), v].filter(Boolean).join(", ")); } },
+									react.createElement("option", { value: "" }, t("restrictionCommandPick")),
+									commandCatalog.map((tool) => react.createElement("option", { key: tool.name, value: tool.name }, tool.name)),
+								),
+							),
+							react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+								react.createElement("input", { style: { ...styles.input, flex: 1 }, placeholder: t("restrictionUniversalCommands"), value: d.universalCommands, onChange: (e) => updateDraft(set.id, "universalCommands", e.target.value) }),
+								react.createElement("select", { style: { ...styles.input, maxWidth: 200 }, value: "", onChange: (e) => { const v = e.target.value; if (v) updateDraft(set.id, "universalCommands", [String(d.universalCommands || "").trim(), v].filter(Boolean).join(", ")); } },
+									react.createElement("option", { value: "" }, t("restrictionCommandPick")),
+									commandCatalog.map((tool) => react.createElement("option", { key: tool.name, value: tool.name }, tool.name)),
+								),
+							),
 							react.createElement("div", { style: { display: "flex", gap: 8 } },
 								react.createElement("button", { style: styles.button, onClick: () => saveDraft(set) }, t("save")),
 								react.createElement("button", { style: styles.button, onClick: () => store.deleteSet(set.id) }, t("delete")),
@@ -1700,6 +1737,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				remoteArgsDescriptor("rejectRequirementProtocol", "RejectRequirementProtocolResult"),
 				remoteArgsDescriptor("getGrantableTools", "GetGrantableToolsResult"),
 				remoteArgsDescriptor("grantTool", "GrantToolResult"),
+				remoteArgsDescriptor("getCommandCatalog", "GetCommandCatalogResult"),
 			],
 		};
 

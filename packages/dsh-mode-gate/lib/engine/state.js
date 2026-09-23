@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { normalizeCompressionOverrides } from './model-compression.js';
+import { normalizeCompressionOverrides } from '../services/model-compression.js';
 
 /** Durable mode-gate state file. */
 export const STATE_FILE = join(homedir(), '.dsh', 'mode-gate-state.json');

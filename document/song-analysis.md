@@ -1,5 +1,7 @@
 # Song Analysis 技能
 
+<!-- 运行时 skill：随 install.sh 部署到 ~/.dsh/DOCUMENT/。设计计划见 docs/plans/song-analysis-integration-plan.md，模块意图见 feature_intents/song-analysis.md。 -->
+
 #### [overview] Song Analysis 是什么
 
 用 `song-analyze` CLI 对一首本地音频做：拆轨（all-in-one-infer/demucs）、结构分段、节拍、和弦（Chordino 或 librosa fallback）、旋律 MIDI（basic-pitch）、歌词获取（Genius 优先 / 本地 ASR 兜底）、歌词分段与讲解报告，并可在 Sonic Visualiser 中打开波形与标注层。

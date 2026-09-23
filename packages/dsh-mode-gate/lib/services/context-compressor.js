@@ -11,7 +11,7 @@
  * 静默降级（记录 reason），绝不阻塞工作流。
  */
 
-import { estimateTokens } from './architecture-store.js';
+import { estimateTokens } from '../stores/architecture-store.js';
 
 export const KEEP_LOOP_BLOCKS = 3;
 /**
