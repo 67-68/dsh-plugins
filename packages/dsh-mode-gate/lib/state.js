@@ -307,6 +307,10 @@ export function loadStateStore() {
       workflowOverrides: migrated.workflowOverrides,
       stageOverrides: migrated.stageOverrides,
       workflowRegistryVersion: parsed.workflowRegistryVersion || 1,
+      // 排查用：最近一次 getFeatureTree 的解析结果（为什么树是空的）。
+      featureTreeProbe: parsed.featureTreeProbe && typeof parsed.featureTreeProbe === 'object'
+        ? parsed.featureTreeProbe
+        : null,
     };
   } catch (_err) {
     return base;

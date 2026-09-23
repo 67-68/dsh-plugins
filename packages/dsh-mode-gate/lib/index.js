@@ -202,29 +202,50 @@ class ModeGateGateway extends TypertRemoteService {
     if (typeof this.options.treeForSession !== 'function') return null;
     return this.options.treeForSession(sessionId);
   }
+  /** 记录最近一次 getFeatureTree 的解析结果（写入 state.featureTreeProbe，供排查空树）。 */
+  recordFeatureTreeProbe(summary) {
+    if (typeof this.options.recordFeatureTreeProbe === 'function') this.options.recordFeatureTreeProbe(summary);
+  }
   async getFeatureTree(args) {
     const sessionId = args && args.sessionId;
     if (!sessionId) {
-      return {
-        ok: false,
-        error: '缺少 sessionId：feature 树按会话所属项目解析。若界面是旧版前端（浏览器缓存了插件的 client bundle），请硬刷新页面（Cmd+Shift+R）后重试。',
-      };
+      const error = '缺少 sessionId：feature 树按会话所属项目解析。若界面是旧版前端（浏览器缓存了插件的 client bundle），请硬刷新页面（Cmd+Shift+R）后重试。';
+      this.recordFeatureTreeProbe({ sessionId: null, source: 'none', liveCwd: null, entryWorkspace: null, workspace: null, mode: null, dir: null, roots: [], treeSize: 0, error });
+      return { ok: false, error };
     }
     const store = this.featureTreeFor(sessionId);
-    if (!store) return { ok: false, error: '无法确定该会话的项目目录（session 里没有 workspace），请先进入 CREATE 工作流。' };
     const layout = typeof this.options.layoutForSession === 'function' ? this.options.layoutForSession(sessionId) : null;
+    const base = {
+      sessionId,
+      source: layout ? layout.source : 'none',
+      liveCwd: layout ? layout.liveCwd : null,
+      entryWorkspace: layout ? layout.entryWorkspace : null,
+      workspace: layout ? layout.workspace : null,
+      mode: layout && !layout.flat ? 'mounts' : 'flat',
+      dir: store ? store.dir : null,
+      roots: layout ? layout.rels || [] : [],
+    };
+    if (!store) {
+      const error = '无法确定该会话的项目目录（session 里没有 workspace），请先进入 CREATE 工作流。';
+      this.recordFeatureTreeProbe({ ...base, treeSize: 0, error });
+      return { ok: false, error };
+    }
     try {
+      const tree = store.tree();
+      this.recordFeatureTreeProbe({ ...base, treeSize: tree.length, error: null });
       return {
         ok: true,
         dir: store.dir,
-        mode: layout && !layout.flat ? 'mounts' : 'flat',
+        mode: base.mode,
         workspace: layout ? layout.workspace : '',
         pinned: Boolean(layout && layout.pinned),
-        roots: layout ? layout.rels || [] : [],
-        tree: store.tree(),
+        roots: base.roots,
+        tree,
       };
     } catch (err) {
-      return { ok: false, error: String((err && err.message) || err) };
+      const error = String((err && err.message) || err);
+      this.recordFeatureTreeProbe({ ...base, treeSize: 0, error });
+      return { ok: false, error };
     }
   }
   async getFeatureNode(args) {
@@ -1379,16 +1400,49 @@ export default {
     function layoutForSession(sessionId) {
       const entry = readSessionEntry(sessionId);
       const live = agents.get(sessionId);
-      const workspace = (live && workspaceOf(live, '')) || entry.workspace || '';
+      const liveCwd = live ? workspaceOf(live, '') : '';
+      const entryWorkspace = entry.workspace || '';
+      const workspace = liveCwd || entryWorkspace;
       if (!workspace) return null;
       const bundle = storesForWorkspace(workspace, entry.featureIntentDir);
       return {
         workspace: bundle.workspace,
+        // 排查用：workspace 到底来自活 agent 的 cwd 还是状态记录（两者不一致会导致树为空）。
+        source: liveCwd ? 'live' : 'entry',
+        liveCwd: liveCwd || null,
+        entryWorkspace: entryWorkspace || null,
         flat: bundle.flat,
         pinned: Boolean(entry.featureIntentDir),
         dirs: bundle.dirs,
         rels: bundle.rels,
       };
+    }
+
+    /**
+     * 把最近一次 getFeatureTree 的解析结果写进 state.featureTreeProbe。
+     * 只在结果发生变化时落盘（选择器 5 秒轮询，结果稳定时不产生写入），
+     * 这样「树为什么是空的」可以直接从 state 文件里读出来。
+     */
+    function recordFeatureTreeProbe(summary) {
+      try {
+        const store = loadStateStore();
+        const prev = store.featureTreeProbe && typeof store.featureTreeProbe === 'object' ? store.featureTreeProbe : null;
+        const same = prev
+          && prev.sessionId === summary.sessionId
+          && prev.source === summary.source
+          && prev.liveCwd === summary.liveCwd
+          && prev.entryWorkspace === summary.entryWorkspace
+          && prev.workspace === summary.workspace
+          && prev.mode === summary.mode
+          && prev.dir === summary.dir
+          && prev.treeSize === summary.treeSize
+          && prev.error === summary.error
+          && JSON.stringify(prev.roots || []) === JSON.stringify(summary.roots || []);
+        if (same) return;
+        saveStateStore({ ...store, featureTreeProbe: { ...summary, at: new Date().toISOString() } });
+      } catch (err) {
+        log(`记录 feature 树探针失败：${(err && err.message) || err}`);
+      }
     }
 
     /**
@@ -3361,6 +3415,7 @@ export default {
       restrictions,
       treeForSession,
       layoutForSession,
+      recordFeatureTreeProbe,
       submitFeatureSelection,
     });
   },
