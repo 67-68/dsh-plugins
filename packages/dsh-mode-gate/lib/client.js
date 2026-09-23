@@ -1929,6 +1929,19 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			const { api, busy, onSubmit, onError, selected, onSelectedChange, t, sessionId } = props;
 			const { tree, error, refresh, mode, roots, dir } = useFeatureTree(api, true, sessionId);
 			const [expanded, setExpanded] = react.useState({});
+			/* 多项目 workspace：顶层项目文件夹默认展开，否则用户会以为「树是空的」。 */
+			const autoExpanded = react.useRef(false);
+			react.useEffect(() => {
+				if (autoExpanded.current || tree.length === 0) return;
+				const init = {};
+				for (const node of tree) {
+					if (node && node.type === "overview" && node.mounted) init[node.path] = true;
+				}
+				if (Object.keys(init).length > 0) {
+					autoExpanded.current = true;
+					setExpanded((prev) => ({ ...init, ...prev }));
+				}
+			}, [tree]);
 
 			/* 就地新建：类型 + 父 overview + 名称。 */
 			const [createOpen, setCreateOpen] = react.useState(false);
@@ -2049,7 +2062,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 							fontWeight: isOverview ? 600 : 400,
 						},
 					},
-						`${isOverview ? "📁" : "📄"} ${node.name}`,
+						`${isOverview ? "📁" : "📄"} ${node.name}${isOverview && node.children && node.children.length > 0 ? `（${node.children.length}）` : ""}`,
 						node.mounted
 							? react.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 11, marginLeft: 8 } }, "项目目录")
 							: null,
@@ -2338,7 +2351,7 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 						// 界面版本标记：插件的浏览器端 bundle 会被宿主以 immutable 缓存，
 						// 浏览器缓存旧 bundle 时现象是「树永远是空的 / Remote 报参数错误」。
 						// 这行小字用来一眼确认页面跑的是不是最新前端。
-						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-2")),
+						react.createElement("span", { style: { fontSize: 11, opacity: 0.6 } }, "界面版本 mg-client/multiroot-3")),
 					react.createElement("div", { style: { width: "100%", maxWidth: 720 } },
 						react.createElement(FeatureTreePicker, {
 							api, t, busy, selected: picked, onSelectedChange: setPicked,
