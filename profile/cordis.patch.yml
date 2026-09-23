@@ -125,3 +125,11 @@
     enabled: true
     port: 9777
     token: dsh-local
+
+# 重新启用 host plane 的 compaction-basic：dsh-web-app bundle 默认 disabled: true
+# （compaction backend 移到 preset 层），但 dsh-mode-gate 在 host plane 上 inject
+# 了 compaction 服务，host plane 缺它会导致插件树加载失败（waiting for service:
+# compaction）。用户层在 web-app 之后应用，可覆盖该禁用。依赖 llm / tokenMeter /
+# sessions 在 host plane 均可用。
+- id: compaction-basic
+  disabled: false

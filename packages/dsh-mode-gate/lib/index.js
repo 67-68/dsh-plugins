@@ -15,11 +15,12 @@ import { readHeadCommit } from './git-commit.js';
 import { runGitUpdate } from './git-update.js';
 import { createArchitectureStore, defaultArchitecturePath, assertArchitectureReason, assertArchitectureSelfCheckFresh, limitedDigest } from './architecture-store.js';
 import { generateDependencyMap, buildDependencyGraph, MAX_DEPENDENCY_TOKENS } from './dependency-map.js';
-import { budgetDecision, estimateMessagesTokens, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './context-budget.js';
+import { budgetDecision, trackContextUsage, resetContextPeak, resolveBudgetModelId } from './context-budget.js';
 import { compressContext, assertLongTermDocsFirst } from './context-compressor.js';
 import { assertNotProgress, assertReasonValid, assertSelfCheckFresh } from './pattern-gate.js';
 import { createGoalEngine } from './goal-engine.js';
 import { MODEL_COMPRESSION_TABLE, effectiveCompressionPoint, normalizeCompressionOverrides } from './model-compression.js';
+import { createModelWindowCache } from './model-window-cache.js';
 import { createBuiltinGoals } from './goals.js';
 import { assertTextLength } from './text-limits.js';
 import { createRestrictionStore, getRestrictionOrBuiltin, isSkillDeniedByRestriction, isToolDeniedByRestriction, matchRestrictionDenyCommand, BUILTIN_RESTRICTION_SETS } from './restrictions.js';
@@ -52,6 +53,7 @@ import {
 import {
   ALWAYS_ALLOWED,
   KNOWN_WRITE_TOOLS,
+  stageExplicitlyGrants,
   toolDisposition,
 } from './permissions.js';
 import {
@@ -349,21 +351,48 @@ class ModeGateGateway extends TypertRemoteService {
   }
   async getModelCompressionTable() {
     const overrides = loadStateStore().compressionOverrides || {};
-    const table = MODEL_COMPRESSION_TABLE.map((entry) => {
-      const builtin = effectiveCompressionPoint(entry.modelId, entry.contextWindow, {});
-      const effective = effectiveCompressionPoint(entry.modelId, entry.contextWindow, overrides);
+    const cache = this.options.modelWindowCache || null;
+    /** 自带表条目 + 实测观测到的窗口，两者合成一行。 */
+    const rowFor = ({ modelId, provider, contextWindow, sourceUrl, note }) => {
+      const observed = Number.isFinite(contextWindow) ? contextWindow : null;
+      const builtin = effectiveCompressionPoint(modelId, observed, {});
+      const effective = effectiveCompressionPoint(modelId, observed, overrides);
       return {
-        modelId: entry.modelId,
-        provider: entry.provider,
-        contextWindow: entry.contextWindow,
+        modelId,
+        provider,
+        contextWindow: observed,
         defaultPoint: builtin.point,
         point: effective.point,
         origin: effective.origin,
         label: effective.label,
-        sourceUrl: entry.sourceUrl || '',
-        note: entry.note || '',
+        sourceUrl: sourceUrl || '',
+        note: note || '',
       };
+    };
+    const seen = new Set();
+    const table = MODEL_COMPRESSION_TABLE.map((entry) => {
+      seen.add(entry.modelId);
+      // 自带表里窗口为空的条目（当前没有）优先用实测值补全。
+      const contextWindow = Number.isFinite(entry.contextWindow)
+        ? entry.contextWindow
+        : (cache ? cache.windowFor(entry.modelId) : null);
+      return rowFor({ ...entry, contextWindow });
     });
+    // 表外模型（实际在用的路由）：设置页必须也能看到它们的窗口与默认压缩点，
+    // 否则用户只能看到一个 180k 的假默认值。
+    if (cache) {
+      for (const entry of cache.entries()) {
+        if (seen.has(entry.modelId)) continue;
+        seen.add(entry.modelId);
+        table.push(rowFor({
+          modelId: entry.modelId,
+          provider: entry.provider || '-',
+          contextWindow: entry.contextWindow,
+          sourceUrl: '',
+          note: '窗口来自实际路由（request/context）',
+        }));
+      }
+    }
     return { table, overrides };
   }
   async getCompressionOverrides() {
@@ -571,7 +600,10 @@ markRemoteMethods(ModeGateGateway, [
 
 export default {
   name: 'mode-gate',
-  inject: ['tools', 'systemPrompt', 'skills'],
+  // tokenMeter 是 harness 唯一的上下文计量服务（compaction-basic 也用它判定压力），
+  // compaction 是 harness 唯一的压缩服务（compactRegion/compactNow/compactIfNeeded）。
+  // 两者都必须显式注入才能读取；缺 compaction 时压缩会退化成永远失败。
+  inject: ['tools', 'systemPrompt', 'skills', 'tokenMeter', 'compaction'],
 
   apply(ctx, config) {
     const log = (msg) => console.log(`[dsh-mode-gate] ${msg}`);
@@ -763,6 +795,9 @@ export default {
     const registryForWorkspace = (workspace) => workflowRegistry.forWorkspace(workspace || defaultWorkspace);
     /** sessionId -> live Agent, used by the Remote selectWorkflow to wake the agent. */
     const agents = new Map();
+    // 观测到的真实模型上下文窗口（进程内）：自带表只覆盖少数模型，表外模型
+    // 没有窗口就只能回落到 180k 默认值（对 128k 模型等于永不触发压缩）。
+    const modelWindowCache = createModelWindowCache();
 
     function registryFor(agent) {
       return registryForWorkspace(workspaceOf(agent, defaultWorkspace));
@@ -1219,6 +1254,30 @@ export default {
       return result;
     }
 
+    /**
+     * 量当前会话的上下文压力（tokens）。
+     *
+     * 唯一可信来源是 harness 的 `ctx.tokenMeter`：compaction-basic 判定自动压缩
+     * 用的就是 `measure(session).totalTokens`。返回 null 表示计量不可用，调用方
+     * 必须回落到既有估算值，绝不因为计量失败而阻塞工作流。
+     */
+    function measureAgentContextTokens(agent) {
+      try {
+        const session = agent && agent.session;
+        if (!session) return null;
+        const meter = ctx.tokenMeter
+          || (typeof ctx.get === 'function' ? ctx.get('tokenMeter') : null);
+        if (!meter || typeof meter.measure !== 'function') return null;
+        const measurement = meter.measure(session);
+        const total = Number(measurement && measurement.totalTokens);
+        if (!Number.isFinite(total) || total < 0) return null;
+        return Math.floor(total);
+      } catch (err) {
+        log(`上下文计量失败，回落估算值：${(err && err.message) || err}`);
+        return null;
+      }
+    }
+
     /** Apply a raw goal result, resolve config transitions, activate the next state. */
     async function completeGoal(agent, rawResult) {
       const before = readState(agent);
@@ -1244,20 +1303,35 @@ export default {
         : null;
       const phaseModelForBudget = stateDef && stateDef.model && stateDef.model.model ? stateDef.model.model : '';
       const usageForBudget = state.contextUsage && typeof state.contextUsage === 'object' ? state.contextUsage : {};
-      const peakForBudget = Number.isFinite(usageForBudget.peakTokens) && usageForBudget.peakTokens > 0
-        ? usageForBudget.peakTokens
-        : usageForBudget.tokens;
+      // checklist-2：预算判定必须用真实计量。历史上这里依赖 agent/request 的
+      // payload.messages 做估算，但该 payload 只有 { agent, turn, step, signal }，
+      // 估算恒为空 → contextUsage 永远停在 0 → overBudget 永不成立 →
+      // ACCUMULATION 从不自动进入。改用 harness 的 tokenMeter 实测，并保留
+      // 「一个迭代内到过阈值就在迭代边界压缩」的峰值语义。
+      const measuredTokens = measureAgentContextTokens(agent);
+      const peakForBudget = Math.max(
+        Number.isFinite(usageForBudget.peakTokens) && usageForBudget.peakTokens > 0
+          ? usageForBudget.peakTokens
+          : (Number.isFinite(usageForBudget.tokens) ? usageForBudget.tokens : 0),
+        measuredTokens === null ? 0 : measuredTokens,
+      );
+      const budgetModelId = resolveBudgetModelId([
+        stageModelForBudget && stageModelForBudget.model ? stageModelForBudget.model : '',
+        state.selectedModel && state.selectedModel.model ? state.selectedModel.model : '',
+        phaseModelForBudget,
+        usageForBudget.modelId,
+      ]);
+      // 窗口优先用请求里带的；请求不带时用实测观测值兜底——否则表外模型会
+      // 一律落到 180k 默认压缩点，128k 窗口的模型永远等不到触发。
+      const budgetContextWindow = Number.isFinite(usageForBudget.contextWindow)
+        ? usageForBudget.contextWindow
+        : modelWindowCache.windowFor(budgetModelId);
       const contextBudget = budgetDecision({
         workflowId: state.workflowId,
         stateId: state.phase,
         contextTokens: peakForBudget,
-        modelId: resolveBudgetModelId([
-          stageModelForBudget && stageModelForBudget.model ? stageModelForBudget.model : '',
-          state.selectedModel && state.selectedModel.model ? state.selectedModel.model : '',
-          phaseModelForBudget,
-          usageForBudget.modelId,
-        ]),
-        contextWindow: usageForBudget.contextWindow,
+        modelId: budgetModelId,
+        contextWindow: budgetContextWindow,
         overrides: loadStateStore().compressionOverrides || {},
       });
       const { nextWorkflow, nextState, loopIncrement, complete } = resolveTransition({
@@ -1281,8 +1355,20 @@ export default {
         goal: null,
         pendingProtocol: null,
         dynamicPlan: { scope: 'state', stateId: null, items: [], updatedAt: Date.now() },
+        // 实测值回写 contextUsage：既给下一轮判定保留峰值，也让排查能看到真实用量。
+        contextUsage: trackContextUsage(usageForBudget, {
+          tokens: measuredTokens === null ? peakForBudget : measuredTokens,
+          modelId: budgetModelId,
+          contextWindow: budgetContextWindow,
+          workflowId: state.workflowId,
+          stateId: state.phase,
+        }),
         contextBudget: {
           ...contextBudget,
+          // checklist-2：把计量来源与峰值一并落盘，压缩触发与否都可审计、可复现。
+          measuredTokens,
+          peakTokens: peakForBudget,
+          measurementSource: measuredTokens === null ? 'fallback-estimate' : 'token-meter',
           from: `${state.workflowId}/${state.phase}`,
           to: `${nextWorkflow}/${nextState}`,
           decidedAt: Date.now(),
@@ -2673,6 +2759,16 @@ export default {
       const { architecture, featureIntents, featureList } = storesFor(exec.agent);
         const agent = exec.agent;
         const state = readState(agent);
+        // 阶段门禁（与 permissions.toolDisposition 同口径的防御性自检）：
+        // 压缩只在显式授予 compress_context 的阶段执行，'*' 不算授予。
+        const stateDef = registryFor(agent).stateOf(state.workflowId, state.phase);
+        const grantedTools = stateDef && stateDef.permissions ? stateDef.permissions.tools : undefined;
+        if (!stageExplicitlyGrants(grantedTools, 'compress_context')) {
+          throw new Error(
+            `compress_context 只在显式授予它的阶段可用（当前 ${state.workflowId}/${state.phase}）。`
+            + '需要压缩时请先调用 goto_accumulation 进入 ACCUMULATION，或由用户使用 /accumulation-and-init。',
+          );
+        }
         assertLongTermDocsFirst((state.goal && state.goal.calls) || {});
         const result = await compressContext(agent, ctx, state);
         writeState(agent, {
@@ -3272,7 +3368,7 @@ export default {
       }
 
       // declare_target 机制已移除：skill 不再受声明白名单限制。
-      const decision = toolDisposition(name, stateDef.permissions || {});
+      const decision = toolDisposition(name, stateDef.permissions || {}, `${state.workflowId}/${state.phase}`);
       if (decision.kind === 'deny') return Promise.resolve(decision);
 
       if (name === 'str_replace_editor' && stateDef.permissions && stateDef.permissions.write === false) {
@@ -3402,6 +3498,17 @@ export default {
             captureUserText(sessionId, extractUserText({ data: item }), source);
           }
           return;
+        } else if (event.type === 'request/context') {
+          // harness 只在路由/容量变化时记录一次真实容量：自带压缩点表只覆盖少数
+          // 已查证模型，表外模型（如 deepseek-v4.1-flash）必须靠这里补上窗口，
+          // 否则设置页显示的「默认/生效压缩点」与实际决策都会停在 180k。
+          const data = event.data && typeof event.data === 'object' ? event.data : {};
+          modelWindowCache.rememberRoute({
+            provider: data.provider,
+            model: data.model,
+            contextWindow: data.contextWindow,
+          });
+          return;
         } else {
           return;
         }
@@ -3440,22 +3547,10 @@ export default {
         if (!agentCtx || typeof agentCtx.on !== 'function') return;
         agentCtx.on('agent/request', async (_payload, next) => {
           let state = readState(agent);
-          // checklist-11：记录本次请求的上下文规模估算，供阶段转移时的硬编码预算判定使用。
-          const requestMessages = Array.isArray(_payload && _payload.messages) ? _payload.messages : [];
-          if (requestMessages.length > 0) {
-            const contextTokens = estimateMessagesTokens(requestMessages);
-            const payloadModel = _payload && typeof _payload.model === 'string' ? _payload.model : '';
-            const payloadWindow = _payload && Number.isFinite(_payload.contextWindow) ? _payload.contextWindow : NaN;
-            writeState(agent, {
-              contextUsage: trackContextUsage(state.contextUsage, {
-                tokens: contextTokens,
-                modelId: payloadModel,
-                contextWindow: payloadWindow,
-                workflowId: state.workflowId,
-                stateId: state.phase,
-              }),
-            });
-          }
+          // checklist-2：这里原本按 _payload.messages 估算上下文规模，但 agent/request
+          // 的 payload 只有 { agent, turn, step, signal }，根本没有 messages / model /
+          // contextWindow，估算恒为空、contextUsage 永远停在 0。上下文计量改到阶段
+          // 转移时由 tokenMeter 实测（见 measureAgentContextTokens），故移除该采样。
           // Safety net for the feature-intent approval gate: a new user message
           // while the protocol is awaiting user confirmation rejects it and
           // re-activates REQUIREMENT_RECOGNITION so the agent can revise.
@@ -3512,6 +3607,7 @@ export default {
     new ModeGateGateway(ctx, {
       registryForWorkspace,
       defaultWorkspace,
+      modelWindowCache,
       getAgent: (sessionId) => agents.get(sessionId),
       activateStateGoal,
       approveRequirementProtocol: approvePendingProtocol,

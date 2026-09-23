@@ -31,6 +31,29 @@ export const READ_ONLY_TOOL_GLOBS = ['cordis_inspect_*'];
 /** Tools considered planning-safe on top of READ_ONLY. */
 export const PLAN_TOOLS = new Set(['todo_write', 'exit_plan_mode']);
 
+/**
+ * 重量级的「压缩 / 累积」工具：它们会改写长期记忆（patterns / architecture /
+ * journal）或压缩会话历史，因此只允许在**显式授予**它们的阶段执行。
+ *
+ * `tools: '*'`（或省略 tools）的语义是「无额外工具限制」，对这批工具**不算授予**——
+ * 否则 create 的 EXECUTE / DEBUG（tools:'*'）也能在迭代内部压缩、沉淀，绕过
+ * 「只在 ACCUMULATION 压缩沉淀」的阶段边界。人工通道不受影响：
+ * goto_accumulation / accumulation_and_init 在 ALWAYS_ALLOWED 中，始终可用。
+ */
+export const STAGE_GRANTED_TOOLS = new Set([
+  'compress_context',
+  'pattern_write',
+  'pattern_overwrite',
+  'architecture_write',
+  'journal_append',
+]);
+
+/** 阶段是否把某个工具显式写进了 tools 白名单（'*' 与省略都不算）。 */
+export function stageExplicitlyGrants(tools, name) {
+  if (!Array.isArray(tools)) return false;
+  return tools.some((entry) => String(entry) === String(name));
+}
+
 /** Tool names that are always classified as writes. */
 export const KNOWN_WRITE_TOOLS = new Set([
   'write', 'edit', 'create', 'apply_patch', 'patch', 'str_replace_editor',
@@ -45,13 +68,26 @@ export function matchesReadOnlyToolGlob(name) {
 
 /**
  * Resolve a tool call against a state permission block.
+ * @param {string} name - tool name.
+ * @param {object} permissions - state `permissions` block.
+ * @param {string} [stage] - current `workflow/state` label, used in denial text.
  * @returns {{kind: 'allow'|'deny', reason?: string}}
  */
-export function toolDisposition(name, permissions) {
+export function toolDisposition(name, permissions, stage) {
   if (ALWAYS_ALLOWED.has(name)) return { kind: 'allow' };
   const perms = permissions || {};
   const write = perms.write !== false;
   const tools = perms.tools;
+
+  // 压缩 / 累积类工具必须被本阶段显式授予：'*' 不足以放行。
+  if (STAGE_GRANTED_TOOLS.has(name) && !stageExplicitlyGrants(tools, name)) {
+    const where = stage ? `（当前 ${stage}）` : '';
+    return {
+      kind: 'deny',
+      reason: `工具 ${name} 属于「压缩/累积」动作，只在显式授予它的阶段可用${where}，本阶段未授予。`
+        + '需要沉淀或压缩时，请先调用 goto_accumulation 进入 ACCUMULATION（用户可直接用 /goto-accumulation）。',
+    };
+  }
 
   if (tools !== undefined && tools !== '*' && Array.isArray(tools)) {
     const exact = tools.filter((entry) => !String(entry).includes(':'));
