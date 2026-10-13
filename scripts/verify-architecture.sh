@@ -21,9 +21,12 @@ done
 # 规则2：mode-gate 分层
 top="$(ls "$HERE"/packages/dsh-mode-gate/lib/*.js 2>/dev/null | xargs -n1 basename | sort | tr '\n' ' ')"
 [ "$top" = "client.js index.js " ] || bad "mode-gate 顶层应仅 index+client，实为: $top"
-for d in stores engine services; do
+for d in stores engine services tools gateway shared; do
   [ -d "$HERE/packages/dsh-mode-gate/lib/$d" ] || bad "mode-gate 缺 $d/"
 done
+# 子目录白名单：超出即散落
+subdirs="$(ls "$HERE/packages/dsh-mode-gate/lib" | sort | tr '\n' ' ')"
+[ "$subdirs" = "client.js engine gateway index.js services shared stores tools " ] || bad "mode-gate lib 子目录越界，实为: $subdirs"
 [ -d "$HERE/packages/dsh-mode-gate/workflows" ] || bad "mode-gate 缺 workflows/"
 ok "mode-gate 分层"
 
@@ -61,6 +64,40 @@ ver_ext="$(find "$HERE/extensions" -maxdepth 1 -name '*-[0-9]*' | head -3)"
 [ -z "$ver_ext" ] || bad "extensions/ 带版本号目录: $ver_ext"
 [ -f "$HERE/docs/INDEX.md" ] || bad "缺 docs/INDEX.md 意图索引"
 ok "构建与归档"
+
+# 规则7：containment（上级目录必然包含下级模块）
+MG="$HERE/packages/dsh-mode-gate/lib"
+# 7a. tools/gateway 只许被 index 引用（下层 stores/engine/services 不得反向引用）
+rev="$(grep -rn --include='*.js' -E "from '\.\./(tools|gateway)/" "$MG/stores" "$MG/engine" "$MG/services" || true)"
+[ -z "$rev" ] || bad "反向引用（下层→tools/gateway）:\n$rev"
+# 7b. tools/gateway 下每个模块都必须被 index 引用（无孤儿散落）
+orphan=""
+for f in "$MG"/tools/*.js "$MG"/gateway/*.js; do
+  base="$(basename "$f" .js)"
+  grep -q "$base" "$MG/index.js" || orphan="$orphan $f"
+done
+[ -z "$orphan" ] || bad "孤儿模块（index 未引用）:$orphan"
+# 7c. gateway markRemoteMethods 名单与类方法对齐（防漂移）
+drift="$(cd "$HERE" && node -e '
+const fs=require("fs");
+const src=fs.readFileSync("packages/dsh-mode-gate/lib/gateway/gateway.js","utf8");
+const block=src.match(/markRemoteMethods\(ModeGateGateway, \[([\s\S]*?)\]\);/)[1];
+const listed=[...block.matchAll(/\x27([\w$]+)\x27/g)].map(m=>m[1]);
+const methods=new Set([...src.matchAll(/async (\w+)\s*\(/g)].map(m=>m[1]));
+const missing=listed.filter(n=>!methods.has(n));
+if(missing.length){console.log(missing.join(","));process.exit(1);}' || true)"
+[ -z "$drift" ] || bad "gateway 名单漂移（无对应方法）: $drift"
+# 7d. shared 为叶模块：不得引用 lib 内兄弟模块（只许 node: 内建），被依赖方向单向
+leaf="$(grep -rn --include='*.js' -E "from '\.\./(stores|engine|services|tools|gateway)/" "$MG/shared" || true)"
+[ -z "$leaf" ] || bad "shared 越层引用兄弟模块:\n$leaf"
+# 7e. shared 下每个模块都必须被 tools/gateway/index 引用（无孤儿散落）
+sorphan=""
+for f in "$MG"/shared/*.js; do
+  base="$(basename "$f" .js)"
+  grep -rq "$base" "$MG/tools" "$MG/gateway" "$MG/index.js" || sorphan="$sorphan $f"
+done
+[ -z "$sorphan" ] || bad "shared 孤儿模块（无人引用）:$sorphan"
+ok "containment 归位"
 
 [ "$fail" = 0 ] && echo "ALL ARCHITECTURE CHECKS PASSED" || echo "ARCHITECTURE CHECKS FAILED"
 exit "$fail"

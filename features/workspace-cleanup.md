@@ -9,11 +9,11 @@
 
 ## user_visible_behavior
 
-整理后仓库根只剩真理源模块：plugins 仅 host-plane、packages 7 个双面包插件、presets、preset-actions、profile、document、去重后的 feature_intents、scripts、patches、docs/plans；重复快照与无关文件全部消失；.gitignore 新增防污染项；README 目录树更新；bash -n 与抽查 node --check 通过；一次性 chore 提交待推送。
+mode-gate host入口变薄，子模块归位正确父目录，共用工具上浮为单向被依赖的共享模块；护栏新增归位与共享层检查；行为零变化，其他包与preset不动。
 
 ## feature_intent
 
-dsh-plugins 工作区去重去污、模块化归位。
+mode-gate入口归位，共享工具上浮为公共模块
 
 ## completion_evidence
 

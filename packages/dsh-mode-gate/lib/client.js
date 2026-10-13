@@ -2116,6 +2116,37 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 			return false;
 		}
 
+		/**
+		 * Write one draft text back into the composer (public InputActions face).
+		 *
+		 * Needed because switching a workflow rides the `/mode <id>` command, whose
+		 * leadingInput claim enters the command line into the composer and submits
+		 * it — consuming whatever the user had typed. Restoring the snapshot after
+		 * the switch keeps that input from being lost.
+		 */
+		function restoreDraft(inputActions, text) {
+			if (!inputActions || typeof inputActions.setDraft !== "function") return false;
+			if (typeof text !== "string" || text.length === 0) return false;
+			try { inputActions.setDraft(text); return true; } catch (_err) { return false; }
+		}
+
+		/**
+		 * Pick a workflow without losing the composer draft.
+		 *
+		 * Order matters: snapshot the text BEFORE the switch (the `/mode` command
+		 * submit would otherwise clear it), then restore it and submit, so the new
+		 * conversation actually carries the user's input.
+		 */
+		async function startWorkflowWithDraft(options) {
+			const { sessionId, workflowId, getCommands, api, inputActions, draft } = options;
+			const snapshot = typeof draft === "string" ? draft : "";
+			await switchWorkflow({ sessionId, workflowId, getCommands, api });
+			if (snapshot.trim().length > 0) {
+				restoreDraft(inputActions, snapshot);
+				submitDraft(inputActions);
+			}
+		}
+
 		/** Best-effort return to the 对话 tab once the header (and its tab ring) is back. */
 		function activateChatView() {
 			const click = () => {
@@ -2676,8 +2707,9 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				if (busy || !hasText) return;
 				setBusy(true);
 				try {
-					await switchWorkflow({ sessionId, workflowId, getCommands, api });
-					submitDraft(inputActions);
+					/* Snapshot the live text first: the `/mode` command submit would
+					   otherwise consume it before we can hand it to the new session. */
+					await startWorkflowWithDraft({ sessionId, workflowId, getCommands, api, inputActions, draft });
 					activateChatView();
 				} finally {
 					setBusy(false);
@@ -2718,8 +2750,8 @@ status ? react.createElement("span", { style: { fontSize: 12, color: "var(--dsw-
 				if (busy || !hasText) return;
 				setBusy(true);
 				try {
-					await switchWorkflow({ sessionId, workflowId, getCommands, api });
-					submitDraft(inputActions);
+					/* Same draft-snapshot contract as the 工作流 tab chooser. */
+					await startWorkflowWithDraft({ sessionId, workflowId, getCommands, api, inputActions, draft });
 				} finally {
 					setBusy(false);
 				}

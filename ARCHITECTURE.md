@@ -28,11 +28,16 @@ scripts/                        # 运维脚本（含本护栏）
 ## mode-gate 分层（规则 2）
 
 `packages/dsh-mode-gate/lib/` 顶层只允许 `index.js`（唯一入口）+ `client.js`
-（浏览器面，零导入）。业务按职责分三层：
+（浏览器面，零导入）。业务按职责分六层（子目录白名单，超出即散落）：
 
 - `stores/` — 持久化存储（intent/tree/list、pattern、journal、history、architecture、restrictions）
 - `engine/` — 工作流引擎（goals、transitions、state、permissions、plans、protocols、workflows、bash、dependency-map、goal-engine）
 - `services/` — 横切服务（context、compression、text-limits、pattern-gate、journal-guard、git-*）
+- `tools/` — 模型可见工具注册（按 7 域拆分：workflow、preset-action、feature-intent、patterns、architecture、accumulation、git；只被 index 引用）
+- `gateway/` — Remote 网关（ModeGateGateway；markRemoteMethods 名单必须与类方法对齐）
+- `shared/` — inter-module 共享叶模块（多模块共用函数上浮于此，如 textOutput；不得引用 lib 内兄弟模块）
+
+依赖单向：index → tools/gateway → shared + stores/engine/services；shared 为叶（零 lib 内依赖）；下层不得反向引用 tools/gateway。
 
 `workflows.js` 内 `BUILTIN_WORKFLOW_DIR` 必须与包内 `workflows/` 目录保持同包。
 
